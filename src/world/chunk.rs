@@ -2,7 +2,7 @@
 
 use glam::Vec3;
 
-use crate::constants::{CHUNK_SIZE, CHUNK_SIZE_F32, CHUNK_SIZE_I32};
+use crate::constants::{CHUNK_SIZE, CHUNK_SIZE_F32, CHUNK_SIZE_I32, BLOCK_SCALE};
 
 /// Position of a chunk in chunk coordinates
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -14,18 +14,20 @@ pub struct ChunkPos {
 
 impl ChunkPos {
     pub fn from_world_pos(pos: Vec3) -> Self {
+        let chunk_world_size = CHUNK_SIZE_F32 * BLOCK_SCALE;
         Self {
-            x: (pos.x / CHUNK_SIZE_F32).floor() as i32,
-            y: (pos.y / CHUNK_SIZE_F32).floor() as i32,
-            z: (pos.z / CHUNK_SIZE_F32).floor() as i32,
+            x: (pos.x / chunk_world_size).floor() as i32,
+            y: (pos.y / chunk_world_size).floor() as i32,
+            z: (pos.z / chunk_world_size).floor() as i32,
         }
     }
 
     pub fn world_origin(&self) -> Vec3 {
+        let chunk_world_size = CHUNK_SIZE_F32 * BLOCK_SCALE;
         Vec3::new(
-            self.x as f32 * CHUNK_SIZE_F32,
-            self.y as f32 * CHUNK_SIZE_F32,
-            self.z as f32 * CHUNK_SIZE_F32,
+            self.x as f32 * chunk_world_size,
+            self.y as f32 * chunk_world_size,
+            self.z as f32 * chunk_world_size,
         )
     }
 

@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use super::chunk::{Block, Chunk, ChunkPos};
-use crate::constants::{CHUNK_SIZE, CHUNK_SIZE_I32};
+use crate::constants::{CHUNK_SIZE, CHUNK_SIZE_I32, BLOCK_SCALE};
 
 /// Level of detail for chunk meshing
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,9 +150,9 @@ fn build_chunk_mesh_simple(
                     continue;
                 }
 
-                let bx = world_origin.x + x as f32;
-                let by = world_origin.y + y as f32;
-                let bz = world_origin.z + z as f32;
+                let bx = world_origin.x + x as f32 * BLOCK_SCALE;
+                let by = world_origin.y + y as f32 * BLOCK_SCALE;
+                let bz = world_origin.z + z as f32 * BLOCK_SCALE;
 
                 let tex_indices = block.texture_indices();
 
@@ -231,13 +231,14 @@ fn add_quad(
 // Top face (+Y normal) - camera above looking down
 fn add_face_top(v: &mut Vec<ChunkVertex>, i: &mut Vec<u32>, x: f32, y: f32, z: f32, tex: u32) {
     let (uv0, uv1, uv2, uv3) = get_tile_uvs(tex);
+    let s = BLOCK_SCALE;
     // Looking down from +Y: +X is right, +Z is "down" on screen
     add_quad(v, i,
         [
-            [x,       y + 1.0, z],         // 0: back-left (screen bottom-left)
-            [x + 1.0, y + 1.0, z],         // 1: back-right (screen bottom-right)
-            [x + 1.0, y + 1.0, z + 1.0],   // 2: front-right (screen top-right)
-            [x,       y + 1.0, z + 1.0],   // 3: front-left (screen top-left)
+            [x,     y + s, z],       // 0: back-left (screen bottom-left)
+            [x + s, y + s, z],       // 1: back-right (screen bottom-right)
+            [x + s, y + s, z + s],   // 2: front-right (screen top-right)
+            [x,     y + s, z + s],   // 3: front-left (screen top-left)
         ],
         [0.0, 1.0, 0.0],
         [uv0, uv1, uv2, uv3],
@@ -247,13 +248,14 @@ fn add_face_top(v: &mut Vec<ChunkVertex>, i: &mut Vec<u32>, x: f32, y: f32, z: f
 // Bottom face (-Y normal) - camera below looking up
 fn add_face_bottom(v: &mut Vec<ChunkVertex>, i: &mut Vec<u32>, x: f32, y: f32, z: f32, tex: u32) {
     let (uv0, uv1, uv2, uv3) = get_tile_uvs(tex);
+    let s = BLOCK_SCALE;
     // Looking up from -Y: +X is right, +Z is "up" on screen
     add_quad(v, i,
         [
-            [x,       y, z + 1.0],   // 0: front-left (screen bottom-left)
-            [x + 1.0, y, z + 1.0],   // 1: front-right (screen bottom-right)
-            [x + 1.0, y, z],         // 2: back-right (screen top-right)
-            [x,       y, z],         // 3: back-left (screen top-left)
+            [x,     y, z + s],   // 0: front-left (screen bottom-left)
+            [x + s, y, z + s],   // 1: front-right (screen bottom-right)
+            [x + s, y, z],       // 2: back-right (screen top-right)
+            [x,     y, z],       // 3: back-left (screen top-left)
         ],
         [0.0, -1.0, 0.0],
         [uv0, uv1, uv2, uv3],
@@ -263,13 +265,14 @@ fn add_face_bottom(v: &mut Vec<ChunkVertex>, i: &mut Vec<u32>, x: f32, y: f32, z
 // Front face (+Z normal) - camera in front looking at -Z
 fn add_face_front(v: &mut Vec<ChunkVertex>, i: &mut Vec<u32>, x: f32, y: f32, z: f32, tex: u32) {
     let (uv0, uv1, uv2, uv3) = get_tile_uvs(tex);
+    let s = BLOCK_SCALE;
     // Looking at face from +Z: +X is left (mirrored), +Y is up
     add_quad(v, i,
         [
-            [x + 1.0, y,       z + 1.0],   // 0: bottom-right of block (screen bottom-left)
-            [x,       y,       z + 1.0],   // 1: bottom-left of block (screen bottom-right)
-            [x,       y + 1.0, z + 1.0],   // 2: top-left of block (screen top-right)
-            [x + 1.0, y + 1.0, z + 1.0],   // 3: top-right of block (screen top-left)
+            [x + s, y,     z + s],   // 0: bottom-right of block (screen bottom-left)
+            [x,     y,     z + s],   // 1: bottom-left of block (screen bottom-right)
+            [x,     y + s, z + s],   // 2: top-left of block (screen top-right)
+            [x + s, y + s, z + s],   // 3: top-right of block (screen top-left)
         ],
         [0.0, 0.0, 1.0],
         [uv0, uv1, uv2, uv3],
@@ -279,13 +282,14 @@ fn add_face_front(v: &mut Vec<ChunkVertex>, i: &mut Vec<u32>, x: f32, y: f32, z:
 // Back face (-Z normal) - camera behind looking at +Z
 fn add_face_back(v: &mut Vec<ChunkVertex>, i: &mut Vec<u32>, x: f32, y: f32, z: f32, tex: u32) {
     let (uv0, uv1, uv2, uv3) = get_tile_uvs(tex);
+    let s = BLOCK_SCALE;
     // Looking at face from -Z: +X is right, +Y is up
     add_quad(v, i,
         [
-            [x,       y,       z],   // 0: bottom-left (screen bottom-left)
-            [x + 1.0, y,       z],   // 1: bottom-right (screen bottom-right)
-            [x + 1.0, y + 1.0, z],   // 2: top-right (screen top-right)
-            [x,       y + 1.0, z],   // 3: top-left (screen top-left)
+            [x,     y,     z],   // 0: bottom-left (screen bottom-left)
+            [x + s, y,     z],   // 1: bottom-right (screen bottom-right)
+            [x + s, y + s, z],   // 2: top-right (screen top-right)
+            [x,     y + s, z],   // 3: top-left (screen top-left)
         ],
         [0.0, 0.0, -1.0],
         [uv0, uv1, uv2, uv3],
@@ -295,13 +299,14 @@ fn add_face_back(v: &mut Vec<ChunkVertex>, i: &mut Vec<u32>, x: f32, y: f32, z: 
 // Left face (-X normal) - camera to the left looking at +X
 fn add_face_left(v: &mut Vec<ChunkVertex>, i: &mut Vec<u32>, x: f32, y: f32, z: f32, tex: u32) {
     let (uv0, uv1, uv2, uv3) = get_tile_uvs(tex);
+    let s = BLOCK_SCALE;
     // Looking at face from -X: +Z is right, +Y is up
     add_quad(v, i,
         [
-            [x, y,       z],         // 0: bottom-back
-            [x, y + 1.0, z],         // 1: top-back
-            [x, y + 1.0, z + 1.0],   // 2: top-front
-            [x, y,       z + 1.0],   // 3: bottom-front
+            [x, y,     z],       // 0: bottom-back
+            [x, y + s, z],       // 1: top-back
+            [x, y + s, z + s],   // 2: top-front
+            [x, y,     z + s],   // 3: bottom-front
         ],
         [-1.0, 0.0, 0.0],
         [uv0, uv3, uv2, uv1],  // Reordered to match vertex order
@@ -311,13 +316,14 @@ fn add_face_left(v: &mut Vec<ChunkVertex>, i: &mut Vec<u32>, x: f32, y: f32, z: 
 // Right face (+X normal) - camera to the right looking at -X
 fn add_face_right(v: &mut Vec<ChunkVertex>, i: &mut Vec<u32>, x: f32, y: f32, z: f32, tex: u32) {
     let (uv0, uv1, uv2, uv3) = get_tile_uvs(tex);
+    let s = BLOCK_SCALE;
     // Looking at face from +X: +Z is left (mirrored), +Y is up
     add_quad(v, i,
         [
-            [x + 1.0, y,       z + 1.0],   // 0: bottom-front
-            [x + 1.0, y + 1.0, z + 1.0],   // 1: top-front
-            [x + 1.0, y + 1.0, z],         // 2: top-back
-            [x + 1.0, y,       z],         // 3: bottom-back
+            [x + s, y,     z + s],   // 0: bottom-front
+            [x + s, y + s, z + s],   // 1: top-front
+            [x + s, y + s, z],       // 2: top-back
+            [x + s, y,     z],       // 3: bottom-back
         ],
         [1.0, 0.0, 0.0],
         [uv0, uv3, uv2, uv1],  // Reordered to match vertex order
@@ -584,12 +590,12 @@ fn emit_greedy_quad(
         (Axis::Z, true) => [0.0, 0.0, 1.0],
     };
 
-    // Calculate world positions of quad corners
-    let d = slice as f32 + if positive { 1.0 } else { 0.0 };
-    let u0 = start_u as f32;
-    let v0 = start_v as f32;
-    let u1 = (start_u + width) as f32;
-    let v1 = (start_v + height) as f32;
+    // Calculate world positions of quad corners (scaled by BLOCK_SCALE)
+    let d = slice as f32 * BLOCK_SCALE + if positive { BLOCK_SCALE } else { 0.0 };
+    let u0 = start_u as f32 * BLOCK_SCALE;
+    let v0 = start_v as f32 * BLOCK_SCALE;
+    let u1 = (start_u + width) as f32 * BLOCK_SCALE;
+    let v1 = (start_v + height) as f32 * BLOCK_SCALE;
 
     // Convert (d, u, v) coordinates to world (x, y, z)
     let (p00, p01, p10, p11) = match axis {

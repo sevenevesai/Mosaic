@@ -2,7 +2,7 @@
 
 ## Must Do (Critical / Blocking)
 
-- [ ] **Fix greedy meshing** - Current simple meshing works but uses 6x more triangles. Greedy meshing had winding order issues. Need to carefully implement with correct CCW vertex order for merged quads.
+- [x] **Fix greedy meshing** - Current simple meshing works but uses 6x more triangles. Greedy meshing had winding order issues. Need to carefully implement with correct CCW vertex order for merged quads.
 
 - [ ] **Block placement/breaking** - Core gameplay. Raycast from camera, modify chunk data, trigger remesh.
 

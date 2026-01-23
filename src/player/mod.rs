@@ -10,40 +10,82 @@ use winit::{
     keyboard::KeyCode,
 };
 
+use crate::constants::{
+    PLAYER_WIDTH, PLAYER_HEIGHT, PLAYER_EYE_HEIGHT,
+    GRAVITY, JUMP_VELOCITY, TERMINAL_VELOCITY,
+};
 use crate::renderer::Camera;
 use crate::world::WorldManager;
+
+/// Axis-aligned bounding box
+#[derive(Clone, Copy)]
+struct Aabb {
+    min: Vec3,
+    max: Vec3,
+}
+
+impl Aabb {
+    /// Create AABB from player feet position
+    fn from_feet_pos(feet: Vec3) -> Self {
+        let half_width = PLAYER_WIDTH / 2.0;
+        Self {
+            min: Vec3::new(feet.x - half_width, feet.y, feet.z - half_width),
+            max: Vec3::new(feet.x + half_width, feet.y + PLAYER_HEIGHT, feet.z + half_width),
+        }
+    }
+
+    /// Check if this AABB intersects a block at given world coordinates
+    fn intersects_block(&self, bx: i32, by: i32, bz: i32) -> bool {
+        let block_min = Vec3::new(bx as f32, by as f32, bz as f32);
+        let block_max = block_min + Vec3::ONE;
+
+        self.min.x < block_max.x && self.max.x > block_min.x &&
+        self.min.y < block_max.y && self.max.y > block_min.y &&
+        self.min.z < block_max.z && self.max.z > block_min.z
+    }
+}
 
 /// Player state
 pub struct Player {
     pub camera: Camera,
     velocity: Vec3,
 
+    /// Player feet position (camera is offset by PLAYER_EYE_HEIGHT)
+    feet_pos: Vec3,
+
     // Input state
     move_forward: bool,
     move_backward: bool,
     move_left: bool,
     move_right: bool,
-    move_up: bool,
-    move_down: bool,
+    jump_pressed: bool,
+    sneak: bool,
     sprint: bool,
 
     // Physics
     on_ground: bool,
+
+    // Mode
+    fly_mode: bool,
 }
 
 impl Player {
     pub fn new(position: Vec3) -> Self {
+        // Position is camera position, calculate feet position
+        let feet_pos = Vec3::new(position.x, position.y - PLAYER_EYE_HEIGHT, position.z);
         Self {
             camera: Camera::new(position, 16.0 / 9.0),
             velocity: Vec3::ZERO,
+            feet_pos,
             move_forward: false,
             move_backward: false,
             move_left: false,
             move_right: false,
-            move_up: false,
-            move_down: false,
+            jump_pressed: false,
+            sneak: false,
             sprint: false,
             on_ground: false,
+            fly_mode: false,
         }
     }
 
@@ -57,9 +99,15 @@ impl Player {
             KeyCode::KeyS => self.move_backward = pressed,
             KeyCode::KeyA => self.move_left = pressed,
             KeyCode::KeyD => self.move_right = pressed,
-            KeyCode::Space => self.move_up = pressed,
-            KeyCode::ShiftLeft | KeyCode::ShiftRight => self.move_down = pressed,
+            KeyCode::Space => self.jump_pressed = pressed,
+            KeyCode::ShiftLeft | KeyCode::ShiftRight => self.sneak = pressed,
             KeyCode::ControlLeft | KeyCode::ControlRight => self.sprint = pressed,
+            KeyCode::KeyF => {
+                if pressed {
+                    self.fly_mode = !self.fly_mode;
+                    tracing::info!("Fly mode: {}", if self.fly_mode { "ON" } else { "OFF" });
+                }
+            }
             _ => {}
         }
     }
@@ -90,6 +138,21 @@ impl Player {
     pub fn update(&mut self, dt: Duration, world: Option<&WorldManager>) {
         let dt_secs = dt.as_secs_f32();
 
+        if self.fly_mode {
+            self.update_fly_mode(dt_secs);
+        } else {
+            self.update_normal_mode(dt_secs, world);
+        }
+
+        // Sync camera position with feet position
+        self.camera.position = Vec3::new(
+            self.feet_pos.x,
+            self.feet_pos.y + PLAYER_EYE_HEIGHT,
+            self.feet_pos.z,
+        );
+    }
+
+    fn update_fly_mode(&mut self, dt_secs: f32) {
         // Calculate movement direction
         let mut move_dir = Vec3::ZERO;
 
@@ -106,42 +169,150 @@ impl Player {
             move_dir += self.camera.right();
         }
 
-        // Horizontal movement only for WASD
+        // Full 3D movement in fly mode
+        if self.jump_pressed {
+            move_dir.y += 1.0;
+        }
+        if self.sneak {
+            move_dir.y -= 1.0;
+        }
+
+        if move_dir.length_squared() > 0.0 {
+            move_dir = move_dir.normalize();
+        }
+
+        // Speed
+        let base_speed = 15.0;
+        let speed = if self.sprint { base_speed * 3.0 } else { base_speed };
+
+        // Instant velocity in fly mode
+        self.velocity = move_dir * speed;
+        self.feet_pos += self.velocity * dt_secs;
+    }
+
+    fn update_normal_mode(&mut self, dt_secs: f32, world: Option<&WorldManager>) {
+        // Calculate horizontal movement direction
+        let mut move_dir = Vec3::ZERO;
+
+        if self.move_forward {
+            move_dir += self.camera.forward();
+        }
+        if self.move_backward {
+            move_dir -= self.camera.forward();
+        }
+        if self.move_left {
+            move_dir -= self.camera.right();
+        }
+        if self.move_right {
+            move_dir += self.camera.right();
+        }
+
+        // Horizontal only for WASD
         move_dir.y = 0.0;
         if move_dir.length_squared() > 0.0 {
             move_dir = move_dir.normalize();
         }
 
-        // Vertical movement (creative mode fly)
-        if self.move_up {
-            move_dir.y += 1.0;
-        }
-        if self.move_down {
-            move_dir.y -= 1.0;
-        }
-
         // Speed
-        let base_speed = 10.0;
-        let speed = if self.sprint { base_speed * 2.5 } else { base_speed };
+        let base_speed = 4.3; // Minecraft walking speed
+        let speed = if self.sprint { base_speed * 1.3 } else { base_speed };
 
-        // Apply movement
-        let target_velocity = move_dir * speed;
-        let acceleration = 20.0;
+        // Set horizontal velocity
+        let target_horizontal = move_dir * speed;
+        let accel = if self.on_ground { 20.0 } else { 5.0 }; // Less control in air
+        self.velocity.x = lerp(self.velocity.x, target_horizontal.x, accel * dt_secs);
+        self.velocity.z = lerp(self.velocity.z, target_horizontal.z, accel * dt_secs);
 
-        // Smooth acceleration
-        self.velocity = self.velocity.lerp(target_velocity, (acceleration * dt_secs).min(1.0));
+        // Apply gravity
+        self.velocity.y -= GRAVITY * dt_secs;
+        self.velocity.y = self.velocity.y.max(-TERMINAL_VELOCITY);
 
-        // Move camera
-        self.camera.translate(self.velocity * dt_secs);
+        // Jump
+        if self.jump_pressed && self.on_ground {
+            self.velocity.y = JUMP_VELOCITY;
+            self.on_ground = false;
+        }
 
-        // Simple collision with ground (y = 0)
-        // In production, do proper voxel collision
-        if self.camera.position.y < 2.0 {
-            self.camera.position.y = 2.0;
+        // Move with collision detection
+        if let Some(world) = world {
+            self.move_with_collision(dt_secs, world);
+        } else {
+            // No world, just move freely
+            self.feet_pos += self.velocity * dt_secs;
+        }
+    }
+
+    fn move_with_collision(&mut self, dt_secs: f32, world: &WorldManager) {
+        let delta = self.velocity * dt_secs;
+
+        // Move and collide on each axis separately
+        // This prevents getting stuck on corners and allows sliding along walls
+
+        // X axis
+        self.feet_pos.x += delta.x;
+        if self.check_collision(world) {
+            self.feet_pos.x -= delta.x;
+            self.velocity.x = 0.0;
+        }
+
+        // Y axis
+        self.feet_pos.y += delta.y;
+        if self.check_collision(world) {
+            self.feet_pos.y -= delta.y;
+            if self.velocity.y < 0.0 {
+                self.on_ground = true;
+            }
             self.velocity.y = 0.0;
-            self.on_ground = true;
         } else {
             self.on_ground = false;
         }
+
+        // Z axis
+        self.feet_pos.z += delta.z;
+        if self.check_collision(world) {
+            self.feet_pos.z -= delta.z;
+            self.velocity.z = 0.0;
+        }
+
+        // Additional ground check (for standing still on ground)
+        if !self.on_ground {
+            let ground_check_pos = Vec3::new(self.feet_pos.x, self.feet_pos.y - 0.01, self.feet_pos.z);
+            let ground_aabb = Aabb::from_feet_pos(ground_check_pos);
+            if self.aabb_collides_world(&ground_aabb, world) {
+                self.on_ground = true;
+            }
+        }
     }
+
+    fn check_collision(&self, world: &WorldManager) -> bool {
+        let aabb = Aabb::from_feet_pos(self.feet_pos);
+        self.aabb_collides_world(&aabb, world)
+    }
+
+    fn aabb_collides_world(&self, aabb: &Aabb, world: &WorldManager) -> bool {
+        // Check all blocks that could intersect the AABB
+        let min_bx = aabb.min.x.floor() as i32;
+        let max_bx = aabb.max.x.ceil() as i32;
+        let min_by = aabb.min.y.floor() as i32;
+        let max_by = aabb.max.y.ceil() as i32;
+        let min_bz = aabb.min.z.floor() as i32;
+        let max_bz = aabb.max.z.ceil() as i32;
+
+        for by in min_by..max_by {
+            for bz in min_bz..max_bz {
+                for bx in min_bx..max_bx {
+                    if let Some(block) = world.get_block(bx, by, bz) {
+                        if block.is_solid() && aabb.intersects_block(bx, by, bz) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+}
+
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t.min(1.0)
 }

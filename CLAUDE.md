@@ -44,13 +44,14 @@ src/
 ### Working
 - Procedural terrain with caves, ores, mountains
 - Chunk streaming with 8 worker threads
-- Basic face-culled meshing (simple, not greedy)
+- Simple face-culled meshing with correct winding order (all 6 faces render properly)
 - Frustum culling (skips off-screen chunks)
 - Low-latency rendering (Mailbox present mode)
 - FPS camera with mouse look
+- Back-face culling enabled (CCW front faces)
 
 ### Known Issues
-- **Greedy meshing disabled** - Had winding order bugs, reverted to simple per-face meshing
+- **Greedy meshing disabled** - `build_chunk_mesh_lod()` exists but has winding bugs; using `build_chunk_mesh()` instead
 - **GPU profiler readback** - Disabled due to wgpu 0.19 async buffer mapping complexity
 - **LOD system** - Infrastructure exists but currently always returns Full LOD
 - **F3 overlay** - Logs to console only, no on-screen display
@@ -111,22 +112,27 @@ Edit `RENDER_DISTANCE` in `src/lib.rs`. Higher = more chunks = more GPU/CPU load
 
 ### Debugging Mesh Issues
 - Check `src/world/meshing.rs` - face functions `add_face_*`
-- Winding order must be CCW when viewed from outside block
-- Vertices: bottom-left → bottom-right → top-right → top-left
+- To test if faces are being generated: temporarily set `cull_mode: None` in `pipeline.rs:112`
+- If faces appear with culling off but not on: winding order is wrong
+- If faces are missing even with culling off: visibility check (`is_face_visible`) is wrong
+- World manager calls `build_chunk_mesh()` (simple) not `build_chunk_mesh_lod()` (greedy)
 
 ---
 
 ## Winding Order Reference
 
-For backface culling with CCW front faces, vertices must appear counter-clockwise when viewed from the face's normal direction:
+For backface culling with CCW front faces (`wgpu::FrontFace::Ccw`), the triangle's computed normal must point toward the camera.
 
+**Current implementation** in `add_quad()`:
 ```
-   3----2      Vertex order: 0 → 1 → 2 → 3 (CCW)
-   |    |      Triangle 1: 0-1-2
-   0----1      Triangle 2: 0-2-3
+   3----2      Triangles: 0-2-1 and 0-3-2 (reversed from naive order)
+   |    |      This produces CCW winding when viewed from outside
+   0----1
 ```
 
-Each face function in `meshing.rs` defines vertices as seen from outside the block.
+**Important:** Left and right faces (`add_face_left`, `add_face_right`) have vertices in a different order than other faces, with UVs reordered to match: `[uv0, uv3, uv2, uv1]`. This was necessary to achieve consistent CCW winding across all 6 faces.
+
+To verify winding: compute `(v1-v0) × (v2-v0)` - result should point in same direction as face normal.
 
 ---
 
