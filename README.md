@@ -1,0 +1,3 @@
+# Project
+
+Initialized with BitGit
