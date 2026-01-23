@@ -1,0 +1,46 @@
+[package]
+name = "blocks"
+version = "0.1.0"
+edition = "2021"
+description = "A modern voxel engine built for scalability and performance"
+
+[dependencies]
+# Graphics
+wgpu = "0.19"
+winit = "0.29"
+bytemuck = { version = "1.14", features = ["derive"] }
+
+# Math
+glam = { version = "0.25", features = ["bytemuck"] }
+noise = "0.9"
+
+# Parallelism
+rayon = "1.8"
+crossbeam-channel = "0.5"
+parking_lot = "0.12"
+
+# Utilities
+pollster = "0.3"
+num_cpus = "1.16"
+env_logger = "0.11"
+log = "0.4"
+ahash = "0.8"
+image = { version = "0.24", default-features = false, features = ["png"] }
+
+# Profiling
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[profile.release-debug]
+inherits = "release"
+debug = true

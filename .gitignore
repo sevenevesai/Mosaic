@@ -1,0 +1,84 @@
+# Build artifacts
+/target/
+**/*.rs.bk
+
+# Cargo
+# Note: Cargo.lock IS committed for binaries (ensures reproducible builds)
+.cargo/
+
+# IDE and editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+*.sublime-project
+*.sublime-workspace
+
+# OS generated
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# Logs and debugging
+*.log
+*.log.*
+crash-*.txt
+
+# Profiling
+*.prof
+*.profraw
+perf.data
+perf.data.old
+flamegraph.svg
+cachegrind.out.*
+callgrind.out.*
+
+# GPU debugging
+*.rdc
+*.rgp
+renderdoc/
+
+# World saves (if you want to ignore test saves)
+# saves/
+# *.world
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.orig
+
+# Test artifacts
+/coverage/
+*.gcda
+*.gcno
+lcov.info
+tarpaulin-report.html
+
+# Documentation build
+/doc/
+/docs/build/
+
+# Asset source files (keep compiled assets, ignore source)
+# *.psd
+# *.xcf
+# *.blend
+# *.blend1
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Benchmark results
+/criterion/
+/benches/target/
