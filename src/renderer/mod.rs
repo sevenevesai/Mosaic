@@ -3,10 +3,12 @@
 //! Handles GPU initialization, pipeline management, and frame rendering.
 
 mod camera;
+mod debug_overlay;
 mod pipeline;
 mod texture;
 
 pub use camera::{Camera, Frustum};
+pub use debug_overlay::{DebugOverlay, DebugMetrics};
 pub use texture::TextureAtlas;
 
 use std::sync::Arc;
@@ -60,6 +62,9 @@ pub struct Renderer {
     // Block outline rendering
     line_pipeline: wgpu::RenderPipeline,
     outline_vertex_buffer: wgpu::Buffer,
+
+    // Debug overlay
+    debug_overlay: DebugOverlay,
 
     // Stats from last frame
     pub stats: RenderStats,
@@ -269,6 +274,11 @@ impl Renderer {
         // Create depth texture
         let depth_texture = Self::create_depth_texture(&device, &config);
 
+        // Create debug overlay
+        let mut debug_overlay = DebugOverlay::new(&device, surface_format);
+        debug_overlay.upload_font(&queue);
+        debug_overlay.update_screen_size(size.width as f32, size.height as f32);
+
         Self {
             surface,
             device,
@@ -287,6 +297,7 @@ impl Renderer {
             crosshair_vertex_buffer,
             line_pipeline,
             outline_vertex_buffer,
+            debug_overlay,
             stats: RenderStats::default(),
         }
     }
@@ -298,7 +309,16 @@ impl Renderer {
             self.config.height = new_size.height;
             self.surface.configure(&self.device, &self.config);
             self.depth_texture = Self::create_depth_texture(&self.device, &self.config);
+            self.debug_overlay.update_screen_size(new_size.width as f32, new_size.height as f32);
         }
+    }
+
+    pub fn toggle_debug_overlay(&mut self) {
+        self.debug_overlay.toggle();
+    }
+
+    pub fn is_debug_overlay_enabled(&self) -> bool {
+        self.debug_overlay.is_enabled()
     }
 
     fn create_depth_texture(
@@ -328,6 +348,7 @@ impl Renderer {
         world: &WorldManager,
         _profiler: &FrameProfiler,
         target_block: Option<[i32; 3]>,
+        debug_metrics: &DebugMetrics,
     ) -> Result<(), wgpu::SurfaceError> {
         // Poll GPU profiler for previous frame results
         self.gpu_profiler.poll_results(&self.device);
@@ -465,6 +486,9 @@ impl Renderer {
             render_pass.set_pipeline(&self.ui_pipeline);
             render_pass.set_vertex_buffer(0, self.crosshair_vertex_buffer.slice(..));
             render_pass.draw(0..12, 0..1);
+
+            // Render debug overlay
+            self.debug_overlay.render(&mut render_pass, &self.queue, debug_metrics);
         }
 
         // Resolve GPU timestamps

@@ -4,9 +4,9 @@
 
 - [x] **Fix greedy meshing** - Current simple meshing works but uses 6x more triangles. Greedy meshing had winding order issues. Need to carefully implement with correct CCW vertex order for merged quads.
 
-- [ ] **Block placement/breaking** - Core gameplay. Raycast from camera, modify chunk data, trigger remesh.
+- [x] **Block placement/breaking** - Core gameplay. Raycast from camera, modify chunk data, trigger remesh.
 
-- [ ] **Collision detection** - Player currently flies through blocks. Need AABB vs voxel collision for walking/jumping.
+- [x] **Collision detection** - Player currently flies through blocks. Need AABB vs voxel collision for walking/jumping.
 
 - [ ] **Chunk save/load** - Persist world to disk. Simple format: chunk position + block data.
 

@@ -12,9 +12,9 @@ use winit::{
 };
 
 use crate::player::Player;
-use crate::renderer::Renderer;
+use crate::renderer::{Renderer, DebugMetrics};
 use crate::utils::profiler::FrameProfiler;
-use crate::world::WorldManager;
+use crate::world::{WorldManager, ChunkPos};
 
 /// Main application state
 pub struct App {
@@ -110,7 +110,7 @@ impl App {
                             self.toggle_cursor_grab();
                         }
                         KeyCode::F3 if pressed => {
-                            self.profiler.toggle_display();
+                            self.renderer.toggle_debug_overlay();
                         }
                         _ => {
                             self.player.handle_key(key_code, pressed);
@@ -177,9 +177,37 @@ impl App {
             None
         };
 
+        // Build debug metrics
+        let pos = self.player.position();
+        let chunk_pos = ChunkPos::from_world_pos(pos);
+        let render_stats = self.profiler.render_stats();
+        let debug_metrics = DebugMetrics {
+            fps: self.profiler.fps() as f32,
+            frame_time_ms: self.profiler.frame_time_ms() as f32,
+            world_update_ms: self.profiler.section_time_ms("world_update") as f32,
+            render_ms: self.profiler.section_time_ms("render") as f32,
+            chunks_pending_gen: self.world.pending_generation_count() as u32,
+            chunks_pending_mesh: self.world.pending_meshing_count() as u32,
+            triangles: render_stats.triangles,
+            draw_calls: render_stats.chunks_rendered,
+            chunks_rendered: render_stats.chunks_rendered,
+            chunks_culled: render_stats.chunks_culled,
+            gpu_time_ms: render_stats.gpu_time_ms,
+            loaded_chunks: self.world.loaded_chunks_count() as u32,
+            total_vertices: self.world.total_vertices(),
+            pos_x: pos.x,
+            pos_y: pos.y,
+            pos_z: pos.z,
+            chunk_x: chunk_pos.x,
+            chunk_y: chunk_pos.y,
+            chunk_z: chunk_pos.z,
+            yaw: self.player.camera.yaw,
+            pitch: self.player.camera.pitch,
+        };
+
         // Render
         self.profiler.begin_section("render");
-        match self.renderer.render(&self.player.camera, &self.world, &self.profiler, target_block) {
+        match self.renderer.render(&self.player.camera, &self.world, &self.profiler, target_block, &debug_metrics) {
             Ok(_) => {
                 // Update profiler with render stats
                 self.profiler.update_render_stats(self.renderer.stats.clone());

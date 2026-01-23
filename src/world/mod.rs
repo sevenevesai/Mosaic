@@ -387,6 +387,27 @@ impl WorldManager {
         self.meshes.values()
     }
 
+    /// Get counts for debug display
+    pub fn pending_generation_count(&self) -> usize {
+        self.pending_generation.len()
+    }
+
+    pub fn pending_meshing_count(&self) -> usize {
+        self.pending_meshing.len()
+    }
+
+    pub fn loaded_chunks_count(&self) -> usize {
+        self.chunks.read().len()
+    }
+
+    pub fn mesh_count(&self) -> usize {
+        self.meshes.len()
+    }
+
+    pub fn total_vertices(&self) -> u64 {
+        self.meshes.values().map(|m| m.vertices.len() as u64).sum()
+    }
+
     /// Get a block at world coordinates
     pub fn get_block(&self, x: i32, y: i32, z: i32) -> Option<Block> {
         let chunk_pos = ChunkPos {

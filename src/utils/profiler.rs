@@ -183,6 +183,17 @@ impl FrameProfiler {
     pub fn frame_time_ms(&self) -> f64 {
         self.frame_times.average().as_secs_f64() * 1000.0
     }
+
+    pub fn section_time_ms(&self, name: &str) -> f64 {
+        self.sections
+            .get(name)
+            .map(|s| s.samples.average().as_secs_f64() * 1000.0)
+            .unwrap_or(0.0)
+    }
+
+    pub fn render_stats(&self) -> &RenderStats {
+        &self.render_stats
+    }
 }
 
 impl Default for FrameProfiler {
