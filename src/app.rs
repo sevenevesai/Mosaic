@@ -158,6 +158,8 @@ impl App {
         // Update player
         if self.cursor_grabbed {
             self.player.update(dt, Some(&self.world));
+            // Process block break/place interactions
+            self.player.process_block_interactions(&mut self.world);
         }
 
         // Update world (chunk loading, meshing)
@@ -168,9 +170,16 @@ impl App {
         // Upload meshes to GPU
         self.world.upload_meshes(self.renderer.device());
 
+        // Get target block for outline rendering
+        let target_block = if self.cursor_grabbed {
+            self.player.get_target_block(&self.world)
+        } else {
+            None
+        };
+
         // Render
         self.profiler.begin_section("render");
-        match self.renderer.render(&self.player.camera, &self.world, &self.profiler) {
+        match self.renderer.render(&self.player.camera, &self.world, &self.profiler, target_block) {
             Ok(_) => {
                 // Update profiler with render stats
                 self.profiler.update_render_stats(self.renderer.stats.clone());

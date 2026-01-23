@@ -48,6 +48,9 @@ pub mod constants {
     /// Camera height above player feet
     pub const PLAYER_EYE_HEIGHT: f32 = 1.62;
 
+    /// Player reach distance for block interaction (blocks)
+    pub const PLAYER_REACH: f32 = 5.0;
+
     /// Gravity acceleration (blocks/s²)
     pub const GRAVITY: f32 = 28.0;
     /// Jump initial velocity (blocks/s)

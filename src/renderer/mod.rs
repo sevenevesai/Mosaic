@@ -17,6 +17,8 @@ use crate::utils::gpu_profiler::GpuProfiler;
 use crate::utils::profiler::FrameProfiler;
 use crate::world::WorldManager;
 
+use pipeline::{UiVertex, LineVertex};
+
 /// Render statistics for the current frame
 #[derive(Default, Clone)]
 pub struct RenderStats {
@@ -50,6 +52,14 @@ pub struct Renderer {
 
     // GPU profiler
     gpu_profiler: GpuProfiler,
+
+    // UI rendering (crosshair)
+    ui_pipeline: wgpu::RenderPipeline,
+    crosshair_vertex_buffer: wgpu::Buffer,
+
+    // Block outline rendering
+    line_pipeline: wgpu::RenderPipeline,
+    outline_vertex_buffer: wgpu::Buffer,
 
     // Stats from last frame
     pub stats: RenderStats,
@@ -216,6 +226,46 @@ impl Renderer {
             &texture_bind_group_layout,
         );
 
+        // Create UI pipeline for crosshair
+        let ui_pipeline = pipeline::create_ui_pipeline(&device, surface_format);
+
+        // Create crosshair vertex buffer (two thin rectangles forming a +)
+        let crosshair_size = 0.02; // Size in clip space
+        let crosshair_thickness = 0.003;
+        let crosshair_vertices = [
+            // Horizontal bar
+            UiVertex { position: [-crosshair_size, -crosshair_thickness] },
+            UiVertex { position: [crosshair_size, -crosshair_thickness] },
+            UiVertex { position: [crosshair_size, crosshair_thickness] },
+            UiVertex { position: [-crosshair_size, -crosshair_thickness] },
+            UiVertex { position: [crosshair_size, crosshair_thickness] },
+            UiVertex { position: [-crosshair_size, crosshair_thickness] },
+            // Vertical bar
+            UiVertex { position: [-crosshair_thickness, -crosshair_size] },
+            UiVertex { position: [crosshair_thickness, -crosshair_size] },
+            UiVertex { position: [crosshair_thickness, crosshair_size] },
+            UiVertex { position: [-crosshair_thickness, -crosshair_size] },
+            UiVertex { position: [crosshair_thickness, crosshair_size] },
+            UiVertex { position: [-crosshair_thickness, crosshair_size] },
+        ];
+        let crosshair_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Crosshair Vertex Buffer"),
+            contents: bytemuck::cast_slice(&crosshair_vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        // Create line pipeline for block outline
+        let line_pipeline = pipeline::create_line_pipeline(&device, surface_format, &camera_bind_group_layout);
+
+        // Create outline vertex buffer (will be updated each frame)
+        // 12 edges * 2 vertices = 24 vertices for a cube wireframe
+        let outline_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Outline Vertex Buffer"),
+            size: (24 * std::mem::size_of::<LineVertex>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         // Create depth texture
         let depth_texture = Self::create_depth_texture(&device, &config);
 
@@ -233,6 +283,10 @@ impl Renderer {
             texture_bind_group,
             depth_texture,
             gpu_profiler,
+            ui_pipeline,
+            crosshair_vertex_buffer,
+            line_pipeline,
+            outline_vertex_buffer,
             stats: RenderStats::default(),
         }
     }
@@ -273,6 +327,7 @@ impl Renderer {
         camera: &Camera,
         world: &WorldManager,
         _profiler: &FrameProfiler,
+        target_block: Option<[i32; 3]>,
     ) -> Result<(), wgpu::SurfaceError> {
         // Poll GPU profiler for previous frame results
         self.gpu_profiler.poll_results(&self.device);
@@ -364,6 +419,52 @@ impl Renderer {
                     chunks_rendered += 1;
                 }
             }
+
+            // Render block outline if targeting a block
+            if let Some([bx, by, bz]) = target_block {
+                // Update outline vertices for this block position
+                let x = bx as f32;
+                let y = by as f32;
+                let z = bz as f32;
+                // Slight expansion to prevent z-fighting
+                let e = 0.002;
+                let x0 = x - e;
+                let y0 = y - e;
+                let z0 = z - e;
+                let x1 = x + 1.0 + e;
+                let y1 = y + 1.0 + e;
+                let z1 = z + 1.0 + e;
+
+                // 12 edges of a cube
+                let outline_vertices = [
+                    // Bottom face edges
+                    LineVertex { position: [x0, y0, z0] }, LineVertex { position: [x1, y0, z0] },
+                    LineVertex { position: [x1, y0, z0] }, LineVertex { position: [x1, y0, z1] },
+                    LineVertex { position: [x1, y0, z1] }, LineVertex { position: [x0, y0, z1] },
+                    LineVertex { position: [x0, y0, z1] }, LineVertex { position: [x0, y0, z0] },
+                    // Top face edges
+                    LineVertex { position: [x0, y1, z0] }, LineVertex { position: [x1, y1, z0] },
+                    LineVertex { position: [x1, y1, z0] }, LineVertex { position: [x1, y1, z1] },
+                    LineVertex { position: [x1, y1, z1] }, LineVertex { position: [x0, y1, z1] },
+                    LineVertex { position: [x0, y1, z1] }, LineVertex { position: [x0, y1, z0] },
+                    // Vertical edges
+                    LineVertex { position: [x0, y0, z0] }, LineVertex { position: [x0, y1, z0] },
+                    LineVertex { position: [x1, y0, z0] }, LineVertex { position: [x1, y1, z0] },
+                    LineVertex { position: [x1, y0, z1] }, LineVertex { position: [x1, y1, z1] },
+                    LineVertex { position: [x0, y0, z1] }, LineVertex { position: [x0, y1, z1] },
+                ];
+                self.queue.write_buffer(&self.outline_vertex_buffer, 0, bytemuck::cast_slice(&outline_vertices));
+
+                render_pass.set_pipeline(&self.line_pipeline);
+                render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                render_pass.set_vertex_buffer(0, self.outline_vertex_buffer.slice(..));
+                render_pass.draw(0..24, 0..1);
+            }
+
+            // Render crosshair (UI, no depth)
+            render_pass.set_pipeline(&self.ui_pipeline);
+            render_pass.set_vertex_buffer(0, self.crosshair_vertex_buffer.slice(..));
+            render_pass.draw(0..12, 0..1);
         }
 
         // Resolve GPU timestamps

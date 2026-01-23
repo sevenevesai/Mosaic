@@ -9,7 +9,6 @@ mod meshing;
 pub use chunk::{Block, Chunk, ChunkPos};
 pub use meshing::{ChunkMesh, ChunkVertex, GpuMesh, LodLevel, build_chunk_mesh};
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use ahash::AHashMap;
@@ -17,7 +16,117 @@ use crossbeam_channel::{Receiver, Sender};
 use glam::Vec3;
 use parking_lot::RwLock;
 
-use crate::constants::{CHUNK_SIZE_I32, RENDER_DISTANCE, LOD_FULL_DETAIL, LOD_HALF_DETAIL};
+use crate::constants::{CHUNK_SIZE_I32, RENDER_DISTANCE};
+
+/// Result of a raycast into the world
+#[derive(Debug, Clone, Copy)]
+pub struct RaycastHit {
+    /// World position of the hit block
+    pub block_pos: [i32; 3],
+    /// World position of the adjacent block (for placement)
+    pub adjacent_pos: [i32; 3],
+    /// Distance from ray origin to hit
+    pub distance: f32,
+}
+
+/// Perform a raycast through the voxel world using DDA algorithm
+pub fn raycast(
+    origin: Vec3,
+    direction: Vec3,
+    max_distance: f32,
+    world: &WorldManager,
+) -> Option<RaycastHit> {
+    // Normalize direction
+    let dir = direction.normalize();
+
+    // Current block position
+    let mut block_x = origin.x.floor() as i32;
+    let mut block_y = origin.y.floor() as i32;
+    let mut block_z = origin.z.floor() as i32;
+
+    // Step direction (+1 or -1)
+    let step_x = if dir.x >= 0.0 { 1 } else { -1 };
+    let step_y = if dir.y >= 0.0 { 1 } else { -1 };
+    let step_z = if dir.z >= 0.0 { 1 } else { -1 };
+
+    // Distance along ray to next voxel boundary
+    let t_delta_x = if dir.x != 0.0 { (1.0 / dir.x).abs() } else { f32::MAX };
+    let t_delta_y = if dir.y != 0.0 { (1.0 / dir.y).abs() } else { f32::MAX };
+    let t_delta_z = if dir.z != 0.0 { (1.0 / dir.z).abs() } else { f32::MAX };
+
+    // Distance to first boundary
+    let mut t_max_x = if dir.x != 0.0 {
+        if dir.x > 0.0 {
+            ((block_x + 1) as f32 - origin.x) / dir.x
+        } else {
+            (block_x as f32 - origin.x) / dir.x
+        }
+    } else {
+        f32::MAX
+    };
+
+    let mut t_max_y = if dir.y != 0.0 {
+        if dir.y > 0.0 {
+            ((block_y + 1) as f32 - origin.y) / dir.y
+        } else {
+            (block_y as f32 - origin.y) / dir.y
+        }
+    } else {
+        f32::MAX
+    };
+
+    let mut t_max_z = if dir.z != 0.0 {
+        if dir.z > 0.0 {
+            ((block_z + 1) as f32 - origin.z) / dir.z
+        } else {
+            (block_z as f32 - origin.z) / dir.z
+        }
+    } else {
+        f32::MAX
+    };
+
+    // Track previous block for adjacent position
+    let mut prev_x = block_x;
+    let mut prev_y = block_y;
+    let mut prev_z = block_z;
+
+    let mut distance = 0.0;
+
+    while distance < max_distance {
+        // Check current block
+        if let Some(block) = world.get_block(block_x, block_y, block_z) {
+            if block.is_solid() {
+                return Some(RaycastHit {
+                    block_pos: [block_x, block_y, block_z],
+                    adjacent_pos: [prev_x, prev_y, prev_z],
+                    distance,
+                });
+            }
+        }
+
+        // Save previous position
+        prev_x = block_x;
+        prev_y = block_y;
+        prev_z = block_z;
+
+        // Step to next voxel boundary
+        if t_max_x < t_max_y && t_max_x < t_max_z {
+            distance = t_max_x;
+            t_max_x += t_delta_x;
+            block_x += step_x;
+        } else if t_max_y < t_max_z {
+            distance = t_max_y;
+            t_max_y += t_delta_y;
+            block_y += step_y;
+        } else {
+            distance = t_max_z;
+            t_max_z += t_delta_z;
+            block_z += step_z;
+        }
+    }
+
+    None
+}
 
 /// Messages for chunk worker threads
 enum ChunkTask {
@@ -180,12 +289,13 @@ impl WorldManager {
         self.last_player_chunk = Some(player_chunk);
 
         // Queue chunks for generation around player
-        for dy in -2..=2 {
+        // Vertical range: Y chunks 0-9 covers blocks 0-159, enough for terrain + mountains
+        for dy in 0..=9 {
             for dz in -RENDER_DISTANCE..=RENDER_DISTANCE {
                 for dx in -RENDER_DISTANCE..=RENDER_DISTANCE {
                     let pos = ChunkPos {
                         x: player_chunk.x + dx,
-                        y: dy, // Only a few vertical chunks for PoC
+                        y: dy,
                         z: player_chunk.z + dz,
                     };
 
@@ -243,6 +353,14 @@ impl WorldManager {
         self.queue_meshing_with_lod(pos, LodLevel::Full);
     }
 
+    /// Force a remesh regardless of current LOD (used after block modifications)
+    fn force_remesh(&mut self, pos: ChunkPos) {
+        if !self.pending_meshing.contains_key(&pos) {
+            self.pending_meshing.insert(pos, ());
+            let _ = self.task_sender.send(ChunkTask::Mesh(pos, LodLevel::Full));
+        }
+    }
+
     fn queue_meshing_with_lod(&mut self, pos: ChunkPos, lod: LodLevel) {
         // Check if we already have a mesh with same or better LOD
         if let Some(existing) = self.meshes.get(&pos) {
@@ -285,6 +403,73 @@ impl WorldManager {
             .read()
             .get(&chunk_pos)
             .map(|chunk| chunk.get_block(local_x, local_y, local_z))
+    }
+
+    /// Set a block at world coordinates, returns true if successful
+    pub fn set_block(&mut self, x: i32, y: i32, z: i32, block: Block) -> bool {
+        let chunk_pos = ChunkPos {
+            x: x.div_euclid(CHUNK_SIZE_I32),
+            y: y.div_euclid(CHUNK_SIZE_I32),
+            z: z.div_euclid(CHUNK_SIZE_I32),
+        };
+
+        let local_x = x.rem_euclid(CHUNK_SIZE_I32) as usize;
+        let local_y = y.rem_euclid(CHUNK_SIZE_I32) as usize;
+        let local_z = z.rem_euclid(CHUNK_SIZE_I32) as usize;
+
+        // Get the chunk, clone it, modify, and replace
+        let mut chunks = self.chunks.write();
+        if let Some(old_chunk) = chunks.get(&chunk_pos) {
+            let mut new_chunk = Chunk::new();
+            // Copy all blocks from old chunk
+            for z in 0..16 {
+                for y in 0..16 {
+                    for x in 0..16 {
+                        new_chunk.set_block(x, y, z, old_chunk.get_block(x, y, z));
+                    }
+                }
+            }
+            // Set the new block
+            new_chunk.set_block(local_x, local_y, local_z, block);
+            chunks.insert(chunk_pos, Arc::new(new_chunk));
+            drop(chunks);
+
+            // Force remesh (keep old mesh until new one is ready to avoid flicker)
+            self.pending_meshing.remove(&chunk_pos); // Clear pending to allow re-queue
+            self.force_remesh(chunk_pos);
+
+            // Also remesh neighbors if block is on chunk boundary
+            if local_x == 0 {
+                self.remesh_if_exists(chunk_pos.offset(-1, 0, 0));
+            }
+            if local_x == 15 {
+                self.remesh_if_exists(chunk_pos.offset(1, 0, 0));
+            }
+            if local_y == 0 {
+                self.remesh_if_exists(chunk_pos.offset(0, -1, 0));
+            }
+            if local_y == 15 {
+                self.remesh_if_exists(chunk_pos.offset(0, 1, 0));
+            }
+            if local_z == 0 {
+                self.remesh_if_exists(chunk_pos.offset(0, 0, -1));
+            }
+            if local_z == 15 {
+                self.remesh_if_exists(chunk_pos.offset(0, 0, 1));
+            }
+
+            true
+        } else {
+            false
+        }
+    }
+
+    fn remesh_if_exists(&mut self, pos: ChunkPos) {
+        if self.chunks.read().contains_key(&pos) {
+            // Keep old mesh until new one is ready to avoid flicker
+            self.pending_meshing.remove(&pos);
+            self.force_remesh(pos);
+        }
     }
 }
 

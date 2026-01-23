@@ -12,10 +12,10 @@ use winit::{
 
 use crate::constants::{
     PLAYER_WIDTH, PLAYER_HEIGHT, PLAYER_EYE_HEIGHT,
-    GRAVITY, JUMP_VELOCITY, TERMINAL_VELOCITY,
+    GRAVITY, JUMP_VELOCITY, TERMINAL_VELOCITY, PLAYER_REACH,
 };
 use crate::renderer::Camera;
-use crate::world::WorldManager;
+use crate::world::{Block, WorldManager, raycast};
 
 /// Axis-aligned bounding box
 #[derive(Clone, Copy)]
@@ -62,6 +62,11 @@ pub struct Player {
     sneak: bool,
     sprint: bool,
 
+    // Block interaction
+    break_requested: bool,
+    place_requested: bool,
+    selected_block: Block,
+
     // Physics
     on_ground: bool,
 
@@ -84,6 +89,9 @@ impl Player {
             jump_pressed: false,
             sneak: false,
             sprint: false,
+            break_requested: false,
+            place_requested: false,
+            selected_block: Block::Stone,
             on_ground: false,
             fly_mode: false,
         }
@@ -91,6 +99,13 @@ impl Player {
 
     pub fn position(&self) -> Vec3 {
         self.camera.position
+    }
+
+    /// Get the block currently being targeted (for rendering outline)
+    pub fn get_target_block(&self, world: &WorldManager) -> Option<[i32; 3]> {
+        let origin = self.camera.position;
+        let direction = self.camera.forward();
+        raycast(origin, direction, PLAYER_REACH, world).map(|hit| hit.block_pos)
     }
 
     pub fn handle_key(&mut self, key: KeyCode, pressed: bool) {
@@ -108,6 +123,14 @@ impl Player {
                     tracing::info!("Fly mode: {}", if self.fly_mode { "ON" } else { "OFF" });
                 }
             }
+            // Block selection with number keys
+            KeyCode::Digit1 => if pressed { self.selected_block = Block::Stone; }
+            KeyCode::Digit2 => if pressed { self.selected_block = Block::Dirt; }
+            KeyCode::Digit3 => if pressed { self.selected_block = Block::Grass; }
+            KeyCode::Digit4 => if pressed { self.selected_block = Block::Cobblestone; }
+            KeyCode::Digit5 => if pressed { self.selected_block = Block::Sand; }
+            KeyCode::Digit6 => if pressed { self.selected_block = Block::Wood; }
+            KeyCode::Digit7 => if pressed { self.selected_block = Block::Leaves; }
             _ => {}
         }
     }
@@ -124,14 +147,79 @@ impl Player {
 
         match button {
             MouseButton::Left => {
-                // Break block (raycast to find target)
-                // TODO: Implement block breaking
+                self.break_requested = true;
             }
             MouseButton::Right => {
-                // Place block
-                // TODO: Implement block placing
+                self.place_requested = true;
             }
             _ => {}
+        }
+    }
+
+    /// Process block interactions (call from main loop with mutable world access)
+    pub fn process_block_interactions(&mut self, world: &mut WorldManager) {
+        if self.break_requested {
+            self.break_requested = false;
+            self.try_break_block(world);
+        }
+
+        if self.place_requested {
+            self.place_requested = false;
+            self.try_place_block(world);
+        }
+    }
+
+    fn try_break_block(&self, world: &mut WorldManager) {
+        let origin = self.camera.position;
+        let direction = self.camera.forward();
+
+        if let Some(hit) = raycast(origin, direction, PLAYER_REACH, world) {
+            let [x, y, z] = hit.block_pos;
+            // Don't break bedrock
+            if let Some(block) = world.get_block(x, y, z) {
+                if block != Block::Bedrock {
+                    world.set_block(x, y, z, Block::Air);
+                    tracing::debug!("Broke block at ({}, {}, {})", x, y, z);
+                }
+            }
+        }
+    }
+
+    fn try_place_block(&self, world: &mut WorldManager) {
+        let origin = self.camera.position;
+        let direction = self.camera.forward();
+
+        if let Some(hit) = raycast(origin, direction, PLAYER_REACH, world) {
+            let [x, y, z] = hit.adjacent_pos;
+
+            // Don't place if it would be inside the player
+            let half_width = PLAYER_WIDTH / 2.0;
+            let player_min = Vec3::new(
+                self.feet_pos.x - half_width,
+                self.feet_pos.y,
+                self.feet_pos.z - half_width,
+            );
+            let player_max = Vec3::new(
+                self.feet_pos.x + half_width,
+                self.feet_pos.y + PLAYER_HEIGHT,
+                self.feet_pos.z + half_width,
+            );
+
+            let block_min = Vec3::new(x as f32, y as f32, z as f32);
+            let block_max = block_min + Vec3::ONE;
+
+            // Check AABB intersection
+            let intersects = player_min.x < block_max.x && player_max.x > block_min.x
+                && player_min.y < block_max.y && player_max.y > block_min.y
+                && player_min.z < block_max.z && player_max.z > block_min.z;
+
+            if !intersects {
+                // Only place if target is air
+                if let Some(Block::Air) = world.get_block(x, y, z) {
+                    world.set_block(x, y, z, self.selected_block);
+                    tracing::debug!("Placed {:?} at ({}, {}, {})", self.selected_block, x, y, z);
+                }
+            }
         }
     }
 
