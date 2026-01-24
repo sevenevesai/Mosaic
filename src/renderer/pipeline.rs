@@ -477,14 +477,7 @@ pub fn create_chunk_pipeline(
             depth_write_enabled: true,
             depth_compare: wgpu::CompareFunction::Less,
             stencil: wgpu::StencilState::default(),
-            // Small depth bias to prevent 1px gaps at block edges
-            // Pushes geometry slightly toward camera, preventing seam artifacts
-            // at grazing angles where adjacent faces fight for pixels
-            bias: wgpu::DepthBiasState {
-                constant: -1,        // Slight bias toward camera
-                slope_scale: -1.0,   // Scale with slope for angled surfaces
-                clamp: 0.0,
-            },
+            bias: wgpu::DepthBiasState::default(),
         }),
         multisample: wgpu::MultisampleState {
             count: 1,

@@ -1146,16 +1146,22 @@ fn emit_greedy_quad(
     let oy = world_origin.y;
     let oz = world_origin.z;
 
+    // Small epsilon to expand faces and prevent sub-pixel gaps at edges
+    // This makes adjacent faces slightly overlap, eliminating white pixel artifacts
+    // The overlap is tiny (< 1mm in world units) and invisible to the player
+    let e = 0.001;
+
     // Convert slice/u/v to world coordinates based on axis
     // Match vertex ordering exactly from simple meshing add_face_* functions
+    // Each face is expanded by epsilon in its plane to overlap with adjacent faces
     let (positions, normal, uv_order): ([[f32; 3]; 4], [f32; 3], [usize; 4]) = match (axis, positive) {
-        // Top face (+Y) - from add_face_top
+        // Top face (+Y) - from add_face_top, expand in X and Z
         (Axis::Y, true) => {
-            let x0 = ox + start_u as f32 * s;
-            let x1 = ox + (start_u + width) as f32 * s;
+            let x0 = ox + start_u as f32 * s - e;
+            let x1 = ox + (start_u + width) as f32 * s + e;
             let y = oy + (slice + 1) as f32 * s;
-            let z0 = oz + start_v as f32 * s;
-            let z1 = oz + (start_v + height) as f32 * s;
+            let z0 = oz + start_v as f32 * s - e;
+            let z1 = oz + (start_v + height) as f32 * s + e;
             ([
                 [x0, y, z0], // back-left
                 [x1, y, z0], // back-right
@@ -1163,13 +1169,13 @@ fn emit_greedy_quad(
                 [x0, y, z1], // front-left
             ], [0.0, 1.0, 0.0], [0, 1, 2, 3])
         }
-        // Bottom face (-Y) - from add_face_bottom
+        // Bottom face (-Y) - from add_face_bottom, expand in X and Z
         (Axis::Y, false) => {
-            let x0 = ox + start_u as f32 * s;
-            let x1 = ox + (start_u + width) as f32 * s;
+            let x0 = ox + start_u as f32 * s - e;
+            let x1 = ox + (start_u + width) as f32 * s + e;
             let y = oy + slice as f32 * s;
-            let z0 = oz + start_v as f32 * s;
-            let z1 = oz + (start_v + height) as f32 * s;
+            let z0 = oz + start_v as f32 * s - e;
+            let z1 = oz + (start_v + height) as f32 * s + e;
             ([
                 [x0, y, z1], // front-left
                 [x1, y, z1], // front-right
@@ -1177,12 +1183,12 @@ fn emit_greedy_quad(
                 [x0, y, z0], // back-left
             ], [0.0, -1.0, 0.0], [0, 1, 2, 3])
         }
-        // Front face (+Z) - from add_face_front
+        // Front face (+Z) - from add_face_front, expand in X and Y
         (Axis::Z, true) => {
-            let x0 = ox + start_u as f32 * s;
-            let x1 = ox + (start_u + width) as f32 * s;
-            let y0 = oy + start_v as f32 * s;
-            let y1 = oy + (start_v + height) as f32 * s;
+            let x0 = ox + start_u as f32 * s - e;
+            let x1 = ox + (start_u + width) as f32 * s + e;
+            let y0 = oy + start_v as f32 * s - e;
+            let y1 = oy + (start_v + height) as f32 * s + e;
             let z = oz + (slice + 1) as f32 * s;
             ([
                 [x1, y0, z], // bottom-right
@@ -1191,12 +1197,12 @@ fn emit_greedy_quad(
                 [x1, y1, z], // top-right
             ], [0.0, 0.0, 1.0], [0, 1, 2, 3])
         }
-        // Back face (-Z) - from add_face_back
+        // Back face (-Z) - from add_face_back, expand in X and Y
         (Axis::Z, false) => {
-            let x0 = ox + start_u as f32 * s;
-            let x1 = ox + (start_u + width) as f32 * s;
-            let y0 = oy + start_v as f32 * s;
-            let y1 = oy + (start_v + height) as f32 * s;
+            let x0 = ox + start_u as f32 * s - e;
+            let x1 = ox + (start_u + width) as f32 * s + e;
+            let y0 = oy + start_v as f32 * s - e;
+            let y1 = oy + (start_v + height) as f32 * s + e;
             let z = oz + slice as f32 * s;
             ([
                 [x0, y0, z], // bottom-left
@@ -1205,13 +1211,13 @@ fn emit_greedy_quad(
                 [x0, y1, z], // top-left
             ], [0.0, 0.0, -1.0], [0, 1, 2, 3])
         }
-        // Left face (-X) - from add_face_left
+        // Left face (-X) - from add_face_left, expand in Y and Z
         (Axis::X, false) => {
             let x = ox + slice as f32 * s;
-            let y0 = oy + start_v as f32 * s;
-            let y1 = oy + (start_v + height) as f32 * s;
-            let z0 = oz + start_u as f32 * s;
-            let z1 = oz + (start_u + width) as f32 * s;
+            let y0 = oy + start_v as f32 * s - e;
+            let y1 = oy + (start_v + height) as f32 * s + e;
+            let z0 = oz + start_u as f32 * s - e;
+            let z1 = oz + (start_u + width) as f32 * s + e;
             ([
                 [x, y0, z0], // bottom-back
                 [x, y1, z0], // top-back
@@ -1219,13 +1225,13 @@ fn emit_greedy_quad(
                 [x, y0, z1], // bottom-front
             ], [-1.0, 0.0, 0.0], [0, 3, 2, 1]) // UV reorder like simple meshing
         }
-        // Right face (+X) - from add_face_right
+        // Right face (+X) - from add_face_right, expand in Y and Z
         (Axis::X, true) => {
             let x = ox + (slice + 1) as f32 * s;
-            let y0 = oy + start_v as f32 * s;
-            let y1 = oy + (start_v + height) as f32 * s;
-            let z0 = oz + start_u as f32 * s;
-            let z1 = oz + (start_u + width) as f32 * s;
+            let y0 = oy + start_v as f32 * s - e;
+            let y1 = oy + (start_v + height) as f32 * s + e;
+            let z0 = oz + start_u as f32 * s - e;
+            let z1 = oz + (start_u + width) as f32 * s + e;
             ([
                 [x, y0, z1], // bottom-front
                 [x, y1, z1], // top-front
