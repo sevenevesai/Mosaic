@@ -91,6 +91,13 @@ pub struct Renderer {
 
     // Stats from last frame
     pub stats: RenderStats,
+
+    // Animation timing
+    start_time: std::time::Instant,
+
+    // Day/night cycle
+    time_of_day: f32,      // 0.0 = midnight, 0.25 = dawn, 0.5 = noon, 0.75 = dusk
+    cycle_speed: f32,      // Multiplier for cycle speed (1.0 = 10 min day, higher = faster)
 }
 
 impl Renderer {
@@ -133,7 +140,7 @@ impl Renderer {
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
-                    label: Some("Blocks Device"),
+                    label: Some("Neolith Device"),
                     required_features: features_to_use,
                     required_limits: wgpu::Limits::default(),
                 },
@@ -495,6 +502,9 @@ impl Renderer {
             debug_overlay,
             chunk_pool,
             stats: RenderStats::default(),
+            start_time: std::time::Instant::now(),
+            time_of_day: 0.35,   // Start at mid-morning
+            cycle_speed: 10.0,   // 10x speed for testing (1 min = 1 day cycle)
         }
     }
 
@@ -515,6 +525,41 @@ impl Renderer {
 
     pub fn is_debug_overlay_enabled(&self) -> bool {
         self.debug_overlay.is_enabled()
+    }
+
+    /// Update the day/night cycle time
+    /// dt is delta time in seconds
+    pub fn update_time(&mut self, dt: f32) {
+        // Base cycle: 600 seconds (10 minutes) for a full day
+        let base_cycle_duration = 600.0;
+        let time_increment = dt / base_cycle_duration * self.cycle_speed;
+        self.time_of_day = (self.time_of_day + time_increment) % 1.0;
+    }
+
+    /// Toggle through cycle speed presets
+    /// Returns the new speed for display
+    pub fn toggle_cycle_speed(&mut self) -> f32 {
+        // Cycle through: 1x -> 5x -> 20x -> 50x -> 100x -> paused -> 1x
+        self.cycle_speed = match self.cycle_speed as i32 {
+            0 => 1.0,
+            1 => 5.0,
+            5 => 20.0,
+            20 => 50.0,
+            50 => 100.0,
+            100 => 0.0,  // Paused
+            _ => 1.0,
+        };
+        self.cycle_speed
+    }
+
+    /// Get current time of day (0.0-1.0)
+    pub fn time_of_day(&self) -> f32 {
+        self.time_of_day
+    }
+
+    /// Get current cycle speed multiplier
+    pub fn cycle_speed(&self) -> f32 {
+        self.cycle_speed
     }
 
     fn create_depth_texture(
@@ -546,21 +591,28 @@ impl Renderer {
         target_block: Option<[i32; 3]>,
         debug_metrics: &DebugMetrics,
     ) -> Result<(), wgpu::SurfaceError> {
+        // Sync meshes to chunk pool for MDI rendering
+        if self.chunk_pool.mdi_available {
+            self.sync_meshes_to_pool(world);
+        }
+
         // Poll GPU profiler for previous frame results
         self.gpu_profiler.poll_results(&self.device);
 
-        // Update camera uniform
-        let camera_uniform = CameraUniform::from_camera(camera);
+        // Update camera uniform with animation timing
+        let current_time = self.start_time.elapsed().as_secs_f32();
+        let spawn_time = 0.0;  // World starts loading at time 0
+        let camera_uniform = CameraUniform::from_camera_with_anim(camera, current_time, spawn_time);
         self.queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[camera_uniform]));
 
-        // Update light uniform (center shadow map on camera)
-        let light_uniform = LightUniform::from_camera_position(camera.position);
+        // Update light uniform with day/night cycle (center shadow map on camera)
+        let light_uniform = LightUniform::from_camera_position_and_time(camera.position, self.time_of_day);
         self.queue
             .write_buffer(&self.light_buffer, 0, bytemuck::cast_slice(&[light_uniform]));
 
-        // Update sky uniform
-        let sky_uniform = SkyUniform::from_camera(camera);
+        // Update sky uniform with day/night colors
+        let sky_uniform = SkyUniform::from_camera_and_time(camera, self.time_of_day);
         self.queue
             .write_buffer(&self.sky_buffer, 0, bytemuck::cast_slice(&[sky_uniform]));
 
@@ -632,9 +684,11 @@ impl Renderer {
             shadow_pass.set_pipeline(&self.shadow_pipeline);
             shadow_pass.set_bind_group(0, &self.light_bind_group, &[]);
 
-            // Render chunks to shadow map WITH frustum culling
+            // Build lists for shadow pass (pool vs individual)
+            let mut shadow_pool: Vec<crate::world::ChunkPos> = Vec::with_capacity(2000);
+            let mut shadow_individual: Vec<&crate::world::ChunkMesh> = Vec::with_capacity(500);
+
             for chunk_mesh in world.visible_meshes() {
-                // Shadow frustum culling - only render chunks that can cast shadows into view
                 let chunk_min = chunk_mesh.pos.world_origin();
                 let chunk_max = chunk_min + glam::Vec3::splat(crate::constants::CHUNK_SIZE_F32);
 
@@ -646,6 +700,33 @@ impl Renderer {
                     continue;
                 }
 
+                if self.chunk_pool.mdi_available && self.chunk_pool.has_chunk(&chunk_mesh.pos) {
+                    shadow_pool.push(chunk_mesh.pos);
+                } else if chunk_mesh.gpu_mesh.is_some() {
+                    shadow_individual.push(chunk_mesh);
+                }
+            }
+
+            // MDI shadow pass
+            if self.chunk_pool.mdi_available && !shadow_pool.is_empty() {
+                let draw_count = self.chunk_pool.prepare_indirect_draws(&self.queue, &shadow_pool);
+                if draw_count > 0 {
+                    shadow_pass.set_vertex_buffer(0, self.chunk_pool.vertex_buffer.slice(..));
+                    shadow_pass.set_index_buffer(
+                        self.chunk_pool.index_buffer.slice(..),
+                        wgpu::IndexFormat::Uint32,
+                    );
+                    shadow_pass.multi_draw_indexed_indirect(
+                        &self.chunk_pool.indirect_buffer,
+                        0,
+                        draw_count,
+                    );
+                    shadow_chunks_rendered += draw_count;
+                }
+            }
+
+            // Individual shadow pass (fallback)
+            for chunk_mesh in shadow_individual {
                 if let Some(gpu_mesh) = &chunk_mesh.gpu_mesh {
                     shadow_pass.set_vertex_buffer(0, gpu_mesh.vertex_buffer.slice(..));
                     shadow_pass.set_index_buffer(gpu_mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
@@ -698,10 +779,12 @@ impl Renderer {
             render_pass.set_bind_group(1, &self.texture_bind_group, &[]);
             render_pass.set_bind_group(2, &self.shadow_bind_group, &[]);
 
-            // Use original per-chunk rendering (stable, working)
-            // MDI implementation needs more work - disabled for now
+            // Build list of visible chunk positions (frustum culled)
+            // Separate chunks that are in the pool vs need individual draws
+            let mut pool_chunks: Vec<crate::world::ChunkPos> = Vec::with_capacity(3000);
+            let mut individual_chunks: Vec<&crate::world::ChunkMesh> = Vec::with_capacity(500);
+
             for chunk_mesh in world.visible_meshes() {
-                // Frustum culling - skip chunks outside camera view
                 let chunk_min = chunk_mesh.pos.world_origin();
                 let chunk_max = chunk_min + glam::Vec3::splat(crate::constants::CHUNK_SIZE_F32);
 
@@ -710,10 +793,47 @@ impl Renderer {
                     continue;
                 }
 
+                // Check if chunk is in the pool
+                if self.chunk_pool.mdi_available {
+                    if let Some(slot) = self.chunk_pool.get_slot(&chunk_mesh.pos) {
+                        pool_chunks.push(chunk_mesh.pos);
+                        triangles += slot.index_count / 3;
+                    } else if chunk_mesh.gpu_mesh.is_some() {
+                        // Not in pool but has individual buffer - use fallback
+                        individual_chunks.push(chunk_mesh);
+                    }
+                } else if chunk_mesh.gpu_mesh.is_some() {
+                    individual_chunks.push(chunk_mesh);
+                }
+            }
+
+            // MDI pass: render all chunks that are in the pool
+            if self.chunk_pool.mdi_available && !pool_chunks.is_empty() {
+                let draw_count = self.chunk_pool.prepare_indirect_draws(&self.queue, &pool_chunks);
+
+                if draw_count > 0 {
+                    render_pass.set_vertex_buffer(0, self.chunk_pool.vertex_buffer.slice(..));
+                    render_pass.set_index_buffer(
+                        self.chunk_pool.index_buffer.slice(..),
+                        wgpu::IndexFormat::Uint32,
+                    );
+                    render_pass.multi_draw_indexed_indirect(
+                        &self.chunk_pool.indirect_buffer,
+                        0,
+                        draw_count,
+                    );
+                    chunks_rendered += draw_count;
+                }
+            }
+
+            // Individual pass: render chunks not in pool (overflow, oversized, etc.)
+            for chunk_mesh in individual_chunks {
                 if let Some(gpu_mesh) = &chunk_mesh.gpu_mesh {
                     render_pass.set_vertex_buffer(0, gpu_mesh.vertex_buffer.slice(..));
-                    render_pass
-                        .set_index_buffer(gpu_mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    render_pass.set_index_buffer(
+                        gpu_mesh.index_buffer.slice(..),
+                        wgpu::IndexFormat::Uint32,
+                    );
                     render_pass.draw_indexed(0..gpu_mesh.index_count, 0, 0..1);
                     triangles += gpu_mesh.index_count / 3;
                     chunks_rendered += 1;
@@ -823,6 +943,41 @@ impl Renderer {
     pub fn is_chunk_in_pool(&self, pos: &crate::world::ChunkPos) -> bool {
         self.chunk_pool.has_chunk(pos)
     }
+
+    /// Sync all visible meshes to the chunk pool for MDI rendering
+    /// Only uploads meshes that aren't already in the pool (or have changed size)
+    pub fn sync_meshes_to_pool(&mut self, world: &crate::world::WorldManager) {
+        // Only upload meshes not already in pool (or with different size indicating regeneration)
+        for mesh in world.visible_meshes() {
+            if mesh.vertices.is_empty() {
+                continue;
+            }
+
+            // Check if already in pool with same data
+            if let Some(existing) = self.chunk_pool.get_slot(&mesh.pos) {
+                // Only re-upload if vertex count changed (mesh was regenerated)
+                if existing.vertex_count == mesh.vertices.len() as u32 {
+                    continue;
+                }
+            }
+
+            // Upload new or changed mesh
+            self.chunk_pool.upload_chunk(&self.queue, mesh);
+        }
+
+        // Evict non-visible chunks if pool is getting full
+        if self.chunk_pool.is_nearly_full() {
+            let visible: Vec<_> = world.visible_meshes()
+                .map(|m| m.pos)
+                .collect();
+            self.chunk_pool.evict_non_visible(&visible);
+        }
+    }
+
+    /// Get chunk pool stats for debug display
+    pub fn pool_stats(&self) -> (usize, u32, bool) {
+        (self.chunk_pool.chunk_count(), self.chunk_pool.draw_count, self.chunk_pool.mdi_available)
+    }
 }
 
 /// Camera uniform data for shaders
@@ -831,6 +986,8 @@ impl Renderer {
 pub struct CameraUniform {
     view_proj: [[f32; 4]; 4],
     view_pos: [f32; 4],
+    /// Animation data: [current_time, spawn_time, wave_speed, drop_height]
+    anim_data: [f32; 4],
 }
 
 impl Default for CameraUniform {
@@ -838,25 +995,169 @@ impl Default for CameraUniform {
         Self {
             view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
             view_pos: [0.0; 4],
+            anim_data: [0.0; 4],
         }
     }
 }
 
 impl CameraUniform {
-    fn from_camera(camera: &Camera) -> Self {
+    fn from_camera_with_anim(camera: &Camera, current_time: f32, spawn_time: f32) -> Self {
         Self {
             view_proj: camera.view_projection_matrix().to_cols_array_2d(),
             view_pos: camera.position.extend(1.0).to_array(),
+            anim_data: [
+                current_time,    // Current time in seconds
+                spawn_time,      // When the world started loading
+                80.0,            // Wave speed: 80 blocks per second (fast expansion)
+                10.0,            // Drop height: 10 blocks base
+            ],
         }
     }
 }
 
-/// Light uniform data for shadows
+/// Day/night cycle calculations
+/// time: 0.0 = midnight, 0.25 = dawn, 0.5 = noon, 0.75 = dusk
+pub struct DayNightCycle {
+    pub sun_direction: Vec3,
+    pub moon_direction: Vec3,
+    pub sun_color: Vec3,
+    pub moon_color: Vec3,
+    pub sun_intensity: f32,
+    pub moon_intensity: f32,
+    pub sky_top: Vec3,
+    pub sky_horizon: Vec3,
+    pub ambient: Vec3,
+}
+
+impl DayNightCycle {
+    pub fn from_time(time: f32) -> Self {
+        // Wrap time to 0-1 range
+        let t = time.fract();
+        if t < 0.0 { t + 1.0 } else { t };
+
+        // Sun rotates around X axis: rises at 0.25, peaks at 0.5, sets at 0.75
+        let sun_angle = (t - 0.25) * std::f32::consts::TAU; // Full rotation
+        let sun_y = sun_angle.sin();
+        let sun_xz = sun_angle.cos();
+        let sun_direction = Vec3::new(sun_xz * 0.5, sun_y, sun_xz * 0.866).normalize();
+
+        // Moon is opposite to sun
+        let moon_direction = -sun_direction;
+
+        // Calculate sun/moon intensity based on height
+        let sun_intensity = (sun_direction.y * 2.0).clamp(0.0, 1.0);
+        // Moon is much dimmer than sun - subtle illumination
+        let moon_intensity = (moon_direction.y * 1.2).clamp(0.0, 0.25);
+
+        // Define color keyframes (warm palette)
+        // Time points: midnight(0), pre-dawn(0.15), dawn(0.25), morning(0.35),
+        //              noon(0.5), afternoon(0.65), dusk(0.75), twilight(0.85)
+
+        let (sky_top, sky_horizon, sun_color, ambient) = if t < 0.20 {
+            // Night (0.0 - 0.20) - longer dark period before dawn
+            let f = t / 0.20;
+            (
+                Self::lerp_color(Vec3::new(0.04, 0.04, 0.08), Vec3::new(0.10, 0.07, 0.15), f), // very dark -> slightly lighter
+                Self::lerp_color(Vec3::new(0.08, 0.08, 0.14), Vec3::new(0.15, 0.12, 0.20), f), // dark purple -> hint of color
+                Vec3::new(0.0, 0.0, 0.0), // sun below horizon
+                Self::lerp_color(Vec3::new(0.03, 0.03, 0.05), Vec3::new(0.05, 0.04, 0.07), f), // very dark ambient
+            )
+        } else if t < 0.25 {
+            // Pre-dawn to dawn (0.20 - 0.25) - fast brightening
+            let f = (t - 0.20) / 0.05;
+            (
+                Self::lerp_color(Vec3::new(0.10, 0.07, 0.15), Vec3::new(1.0, 0.48, 0.33), f),  // dark -> coral (fast)
+                Self::lerp_color(Vec3::new(0.15, 0.12, 0.20), Vec3::new(1.0, 0.70, 0.42), f),  // dark -> peach (fast)
+                Self::lerp_color(Vec3::new(0.2, 0.08, 0.04), Vec3::new(1.0, 0.42, 0.21), f),   // dim -> orange
+                Self::lerp_color(Vec3::new(0.05, 0.04, 0.07), Vec3::new(0.29, 0.21, 0.21), f), // dark -> warm ambient
+            )
+        } else if t < 0.35 {
+            // Dawn to morning (0.25 - 0.35)
+            let f = (t - 0.25) / 0.10;
+            (
+                Self::lerp_color(Vec3::new(1.0, 0.48, 0.33), Vec3::new(0.53, 0.64, 0.79), f),  // coral -> warm blue
+                Self::lerp_color(Vec3::new(1.0, 0.70, 0.42), Vec3::new(1.0, 0.82, 0.52), f),  // peach -> cream
+                Self::lerp_color(Vec3::new(1.0, 0.42, 0.21), Vec3::new(1.0, 0.78, 0.34), f),  // orange -> gold
+                Self::lerp_color(Vec3::new(0.29, 0.21, 0.21), Vec3::new(0.63, 0.50, 0.38), f),
+            )
+        } else if t < 0.5 {
+            // Morning to noon (0.35 - 0.5)
+            let f = (t - 0.35) / 0.15;
+            (
+                Self::lerp_color(Vec3::new(0.53, 0.64, 0.79), Vec3::new(0.35, 0.56, 0.74), f), // warm blue -> clear sky
+                Self::lerp_color(Vec3::new(1.0, 0.82, 0.52), Vec3::new(0.79, 0.86, 0.91), f), // cream -> soft white
+                Self::lerp_color(Vec3::new(1.0, 0.78, 0.34), Vec3::new(1.0, 0.96, 0.88), f),  // gold -> warm white
+                Self::lerp_color(Vec3::new(0.63, 0.50, 0.38), Vec3::new(0.82, 0.75, 0.63), f),
+            )
+        } else if t < 0.65 {
+            // Noon to afternoon (0.5 - 0.65)
+            let f = (t - 0.5) / 0.15;
+            (
+                Self::lerp_color(Vec3::new(0.35, 0.56, 0.74), Vec3::new(0.49, 0.64, 0.77), f), // clear sky -> soft blue
+                Self::lerp_color(Vec3::new(0.79, 0.86, 0.91), Vec3::new(0.96, 0.84, 0.63), f), // soft white -> golden
+                Self::lerp_color(Vec3::new(1.0, 0.96, 0.88), Vec3::new(1.0, 0.80, 0.40), f),   // warm white -> gold
+                Self::lerp_color(Vec3::new(0.82, 0.75, 0.63), Vec3::new(0.75, 0.63, 0.50), f),
+            )
+        } else if t < 0.75 {
+            // Afternoon to dusk (0.65 - 0.75)
+            let f = (t - 0.65) / 0.10;
+            (
+                Self::lerp_color(Vec3::new(0.49, 0.64, 0.77), Vec3::new(1.0, 0.42, 0.29), f),  // soft blue -> burnt orange
+                Self::lerp_color(Vec3::new(0.96, 0.84, 0.63), Vec3::new(1.0, 0.67, 0.36), f),  // golden -> amber
+                Self::lerp_color(Vec3::new(1.0, 0.80, 0.40), Vec3::new(1.0, 0.34, 0.13), f),   // gold -> deep orange
+                Self::lerp_color(Vec3::new(0.75, 0.63, 0.50), Vec3::new(0.50, 0.31, 0.25), f),
+            )
+        } else if t < 0.80 {
+            // Dusk to twilight (0.75 - 0.80) - faster transition to dark
+            let f = (t - 0.75) / 0.05;
+            (
+                Self::lerp_color(Vec3::new(1.0, 0.42, 0.29), Vec3::new(0.15, 0.10, 0.22), f),  // burnt orange -> dark purple
+                Self::lerp_color(Vec3::new(1.0, 0.67, 0.36), Vec3::new(0.20, 0.15, 0.25), f),  // amber -> dark mauve
+                Self::lerp_color(Vec3::new(1.0, 0.34, 0.13), Vec3::new(0.1, 0.03, 0.01), f),   // deep orange -> very dim
+                Self::lerp_color(Vec3::new(0.50, 0.31, 0.25), Vec3::new(0.08, 0.06, 0.10), f), // fast to dark ambient
+            )
+        } else {
+            // Night (0.80 - 1.0) - longer dark period
+            let f = (t - 0.80) / 0.20;
+            (
+                Self::lerp_color(Vec3::new(0.15, 0.10, 0.22), Vec3::new(0.04, 0.04, 0.08), f), // dark purple -> very dark
+                Self::lerp_color(Vec3::new(0.20, 0.15, 0.25), Vec3::new(0.08, 0.08, 0.14), f), // dark mauve -> darker
+                Vec3::new(0.0, 0.0, 0.0), // sun below horizon
+                Self::lerp_color(Vec3::new(0.08, 0.06, 0.10), Vec3::new(0.03, 0.03, 0.05), f), // very dark ambient
+            )
+        };
+
+        // Warm amber moon color (not cold white)
+        let moon_color = Vec3::new(1.0, 0.85, 0.61);
+
+        Self {
+            sun_direction,
+            moon_direction,
+            sun_color,
+            moon_color,
+            sun_intensity,
+            moon_intensity,
+            sky_top,
+            sky_horizon,
+            ambient,
+        }
+    }
+
+    fn lerp_color(a: Vec3, b: Vec3, t: f32) -> Vec3 {
+        a + (b - a) * t
+    }
+}
+
+/// Light uniform data for shadows and lighting
 #[repr(C)]
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct LightUniform {
     view_proj: [[f32; 4]; 4],
-    direction: [f32; 4],  // xyz = direction, w = unused
+    sun_direction: [f32; 4],    // xyz = direction, w = intensity
+    sun_color: [f32; 4],        // rgb = color, a = unused
+    moon_direction: [f32; 4],   // xyz = direction, w = intensity
+    moon_color: [f32; 4],       // rgb = warm amber, a = unused
+    ambient_color: [f32; 4],    // rgb = ambient, a = time_of_day
 }
 
 /// Sky uniform data for sky rendering
@@ -864,85 +1165,90 @@ pub struct LightUniform {
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct SkyUniform {
     inv_view_proj: [[f32; 4]; 4],
-    sun_direction: [f32; 4],
-    screen_size: [f32; 4],  // xy = screen size, zw = unused
+    sun_direction: [f32; 4],     // xyz = direction, w = intensity
+    moon_direction: [f32; 4],    // xyz = direction, w = intensity
+    sky_top_color: [f32; 4],     // rgb = color, a = time_of_day
+    sky_horizon_color: [f32; 4], // rgb = color, a = unused
 }
 
 impl Default for SkyUniform {
     fn default() -> Self {
+        let cycle = DayNightCycle::from_time(0.35); // Default to morning
         Self {
             inv_view_proj: Mat4::IDENTITY.to_cols_array_2d(),
-            sun_direction: [0.6, 0.8, 0.4, 0.0],
-            screen_size: [1920.0, 1080.0, 0.0, 0.0],
+            sun_direction: [cycle.sun_direction.x, cycle.sun_direction.y, cycle.sun_direction.z, cycle.sun_intensity],
+            moon_direction: [cycle.moon_direction.x, cycle.moon_direction.y, cycle.moon_direction.z, cycle.moon_intensity],
+            sky_top_color: [cycle.sky_top.x, cycle.sky_top.y, cycle.sky_top.z, 0.35],
+            sky_horizon_color: [cycle.sky_horizon.x, cycle.sky_horizon.y, cycle.sky_horizon.z, 0.0],
         }
     }
 }
 
 impl SkyUniform {
-    fn from_camera(camera: &Camera) -> Self {
-        let sun_dir = Vec3::new(0.6, 0.8, 0.4).normalize();
+    fn from_camera_and_time(camera: &Camera, time_of_day: f32) -> Self {
+        let cycle = DayNightCycle::from_time(time_of_day);
         Self {
             inv_view_proj: camera.view_projection_matrix().inverse().to_cols_array_2d(),
-            sun_direction: [sun_dir.x, sun_dir.y, sun_dir.z, 0.0],
-            screen_size: [1920.0, 1080.0, 0.0, 0.0],  // Not used in current shader
+            sun_direction: [cycle.sun_direction.x, cycle.sun_direction.y, cycle.sun_direction.z, cycle.sun_intensity],
+            moon_direction: [cycle.moon_direction.x, cycle.moon_direction.y, cycle.moon_direction.z, cycle.moon_intensity],
+            sky_top_color: [cycle.sky_top.x, cycle.sky_top.y, cycle.sky_top.z, time_of_day],
+            sky_horizon_color: [cycle.sky_horizon.x, cycle.sky_horizon.y, cycle.sky_horizon.z, 0.0],
         }
     }
 }
 
 impl Default for LightUniform {
     fn default() -> Self {
+        let cycle = DayNightCycle::from_time(0.35);
         Self {
             view_proj: Mat4::IDENTITY.to_cols_array_2d(),
-            direction: [0.6, 0.8, 0.4, 0.0],
+            sun_direction: [cycle.sun_direction.x, cycle.sun_direction.y, cycle.sun_direction.z, cycle.sun_intensity],
+            sun_color: [cycle.sun_color.x, cycle.sun_color.y, cycle.sun_color.z, 0.0],
+            moon_direction: [cycle.moon_direction.x, cycle.moon_direction.y, cycle.moon_direction.z, cycle.moon_intensity],
+            moon_color: [cycle.moon_color.x, cycle.moon_color.y, cycle.moon_color.z, 0.0],
+            ambient_color: [cycle.ambient.x, cycle.ambient.y, cycle.ambient.z, 0.35],
         }
     }
 }
 
 impl LightUniform {
-    /// Create light uniform from camera position (for shadow map centering)
+    /// Create light uniform from camera position and time of day
     /// Uses shadow map stabilization to prevent shadow edge flickering/swimming
-    fn from_camera_position(camera_pos: Vec3) -> Self {
-        // Sun direction (same as in shader)
-        let sun_dir = Vec3::new(0.6, 0.8, 0.4).normalize();
+    fn from_camera_position_and_time(camera_pos: Vec3, time_of_day: f32) -> Self {
+        let cycle = DayNightCycle::from_time(time_of_day);
+
+        // Always use sun direction for shadow map - shader fades shadows at night
+        // This prevents jarring shadow direction flips during transition
+        let shadow_dir = cycle.sun_direction;
 
         // Create orthographic projection for shadow map
-        // Center shadow map around camera for best coverage
-        let shadow_distance = 100.0;  // How far shadows extend from camera
-        let shadow_size = 120.0;       // Width/height of shadow frustum
+        let shadow_distance = 100.0;
+        let shadow_size = 120.0;
 
         // === SHADOW MAP STABILIZATION ===
-        // Snap the shadow map to texel boundaries to prevent shadow edge swimming/flickering
-        // This ensures shadow texels stay aligned with world geometry as camera moves
-
-        // Calculate world units per shadow texel
         let texels_per_unit = SHADOW_MAP_SIZE as f32 / (shadow_size * 2.0);
         let units_per_texel = 1.0 / texels_per_unit;
 
-        // Create a stable "look at" point by snapping to shadow texel grid
-        // We snap in the plane perpendicular to the light direction
         let up = Vec3::Y;
-        let light_right = sun_dir.cross(up).normalize();
-        let light_up = light_right.cross(sun_dir).normalize();
+        // Handle case when shadow_dir is nearly vertical
+        let light_right = if shadow_dir.y.abs() > 0.99 {
+            Vec3::X
+        } else {
+            shadow_dir.cross(up).normalize()
+        };
+        let light_up = light_right.cross(shadow_dir).normalize();
 
-        // Project camera position onto light's coordinate system
         let cam_light_x = camera_pos.dot(light_right);
         let cam_light_y = camera_pos.dot(light_up);
-        let cam_light_z = camera_pos.dot(sun_dir);
+        let cam_light_z = camera_pos.dot(shadow_dir);
 
-        // Snap X and Y to texel boundaries (these cause the swimming)
         let snapped_x = (cam_light_x / units_per_texel).floor() * units_per_texel;
         let snapped_y = (cam_light_y / units_per_texel).floor() * units_per_texel;
 
-        // Reconstruct the snapped position in world space
-        let snapped_center = light_right * snapped_x + light_up * snapped_y + sun_dir * cam_light_z;
+        let snapped_center = light_right * snapped_x + light_up * snapped_y + shadow_dir * cam_light_z;
+        let light_pos = snapped_center + shadow_dir * shadow_distance;
 
-        // Light position: snapped center offset along sun direction
-        let light_pos = snapped_center + sun_dir * shadow_distance;
-
-        // Look at the snapped center position
         let view = Mat4::look_at_rh(light_pos, snapped_center, Vec3::Y);
-
-        // Orthographic projection for directional light
         let proj = Mat4::orthographic_rh(
             -shadow_size, shadow_size,
             -shadow_size, shadow_size,
@@ -951,7 +1257,11 @@ impl LightUniform {
 
         Self {
             view_proj: (proj * view).to_cols_array_2d(),
-            direction: [sun_dir.x, sun_dir.y, sun_dir.z, 0.0],
+            sun_direction: [cycle.sun_direction.x, cycle.sun_direction.y, cycle.sun_direction.z, cycle.sun_intensity],
+            sun_color: [cycle.sun_color.x, cycle.sun_color.y, cycle.sun_color.z, 0.0],
+            moon_direction: [cycle.moon_direction.x, cycle.moon_direction.y, cycle.moon_direction.z, cycle.moon_intensity],
+            moon_color: [cycle.moon_color.x, cycle.moon_color.y, cycle.moon_color.z, 0.0],
+            ambient_color: [cycle.ambient.x, cycle.ambient.y, cycle.ambient.z, time_of_day],
         }
     }
 }

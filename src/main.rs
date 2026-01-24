@@ -1,9 +1,9 @@
-//! Blocks - A modern voxel engine
+//! Neolith - A high-performance voxel engine
 //!
-//! Built for scalability testing: world generation, chunk management,
+//! Built for scalability from the metal: world generation, chunk management,
 //! and rendering performance at scale.
 
-use blocks::App;
+use neolith::App;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 fn main() {
@@ -11,11 +11,11 @@ fn main() {
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer())
         .with(tracing_subscriber::EnvFilter::from_default_env()
-            .add_directive("blocks=info".parse().unwrap())
+            .add_directive("neolith=info".parse().unwrap())
             .add_directive("wgpu=warn".parse().unwrap()))
         .init();
 
-    tracing::info!("Starting Blocks engine...");
+    tracing::info!("Starting Neolith engine...");
 
     pollster::block_on(App::run());
 }

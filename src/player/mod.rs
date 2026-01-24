@@ -101,6 +101,26 @@ impl Player {
         self.camera.position
     }
 
+    /// Get horizontal movement speed (for footstep audio)
+    pub fn horizontal_speed(&self) -> f32 {
+        (self.velocity.x * self.velocity.x + self.velocity.z * self.velocity.z).sqrt()
+    }
+
+    /// Check if player is on the ground
+    pub fn is_on_ground(&self) -> bool {
+        self.on_ground
+    }
+
+    /// Check if player is sprinting
+    pub fn is_sprinting(&self) -> bool {
+        self.sprint
+    }
+
+    /// Check if player is in fly mode
+    pub fn is_flying(&self) -> bool {
+        self.fly_mode
+    }
+
     /// Get the block currently being targeted (for rendering outline)
     pub fn get_target_block(&self, world: &WorldManager) -> Option<[i32; 3]> {
         let origin = self.camera.position;

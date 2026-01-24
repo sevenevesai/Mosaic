@@ -103,12 +103,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 }
 "#;
 
-/// Sky shader with gradient and sun
+/// Sky shader with gradient, sun, and moon (day/night cycle)
 const SKY_SHADER: &str = r#"
 struct SkyUniform {
     inv_view_proj: mat4x4<f32>,
-    sun_direction: vec4<f32>,
-    screen_size: vec4<f32>,  // xy = screen size, zw = unused
+    sun_direction: vec4<f32>,     // xyz = direction, w = intensity
+    moon_direction: vec4<f32>,    // xyz = direction, w = intensity
+    sky_top_color: vec4<f32>,     // rgb = color, a = time_of_day
+    sky_horizon_color: vec4<f32>, // rgb = color, a = unused
 };
 
 @group(0) @binding(0)
@@ -123,18 +125,16 @@ struct VertexOutput {
 @vertex
 fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     var out: VertexOutput;
-    // Generate fullscreen triangle covering entire screen
     let x = f32(i32(vertex_index & 1u) * 4 - 1);
     let y = f32(i32(vertex_index >> 1u) * 4 - 1);
-    out.clip_position = vec4<f32>(x, y, 0.9999, 1.0);  // Far depth
-    out.ndc = vec2<f32>(x, y);  // Pass NDC directly
+    out.clip_position = vec4<f32>(x, y, 0.9999, 1.0);
+    out.ndc = vec2<f32>(x, y);
     return out;
 }
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Unproject from NDC to world space to get view direction
-    // Use two points along the ray: near and far plane
     let near_point = sky.inv_view_proj * vec4<f32>(in.ndc, -1.0, 1.0);
     let far_point = sky.inv_view_proj * vec4<f32>(in.ndc, 1.0, 1.0);
 
@@ -143,44 +143,84 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     let view_dir = normalize(far_world - near_world);
 
-    // Sky gradient (blue at top, lighter at horizon)
-    let sky_top = vec3<f32>(0.4, 0.65, 0.95);      // Deep blue
-    let sky_horizon = vec3<f32>(0.7, 0.82, 0.95);  // Light blue
+    // Time-based sky gradient from uniform
+    let sky_top = sky.sky_top_color.rgb;
+    let sky_horizon = sky.sky_horizon_color.rgb;
     let horizon_blend = pow(1.0 - max(view_dir.y, 0.0), 2.5);
     var sky_color = mix(sky_top, sky_horizon, horizon_blend);
 
-    // Sun direction (world space)
+    // Sun properties
     let sun_dir = normalize(sky.sun_direction.xyz);
+    let sun_intensity = sky.sun_direction.w;
     let sun_dot = dot(view_dir, sun_dir);
 
-    // Sun disc
-    let sun_size = 0.9975;  // Tight sun disc
-    if (sun_dot > sun_size) {
-        let sun_intensity = smoothstep(sun_size, 0.999, sun_dot);
-        let sun_color = vec3<f32>(1.0, 0.98, 0.9);  // Bright warm white
-        sky_color = mix(sky_color, sun_color, sun_intensity);
+    // Moon properties
+    let moon_dir = normalize(sky.moon_direction.xyz);
+    let moon_intensity = sky.moon_direction.w;
+    let moon_dot = dot(view_dir, moon_dir);
+
+    // Sun rendering (only when above horizon)
+    if (sun_intensity > 0.05) {
+        // Sun disc - warm color that shifts with time
+        let sun_size = 0.9975;
+        if (sun_dot > sun_size) {
+            let disc_intensity = smoothstep(sun_size, 0.999, sun_dot) * sun_intensity;
+            let sun_color = vec3<f32>(1.0, 0.95, 0.85);
+            sky_color = mix(sky_color, sun_color, disc_intensity);
+        }
+
+        // Sun glow
+        let glow_size = 0.95;
+        if (sun_dot > glow_size) {
+            let glow_strength = smoothstep(glow_size, 0.999, sun_dot) * 0.5 * sun_intensity;
+            let glow_color = vec3<f32>(1.0, 0.90, 0.70);
+            sky_color = mix(sky_color, glow_color, glow_strength);
+        }
+
+        // Outer glow
+        let outer_glow_size = 0.85;
+        if (sun_dot > outer_glow_size) {
+            let outer_strength = smoothstep(outer_glow_size, 0.98, sun_dot) * 0.2 * sun_intensity;
+            let outer_color = vec3<f32>(1.0, 0.85, 0.65);
+            sky_color = mix(sky_color, outer_color, outer_strength);
+        }
+
+        // Horizon glow near sun
+        if (view_dir.y < 0.3 && view_dir.y > -0.1) {
+            let horizon_glow = max(sun_dot, 0.0) * (1.0 - abs(view_dir.y) * 3.0) * 0.15 * sun_intensity;
+            sky_color += vec3<f32>(1.0, 0.80, 0.55) * horizon_glow;
+        }
     }
 
-    // Sun glow (larger, softer)
-    let glow_size = 0.95;
-    if (sun_dot > glow_size) {
-        let glow_intensity = smoothstep(glow_size, 0.999, sun_dot) * 0.5;
-        let glow_color = vec3<f32>(1.0, 0.92, 0.75);
-        sky_color = mix(sky_color, glow_color, glow_intensity);
+    // Moon rendering (only when above horizon) - sharp crisp moon, not sun-like
+    if (moon_intensity > 0.05) {
+        // Moon disc - crisp edge, warm pale color
+        let moon_size = 0.9985;
+        if (moon_dot > moon_size) {
+            // Sharp edge transition
+            let disc_intensity = smoothstep(moon_size, 0.9992, moon_dot);
+            let moon_color = vec3<f32>(0.95, 0.90, 0.80);  // Pale warm moon
+            sky_color = mix(sky_color, moon_color, disc_intensity);
+        }
+
+        // Thin tight glow right around moon edge
+        let moon_glow_size = 0.995;
+        if (moon_dot > moon_glow_size && moon_dot <= moon_size) {
+            let glow_strength = smoothstep(moon_glow_size, moon_size, moon_dot) * 0.15;
+            let glow_color = vec3<f32>(0.85, 0.82, 0.75);
+            sky_color = mix(sky_color, glow_color, glow_strength);
+        }
     }
 
-    // Outer glow
-    let outer_glow_size = 0.85;
-    if (sun_dot > outer_glow_size) {
-        let outer_intensity = smoothstep(outer_glow_size, 0.98, sun_dot) * 0.2;
-        let outer_color = vec3<f32>(1.0, 0.88, 0.7);
-        sky_color = mix(sky_color, outer_color, outer_intensity);
-    }
-
-    // Subtle horizon glow near sun
-    if (view_dir.y < 0.3 && view_dir.y > -0.1) {
-        let horizon_glow = max(sun_dot, 0.0) * (1.0 - abs(view_dir.y) * 3.0) * 0.12;
-        sky_color += vec3<f32>(1.0, 0.85, 0.6) * horizon_glow;
+    // Add subtle stars at night (when sun is below horizon)
+    if (sun_intensity < 0.2 && view_dir.y > 0.0) {
+        let star_noise = fract(sin(dot(view_dir.xz * 500.0, vec2<f32>(12.9898, 78.233))) * 43758.5453);
+        let star_threshold = 0.997;
+        if (star_noise > star_threshold) {
+            let star_brightness = (star_noise - star_threshold) / (1.0 - star_threshold);
+            let night_factor = 1.0 - sun_intensity * 5.0;
+            sky_color += vec3<f32>(0.9, 0.85, 0.75) * star_brightness * 0.5 * night_factor * view_dir.y;
+        }
     }
 
     return vec4<f32>(sky_color, 1.0);
@@ -220,12 +260,18 @@ const CHUNK_SHADER: &str = r#"
 struct CameraUniform {
     view_proj: mat4x4<f32>,
     view_pos: vec4<f32>,
+    // Animation data: x = current time, y = spawn time, z = wave speed, w = drop height
+    anim_data: vec4<f32>,
 };
 
-// Light/shadow uniform
+// Light/shadow uniform (day/night cycle)
 struct LightUniform {
     view_proj: mat4x4<f32>,
-    direction: vec4<f32>,  // xyz = direction, w = unused
+    sun_direction: vec4<f32>,    // xyz = direction, w = intensity
+    sun_color: vec4<f32>,        // rgb = color
+    moon_direction: vec4<f32>,   // xyz = direction, w = intensity
+    moon_color: vec4<f32>,       // rgb = warm amber
+    ambient_color: vec4<f32>,    // rgb = ambient, a = time_of_day
 };
 
 @group(0) @binding(0)
@@ -259,19 +305,57 @@ struct VertexOutput {
     @location(4) tile_count: vec2<f32>,     // Tile repeat count for greedy meshing
     @location(5) shadow_pos: vec4<f32>,     // Position in light space for shadow lookup
     @location(6) block_light: f32,          // Block light level (0.0-1.0, from torches etc)
+    @location(7) fade_alpha: f32,           // Fade-in alpha for chunk loading
 };
+
+// Simple hash function for randomization
+fn hash_vec2(p: vec2<f32>) -> f32 {
+    let h = dot(p, vec2<f32>(127.1, 311.7));
+    return fract(sin(h) * 43758.5453);
+}
 
 @vertex
 fn vs_main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
-    out.clip_position = camera.view_proj * vec4<f32>(in.position, 1.0);
-    out.world_position = in.position;
-    // Unpack and normalize normal (Sint8 range is -128 to 127, divide by 127)
-    out.normal = vec3<f32>(
+
+    // Unpack normal first (we need it for top-face detection)
+    let normal = vec3<f32>(
         f32(in.normal_packed.x) / 127.0,
         f32(in.normal_packed.y) / 127.0,
         f32(in.normal_packed.z) / 127.0
     );
+
+    // Animation parameters from camera uniform
+    let current_time = camera.anim_data.x;
+    let spawn_time = camera.anim_data.y;
+    let wave_speed = camera.anim_data.z;  // Blocks per second for wave expansion
+
+    // Position unchanged - no geometry animation
+    var pos = in.position;
+
+    // Use CHUNK position for consistent fade across entire chunk
+    let chunk_pos = floor(pos / 16.0) * 16.0;
+
+    // Distance from camera position (horizontal only for wave effect)
+    let cam_pos = camera.view_pos.xyz;
+    let dist = length(chunk_pos.xz - cam_pos.xz);
+
+    // Calculate when this chunk "spawns" based on wave expansion
+    let chunk_birth = spawn_time + dist / wave_speed;
+
+    // Age of this chunk (time since it should have appeared)
+    let age = current_time - chunk_birth;
+
+    // Simple alpha fade-in: 0 -> 1 over 0.5 seconds
+    let fade_duration = 0.5;
+    var alpha = 1.0;
+    if (age >= 0.0 && age < fade_duration) {
+        alpha = age / fade_duration;
+    }
+
+    out.clip_position = camera.view_proj * vec4<f32>(pos, 1.0);
+    out.world_position = in.position;
+    out.normal = normal;
     out.uv = in.uv;
     out.ao = in.ao_tile_packed.x;
     // Tile counts are stored as bytes 1,2 normalized to 0-1, scale back to 1-255 range
@@ -282,7 +366,9 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     // Block light level (byte 3, 0-255 scaled to 0-1)
     out.block_light = in.ao_tile_packed.w;
     // Transform position to light space for shadow lookup
-    out.shadow_pos = light.view_proj * vec4<f32>(in.position, 1.0);
+    out.shadow_pos = light.view_proj * vec4<f32>(pos, 1.0);
+    // Fade-in alpha
+    out.fade_alpha = alpha;
     return out;
 }
 
@@ -389,23 +475,35 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         discard;
     }
 
-    // === LIGHTING SETUP ===
-    // Sun direction from uniform (normalized)
-    let sun_dir = normalize(light.direction.xyz);
-    let sun_color = vec3<f32>(1.0, 0.93, 0.8);  // Slightly warmer
+    // === DAY/NIGHT LIGHTING SETUP ===
+    // Sun properties from uniform
+    let sun_dir = normalize(light.sun_direction.xyz);
+    let sun_intensity = light.sun_direction.w;
+    let sun_color = light.sun_color.rgb;
 
-    // Sky light (soft blue from above)
+    // Moon properties from uniform
+    let moon_dir = normalize(light.moon_direction.xyz);
+    let moon_intensity = light.moon_direction.w;
+    let moon_color = light.moon_color.rgb;
+
+    // Time-based ambient from uniform
+    let ambient_base = light.ambient_color.rgb;
+
+    // Sky light direction (always from above)
     let sky_dir = vec3<f32>(0.0, 1.0, 0.0);
-    let sky_color = vec3<f32>(0.65, 0.78, 0.95);  // Soft blue
 
-    // Ground bounce (subtle warm from below)
-    let ground_color = vec3<f32>(0.35, 0.28, 0.2);  // Warm brown
+    // Ground bounce color (warm brown, subtle)
+    let ground_color = vec3<f32>(0.35, 0.28, 0.2);
 
     // === SHADOW CALCULATION ===
-    let shadow = calculate_shadow(in.shadow_pos, in.normal, sun_dir);
+    // Shadows are from sun only - fade out as sun sets, no moon shadows
+    let raw_shadow = calculate_shadow(in.shadow_pos, in.normal, sun_dir);
+    // Fade shadow influence with sun intensity - no harsh transition
+    // When sun_intensity < 0.3, shadows start fading; at 0, no shadows
+    let shadow_fade = smoothstep(0.0, 0.3, sun_intensity);
+    let shadow = mix(1.0, raw_shadow, shadow_fade);
 
     // === FACE-BASED BRIGHTNESS ===
-    // Minecraft-style: top=1.0, north/south=0.85, east/west=0.7, bottom=0.5
     var face_brightness = 0.8;
     if (in.normal.y > 0.5) {
         face_brightness = 1.0;      // Top - full brightness
@@ -418,49 +516,46 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     // === DIRECT LIGHTING ===
-    // Sun (main directional light) - fully affected by shadow
+    // Sun contribution (fades with sun_intensity, affected by shadows)
     let sun_ndotl = max(dot(in.normal, sun_dir), 0.0);
-    let sun_contribution = sun_color * sun_ndotl * 0.7 * shadow;
+    let sun_contribution = sun_color * sun_ndotl * 0.7 * sun_intensity * shadow;
 
-    // Sky light (hemisphere from above) - partially affected by shadow
+    // Moon contribution - NO shadows, just soft ambient light
+    let moon_ndotl = max(dot(in.normal, moon_dir), 0.0);
+    let moon_contribution = moon_color * moon_ndotl * 0.25 * moon_intensity;
+
+    // Sky light (hemisphere from above) - reduced at night
     let sky_ndotl = max(dot(in.normal, sky_dir), 0.0) * 0.5 + 0.5;
-    let sky_shadow = mix(0.6, 1.0, shadow);  // Sky light reduced in shadow
-    let sky_contribution = sky_color * sky_ndotl * 0.2 * sky_shadow;
+    let sky_brightness = max(sun_intensity * 0.8, moon_intensity * 0.1);
+    // Sky shadows also fade with sun
+    let sky_shadow = mix(1.0, mix(0.6, 1.0, shadow), shadow_fade);
+    let sky_contribution = ambient_base * sky_ndotl * 0.2 * sky_shadow * (0.2 + sky_brightness * 0.8);
 
-    // Ground bounce (subtle upward fill)
+    // Ground bounce (subtle upward fill) - fades at night
     let ground_ndotl = max(dot(in.normal, -sky_dir), 0.0);
-    let ground_contribution = ground_color * ground_ndotl * 0.08;
+    let ground_contribution = ground_color * ground_ndotl * 0.05 * sun_intensity;
 
-    // Ambient base - reduced in shadow for more pronounced effect
-    let ambient_shadow = mix(0.7, 1.0, shadow);  // Darken ambient in shadow
-    let ambient = vec3<f32>(0.28, 0.28, 0.32) * ambient_shadow;
+    // Ambient base - shadow influence also fades at night
+    let ambient_shadow = mix(1.0, mix(0.7, 1.0, shadow), shadow_fade);
+    let ambient = ambient_base * ambient_shadow;
 
     // === BLOCK LIGHT (Torches, etc.) ===
-    // Block light provides warm illumination independent of sun
-    // in.block_light is 0-1 (scaled from 0-15 light levels)
     let block_light_level = in.block_light;
-    // Apply a curve for more realistic light falloff (gamma-like)
     let block_light_curve = pow(block_light_level, 1.4);
-    // Warm torch color (orange-yellow glow)
     let torch_color = vec3<f32>(1.0, 0.85, 0.6);
-    // Block light is additive and not affected by shadows (it IS the light source)
-    let block_light_contribution = torch_color * block_light_curve * 0.9;
+    // Block light is MORE visible at night (relative to ambient)
+    let night_boost = 1.0 + (1.0 - sun_intensity) * 0.5;
+    let block_light_contribution = torch_color * block_light_curve * 0.9 * night_boost;
 
     // === AMBIENT OCCLUSION ===
-    // Stronger AO contrast for better depth
     let ao_factor = mix(0.25, 1.0, in.ao);
 
     // === COMBINE LIGHTING ===
-    // Natural light (sun, sky, ambient) is affected by face_brightness
-    // because it simulates directional light from the sky (top brighter, bottom darker)
-    let natural_light = (ambient + sun_contribution + sky_contribution + ground_contribution);
+    let natural_light = ambient + sun_contribution + moon_contribution + sky_contribution + ground_contribution;
     let natural_lit = natural_light * face_brightness;
 
-    // Block light (torches) is NOT affected by face_brightness because it's omnidirectional
-    // A torch illuminates ceilings and floors equally - only AO affects it
     let block_lit = block_light_contribution;
 
-    // Combine natural and block light, then apply AO (local occlusion affects all light)
     let total_light = (natural_lit + block_lit) * ao_factor;
     var final_color = tex_color.rgb * total_light;
 
@@ -488,7 +583,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     final_color = mix(final_color, scatter_color, scatter_factor);
     final_color = mix(final_color, horizon_color, fog_factor_clamped);
 
-    return vec4<f32>(final_color, tex_color.a);
+    // Apply fade-in alpha
+    return vec4<f32>(final_color, tex_color.a * in.fade_alpha);
 }
 "#;
 

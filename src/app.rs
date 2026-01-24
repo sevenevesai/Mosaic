@@ -11,10 +11,11 @@ use winit::{
     window::{CursorGrabMode, Window, WindowBuilder},
 };
 
+use crate::audio::AudioManager;
 use crate::player::Player;
 use crate::renderer::{Renderer, DebugMetrics};
 use crate::utils::profiler::FrameProfiler;
-use crate::world::{WorldManager, ChunkPos};
+use crate::world::{WorldManager, ChunkPos, MESH_STATS};
 
 /// Main application state
 pub struct App {
@@ -25,6 +26,7 @@ pub struct App {
     profiler: FrameProfiler,
     last_frame: Instant,
     cursor_grabbed: bool,
+    audio: Option<AudioManager>,
 }
 
 impl App {
@@ -33,26 +35,52 @@ impl App {
 
         let window = Arc::new(
             WindowBuilder::new()
-                .with_title("Blocks Engine")
+                .with_title("Neolith")
                 .with_inner_size(PhysicalSize::new(1280, 720))
                 .build(&event_loop)
                 .expect("Failed to create window"),
         );
 
         // Initialize renderer
-        let renderer = Renderer::new(window.clone()).await;
+        let mut renderer = Renderer::new(window.clone()).await;
 
-        // Initialize world manager
-        let world = WorldManager::new();
+        // Initialize world manager with save directory
+        let save_dir = std::path::PathBuf::from("saves/world1");
+        let mut world = match WorldManager::new_with_save(&save_dir, None) {
+            Ok(w) => {
+                tracing::info!("World loaded/created with seed {}", w.seed());
+                w
+            }
+            Err(e) => {
+                tracing::error!("Failed to initialize world storage: {}, using in-memory only", e);
+                WorldManager::new()
+            }
+        };
+
+        // Load spawn position from storage
+        let spawn_pos = if let Some(spawn) = world.spawn_position() {
+            glam::Vec3::new(spawn[0], spawn[1], spawn[2])
+        } else {
+            glam::Vec3::new(0.0, 80.0, 0.0)
+        };
+        tracing::info!("Player spawning at ({:.1}, {:.1}, {:.1})", spawn_pos.x, spawn_pos.y, spawn_pos.z);
+
+        // Trigger initial chunk loading - distance-prioritized, non-blocking
+        // Chunks will load progressively outward from spawn position
+        world.update(&spawn_pos);
+
+        // Initialize audio system
+        let audio = AudioManager::new();
 
         let mut app = App {
             window,
             renderer,
             world,
-            player: Player::new(glam::Vec3::new(0.0, 80.0, 0.0)),
+            player: Player::new(spawn_pos),
             profiler: FrameProfiler::new(),
             last_frame: Instant::now(),
             cursor_grabbed: false,
+            audio,
         };
 
         tracing::info!("Engine initialized successfully");
@@ -91,6 +119,10 @@ impl App {
         match event {
             WindowEvent::CloseRequested => {
                 tracing::info!("Shutting down...");
+                // Save player position before exit
+                let pos = self.player.position();
+                self.world.set_spawn(pos.x, pos.y, pos.z);
+                tracing::info!("Saved player position: ({:.1}, {:.1}, {:.1})", pos.x, pos.y, pos.z);
                 elwt.exit();
             }
 
@@ -111,6 +143,14 @@ impl App {
                         }
                         KeyCode::F3 if pressed => {
                             self.renderer.toggle_debug_overlay();
+                        }
+                        KeyCode::KeyT if pressed => {
+                            let speed = self.renderer.toggle_cycle_speed();
+                            if speed == 0.0 {
+                                tracing::info!("Day/night cycle: PAUSED");
+                            } else {
+                                tracing::info!("Day/night cycle speed: {}x", speed);
+                            }
                         }
                         _ => {
                             self.player.handle_key(key_code, pressed);
@@ -155,11 +195,26 @@ impl App {
 
         self.profiler.begin_frame();
 
+        // Update day/night cycle
+        self.renderer.update_time(dt.as_secs_f32());
+
         // Update player
         if self.cursor_grabbed {
             self.player.update(dt, Some(&self.world));
             // Process block break/place interactions
             self.player.process_block_interactions(&mut self.world);
+
+            // Update footstep audio (only when not flying)
+            if let Some(ref mut audio) = self.audio {
+                if !self.player.is_flying() {
+                    audio.update_footsteps(
+                        dt,
+                        self.player.horizontal_speed(),
+                        self.player.is_on_ground(),
+                        self.player.is_sprinting(),
+                    );
+                }
+            }
         }
 
         // Update world (chunk loading, meshing)
@@ -216,6 +271,11 @@ impl App {
             light_level,
             sky_light,
             block_light,
+            // Meshing stats
+            mesh_chunks_total: MESH_STATS.chunks_meshed.load(std::sync::atomic::Ordering::Relaxed),
+            mesh_avg_time_us: MESH_STATS.avg_mesh_time_us(),
+            mesh_total_time_ms: MESH_STATS.total_mesh_time_ms(),
+            mesh_total_quads: MESH_STATS.total_quads.load(std::sync::atomic::Ordering::Relaxed),
         };
 
         // Render

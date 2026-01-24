@@ -6,10 +6,12 @@ mod chunk;
 mod generation;
 pub mod lighting;
 mod meshing;
+pub mod storage;
 
 pub use chunk::{Block, Chunk, ChunkPos};
 pub use lighting::{LightEngine, apply_light_updates};
-pub use meshing::{ChunkMesh, ChunkVertex, GpuMesh, LodLevel, build_chunk_mesh, build_chunk_mesh_lod};
+pub use meshing::{ChunkMesh, ChunkVertex, GpuMesh, LodLevel, build_chunk_mesh, build_chunk_mesh_lod, MESH_STATS};
+pub use storage::{WorldStorage, SharedStorage, StorageError, create_shared_storage};
 
 use std::sync::Arc;
 
@@ -171,15 +173,37 @@ pub struct WorldManager {
 
     /// Light propagation engine
     light_engine: LightEngine,
+
+    /// World storage for persistence (None if not saving)
+    storage: Option<storage::SharedStorage>,
+
+    /// World generation seed
+    seed: u64,
 }
 
 impl WorldManager {
+    /// Create a new world manager without persistence
     pub fn new() -> Self {
+        Self::new_internal(None, 12345)
+    }
+
+    /// Create a new world manager with persistence to the given save directory
+    pub fn new_with_save(save_path: &std::path::Path, seed: Option<u64>) -> Result<Self, storage::StorageError> {
+        let shared_storage = storage::create_shared_storage(save_path, seed)?;
+        let actual_seed = shared_storage.lock().seed();
+        tracing::info!("World storage initialized at {:?} with seed {}", save_path, actual_seed);
+        Ok(Self::new_internal(Some(shared_storage), actual_seed))
+    }
+
+    fn new_internal(storage: Option<storage::SharedStorage>, seed: u64) -> Self {
         let (task_sender, task_receiver) = crossbeam_channel::unbounded::<ChunkTask>();
         let (result_sender, result_receiver) = crossbeam_channel::unbounded::<ChunkResult>();
 
         let chunks: Arc<RwLock<AHashMap<ChunkPos, Arc<Chunk>>>> =
             Arc::new(RwLock::new(AHashMap::new()));
+
+        // Clone storage for workers
+        let worker_storage = storage.clone();
 
         // Spawn worker threads
         let num_workers = num_cpus::get().max(2).min(8);
@@ -191,11 +215,13 @@ impl WorldManager {
             let task_rx = task_receiver.clone();
             let result_tx = result_sender.clone();
             let chunks_ref = chunks.clone();
+            let storage_ref = worker_storage.clone();
+            let worker_seed = seed;
 
             let handle = std::thread::Builder::new()
                 .name(format!("chunk-worker-{}", i))
                 .spawn(move || {
-                    Self::worker_loop(task_rx, result_tx, chunks_ref);
+                    Self::worker_loop(task_rx, result_tx, chunks_ref, storage_ref, worker_seed);
                 })
                 .expect("Failed to spawn worker thread");
 
@@ -212,6 +238,8 @@ impl WorldManager {
             _workers: workers,
             last_player_chunk: None,
             light_engine: LightEngine::new(),
+            storage,
+            seed,
         }
     }
 
@@ -219,11 +247,31 @@ impl WorldManager {
         task_rx: Receiver<ChunkTask>,
         result_tx: Sender<ChunkResult>,
         chunks: Arc<RwLock<AHashMap<ChunkPos, Arc<Chunk>>>>,
+        storage: Option<storage::SharedStorage>,
+        seed: u64,
     ) {
         while let Ok(task) = task_rx.recv() {
             match task {
                 ChunkTask::Generate(pos) => {
-                    let chunk = generation::generate_chunk(pos);
+                    // Try loading from disk first if storage is available
+                    let chunk = if let Some(ref storage) = storage {
+                        match storage.lock().load_chunk(pos) {
+                            Ok(Some(loaded)) => {
+                                tracing::trace!("Loaded chunk {:?} from disk", pos);
+                                loaded
+                            }
+                            Ok(None) => {
+                                // Not on disk, generate it
+                                generation::generate_chunk_with_seed(pos, seed)
+                            }
+                            Err(e) => {
+                                tracing::warn!("Failed to load chunk {:?}: {}, regenerating", pos, e);
+                                generation::generate_chunk_with_seed(pos, seed)
+                            }
+                        }
+                    } else {
+                        generation::generate_chunk_with_seed(pos, seed)
+                    };
                     let _ = result_tx.send(ChunkResult::Generated(pos, Box::new(chunk)));
                 }
                 ChunkTask::Mesh(pos, lod) => {
@@ -289,14 +337,20 @@ impl WorldManager {
             }
         }
 
-        // Only do full update if player moved to a new chunk
-        if self.last_player_chunk == Some(player_chunk) {
+        // Queue chunks for generation around player, prioritized by distance
+        // Limit batch size to allow progressive loading (workers will process these then we queue more)
+        const MAX_PENDING_GEN: usize = 200; // Keep worker queue manageable
+
+        // Only queue more if we have room
+        if self.pending_generation.len() >= MAX_PENDING_GEN {
             return;
         }
-        self.last_player_chunk = Some(player_chunk);
 
-        // Queue chunks for generation around player
+        let budget = MAX_PENDING_GEN - self.pending_generation.len();
+
         // Vertical range: Y chunks 0-9 covers blocks 0-159, enough for terrain + mountains
+        let mut chunks_to_queue: Vec<(ChunkPos, i32)> = Vec::new();
+
         for dy in 0..=9 {
             for dz in -RENDER_DISTANCE..=RENDER_DISTANCE {
                 for dx in -RENDER_DISTANCE..=RENDER_DISTANCE {
@@ -309,20 +363,27 @@ impl WorldManager {
                     if !self.chunks.read().contains_key(&pos)
                         && !self.pending_generation.contains_key(&pos)
                     {
-                        self.pending_generation.insert(pos, ());
-                        let _ = self.task_sender.send(ChunkTask::Generate(pos));
+                        // Distance from player chunk (prioritize horizontal, then vertical)
+                        let vert_dist = (dy - player_chunk.y).abs();
+                        let dist_sq = dx * dx + dz * dz + vert_dist * vert_dist * 2;
+                        chunks_to_queue.push((pos, dist_sq));
                     }
                 }
             }
         }
 
-        // Upgrade LOD for chunks that are now closer
-        for (pos, mesh) in &self.meshes {
-            let desired_lod = self.calculate_lod(*pos, player_chunk);
-            if (desired_lod as usize) < (mesh.lod as usize) {
-                // Need higher detail - will be handled by queue_meshing_with_lod
-            }
+        // Sort by distance (closest first) and queue only up to budget
+        chunks_to_queue.sort_by_key(|(_, dist)| *dist);
+        for (pos, _) in chunks_to_queue.into_iter().take(budget) {
+            self.pending_generation.insert(pos, ());
+            let _ = self.task_sender.send(ChunkTask::Generate(pos));
         }
+
+        // Only do LOD upgrades and unloading when player moves to a new chunk
+        if self.last_player_chunk == Some(player_chunk) {
+            return;
+        }
+        self.last_player_chunk = Some(player_chunk);
 
         // Queue LOD upgrades for nearby chunks
         let chunks_to_upgrade: Vec<_> = self.meshes
@@ -576,6 +637,11 @@ impl WorldManager {
             }
         }
 
+        // Mark chunk as dirty for saving
+        if let Some(ref storage) = self.storage {
+            storage.lock().mark_dirty(chunk_pos);
+        }
+
         true
     }
 
@@ -586,10 +652,220 @@ impl WorldManager {
             self.force_remesh(pos);
         }
     }
+
+    /// Save all dirty chunks and world metadata (blocking)
+    pub fn save_all(&mut self) {
+        let Some(ref storage) = self.storage else {
+            return;
+        };
+
+        let mut storage = storage.lock();
+
+        // Get all dirty chunks
+        let dirty_positions = storage.take_dirty_chunks();
+        let dirty_count = dirty_positions.len();
+
+        if dirty_count > 0 {
+            tracing::info!("Saving {} dirty chunks...", dirty_count);
+
+            // Save each dirty chunk
+            let chunks = self.chunks.read();
+            let mut saved = 0;
+            for pos in dirty_positions {
+                if let Some(chunk) = chunks.get(&pos) {
+                    match storage.save_chunk(pos, chunk) {
+                        Ok(_) => saved += 1,
+                        Err(e) => tracing::error!("Failed to save chunk {:?}: {}", pos, e),
+                    }
+                }
+            }
+
+            tracing::info!("Saved {}/{} chunks", saved, dirty_count);
+        }
+
+        // Save metadata
+        if let Err(e) = storage.save_meta() {
+            tracing::error!("Failed to save world metadata: {}", e);
+        }
+
+        // Flush all region files
+        if let Err(e) = storage.flush() {
+            tracing::error!("Failed to flush region files: {}", e);
+        }
+    }
+
+    /// Get the number of dirty chunks waiting to be saved
+    pub fn dirty_chunk_count(&self) -> usize {
+        self.storage.as_ref().map(|s| s.lock().dirty_count()).unwrap_or(0)
+    }
+
+    /// Check if storage is enabled
+    pub fn has_storage(&self) -> bool {
+        self.storage.is_some()
+    }
+
+    /// Get the world seed
+    pub fn seed(&self) -> u64 {
+        self.seed
+    }
+
+    /// Get player spawn position from storage
+    pub fn spawn_position(&self) -> Option<[f32; 3]> {
+        self.storage.as_ref().map(|s| s.lock().spawn_position())
+    }
+
+    /// Set player spawn position in storage
+    pub fn set_spawn(&mut self, x: f32, y: f32, z: f32) {
+        if let Some(ref storage) = self.storage {
+            storage.lock().set_spawn(x, y, z);
+        }
+    }
+
+    /// Load essential chunks around spawn position and wait for them to be ready
+    /// This ensures the player doesn't spawn in unloaded terrain
+    /// Returns the number of chunks that were loaded
+    pub fn load_spawn_area(&mut self, spawn_pos: Vec3, radius: i32) -> usize {
+        let spawn_chunk = ChunkPos::from_world_pos(spawn_pos);
+        let spawn_y = spawn_chunk.y;
+
+        // Calculate which chunks we need - prioritize by distance
+        let mut chunks_needed: Vec<(ChunkPos, i32)> = Vec::new();
+
+        // Load chunks in a cylinder around spawn (full vertical column)
+        for dy in -2..=3 {
+            let y = spawn_y + dy;
+            if y < 0 || y > 9 {
+                continue;
+            }
+            for dz in -radius..=radius {
+                for dx in -radius..=radius {
+                    // Distance for priority (closer = lower = higher priority)
+                    let dist_sq = dx * dx + dz * dz + dy * dy * 4; // Weight Y more
+                    let pos = ChunkPos {
+                        x: spawn_chunk.x + dx,
+                        y,
+                        z: spawn_chunk.z + dz,
+                    };
+                    chunks_needed.push((pos, dist_sq));
+                }
+            }
+        }
+
+        // Sort by distance (closest first)
+        chunks_needed.sort_by_key(|(_, dist)| *dist);
+
+        // Queue generation for all needed chunks
+        let mut queued = 0;
+        for (pos, _) in &chunks_needed {
+            if !self.chunks.read().contains_key(pos)
+                && !self.pending_generation.contains_key(pos)
+            {
+                self.pending_generation.insert(*pos, ());
+                let _ = self.task_sender.send(ChunkTask::Generate(*pos));
+                queued += 1;
+            }
+        }
+
+        tracing::info!(
+            "Spawn area: queued {} chunks around ({}, {}, {}), radius {}",
+            queued, spawn_chunk.x, spawn_chunk.y, spawn_chunk.z, radius
+        );
+
+        // Wait for essential chunks to be generated AND meshed
+        // Use most of the radius as essential to prevent gaps
+        let essential_radius = radius.max(2) - 1;
+        let mut essential_chunks: Vec<ChunkPos> = Vec::new();
+        for dy in -1..=2 {
+            let y = spawn_y + dy;
+            if y < 0 || y > 9 {
+                continue;
+            }
+            for dz in -essential_radius..=essential_radius {
+                for dx in -essential_radius..=essential_radius {
+                    essential_chunks.push(ChunkPos {
+                        x: spawn_chunk.x + dx,
+                        y,
+                        z: spawn_chunk.z + dz,
+                    });
+                }
+            }
+        }
+
+        // Poll until essential chunks are ready (with timeout)
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(10);
+
+        while start.elapsed() < timeout {
+            // Process worker results
+            while let Ok(result) = self.result_receiver.try_recv() {
+                match result {
+                    ChunkResult::Generated(pos, chunk) => {
+                        self.pending_generation.remove(&pos);
+                        self.chunks.write().insert(pos, Arc::new(*chunk));
+                        // Immediately queue meshing for essential chunks
+                        if essential_chunks.contains(&pos) {
+                            self.queue_meshing_with_lod(pos, LodLevel::Full);
+                        }
+                    }
+                    ChunkResult::Meshed(pos, mesh) => {
+                        self.pending_meshing.remove(&pos);
+                        self.meshes.insert(pos, mesh);
+                    }
+                }
+            }
+
+            // Check if all essential chunks have meshes
+            let ready_count = essential_chunks.iter()
+                .filter(|pos| self.meshes.contains_key(pos))
+                .count();
+
+            if ready_count >= essential_chunks.len() {
+                tracing::info!(
+                    "Spawn area ready: {}/{} essential chunks loaded in {:.1}s",
+                    ready_count, essential_chunks.len(), start.elapsed().as_secs_f32()
+                );
+                return ready_count;
+            }
+
+            // Small sleep to avoid busy-waiting
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        // Timeout - report what we got
+        let ready_count = essential_chunks.iter()
+            .filter(|pos| self.meshes.contains_key(pos))
+            .count();
+        tracing::warn!(
+            "Spawn area timeout: only {}/{} essential chunks ready after {:.1}s",
+            ready_count, essential_chunks.len(), timeout.as_secs_f32()
+        );
+        ready_count
+    }
+
+    /// Check if the immediate area around a position has loaded chunks
+    pub fn is_area_ready(&self, pos: Vec3, radius: i32) -> bool {
+        let chunk_pos = ChunkPos::from_world_pos(pos);
+        for dz in -radius..=radius {
+            for dx in -radius..=radius {
+                let check = ChunkPos {
+                    x: chunk_pos.x + dx,
+                    y: chunk_pos.y,
+                    z: chunk_pos.z + dz,
+                };
+                if !self.meshes.contains_key(&check) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
 }
 
 impl Drop for WorldManager {
     fn drop(&mut self) {
+        // Save all dirty chunks before shutting down
+        self.save_all();
+
         // Signal workers to shut down
         for _ in &self._workers {
             let _ = self.task_sender.send(ChunkTask::Shutdown);

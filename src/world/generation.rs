@@ -7,13 +7,12 @@ use noise::{NoiseFn, Perlin, Fbm, MultiFractal};
 use super::chunk::{Block, Chunk, ChunkPos};
 use crate::constants::{CHUNK_SIZE, CHUNK_SIZE_I32};
 
-/// Generate a chunk at the given position
-pub fn generate_chunk(pos: ChunkPos) -> Chunk {
+/// Generate a chunk at the given position with the specified seed
+pub fn generate_chunk_with_seed(pos: ChunkPos, seed: u64) -> Chunk {
     let mut chunk = Chunk::new();
-    let generator = TerrainGenerator::new(12345); // Fixed seed for reproducibility
+    let generator = TerrainGenerator::new(seed as u32);
 
     let world_x = pos.x * CHUNK_SIZE_I32;
-    let world_y = pos.y * CHUNK_SIZE_I32;
     let world_z = pos.z * CHUNK_SIZE_I32;
 
     // First pass: generate base terrain
@@ -21,7 +20,7 @@ pub fn generate_chunk(pos: ChunkPos) -> Chunk {
         for y in 0..CHUNK_SIZE {
             for x in 0..CHUNK_SIZE {
                 let wx = world_x + x as i32;
-                let wy = world_y + y as i32;
+                let wy = (pos.y * CHUNK_SIZE_I32) + y as i32;
                 let wz = world_z + z as i32;
 
                 let block = generator.get_block(wx, wy, wz);
@@ -34,6 +33,11 @@ pub fn generate_chunk(pos: ChunkPos) -> Chunk {
     generator.add_trees(&mut chunk, pos);
 
     chunk
+}
+
+/// Generate a chunk at the given position (uses default seed for backwards compatibility)
+pub fn generate_chunk(pos: ChunkPos) -> Chunk {
+    generate_chunk_with_seed(pos, 12345)
 }
 
 /// Terrain generator using layered noise

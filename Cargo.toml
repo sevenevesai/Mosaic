@@ -1,8 +1,8 @@
 [package]
-name = "blocks"
+name = "neolith"
 version = "0.1.0"
 edition = "2021"
-description = "A modern voxel engine built for scalability and performance"
+description = "Neolith - A high-performance voxel engine built for scalability from the metal"
 
 [dependencies]
 # Graphics
@@ -30,6 +30,9 @@ image = { version = "0.24", default-features = false, features = ["png"] }
 # Persistence
 zstd = "0.13"
 lru = "0.12"
+
+# Audio
+rodio = "0.19"
 
 # Profiling
 tracing = "0.1"

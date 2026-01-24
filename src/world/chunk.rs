@@ -108,6 +108,13 @@ impl Block {
     pub fn is_light_transparent(&self) -> bool {
         matches!(self, Block::Air | Block::Water | Block::Leaves | Block::Torch)
     }
+
+    /// Get texture index for a specific face direction
+    /// face_idx: 0=top(+Y), 1=bottom(-Y), 2=front(+Z), 3=back(-Z), 4=left(-X), 5=right(+X)
+    #[inline]
+    pub fn face_texture(&self, face_idx: usize) -> u32 {
+        self.texture_indices()[face_idx]
+    }
 }
 
 impl From<u8> for Block {

@@ -1,4 +1,4 @@
-# Blocks Engine Roadmap
+# Neolith Engine Roadmap
 
 ## Must Do (Critical / Blocking)
 
@@ -8,7 +8,7 @@
 
 - [x] **Collision detection** - Player currently flies through blocks. Need AABB vs voxel collision for walking/jumping.
 
-- [ ] **Chunk save/load** - Persist world to disk. Simple format: chunk position + block data.
+- [x] **Chunk save/load** - Persist world to disk. Simple format: chunk position + block data.
 
 ---
 
@@ -18,15 +18,19 @@
 
 - [x] **On-screen debug overlay** - F3 currently logs to console. Render text showing FPS, position, chunk count, triangle count.
 
+- [x] **Shadow mapping** - Directional sun shadows with PCF filtering and frustum-culled shadow pass.
+
+- [x] **Audio system** - Basic footstep sounds using rodio. Alternating sounds, speed-based timing.
+
 - [ ] **GPU profiler fix** - Async buffer mapping in wgpu 0.19 is tricky. Either fix properly or upgrade to wgpu 0.20+ with better async support.
 
 - [ ] **Ambient occlusion** - AO calculation exists but simplified. Implement proper corner-based AO for better visual depth.
 
 - [ ] **Water rendering** - Water blocks exist but render as solid. Need transparency, separate render pass, wave animation.
 
-- [ ] **Day/night cycle** - Animate sun direction in shader, adjust sky color and fog.
+- [x] **Day/night cycle** - Full sun/moon system with warm color palette, smooth shadow transitions, T key speed control.
 
-- [ ] **Custom texture loading** - Replace procedural atlas with actual PNG texture atlas from `assets/textures/`.
+- [ ] **Block-specific footsteps** - Different sounds for stone, sand, wood, etc. Currently only grass.
 
 ---
 
@@ -58,7 +62,7 @@
 
 ## Technical Debt
 
-- [ ] **Fix MDI rendering** - `renderer/chunk_pool.rs` has multi-draw indirect infrastructure but causes visual bugs (missing/partial chunks). Pool eviction and slot management need debugging.
+- [x] **Fix MDI rendering** - Multi-draw indirect now working. Chunks sync to pool, single draw call for pooled chunks.
 - [ ] Clean up unused code warnings (`cargo fix --lib -p blocks`)
 - [ ] Remove `_unused` variable prefixes where possible
 - [ ] Document public APIs with doc comments
@@ -69,17 +73,19 @@
 
 ## Version Milestones
 
-### v0.1 - Playable Demo
-- Greedy meshing working
-- Block place/break
-- Basic collision
-- Save/load
+### v0.1 - Playable Demo ✓
+- [x] Greedy meshing working
+- [x] Block place/break
+- [x] Basic collision
+- [x] Save/load (region files + zstd)
+- [x] Shadow mapping
+- [x] Basic audio (footsteps)
 
 ### v0.2 - Visual Polish
-- Custom textures
-- Proper AO
-- Water rendering
-- Day/night
+- [ ] Proper AO (GTAO or corner-based)
+- [ ] Water rendering
+- [x] Day/night cycle
+- [ ] Block-specific sounds
 
 ### v0.3 - Gameplay
 - Inventory
@@ -89,7 +95,7 @@
 ### v0.4 - Scale
 - [x] LOD system active
 - [x] Performance optimizations (greedy mesh, packed vertices)
-- [ ] Multi-draw indirect (code exists but disabled)
+- [x] Multi-draw indirect (MDI working, single draw call for pooled chunks)
 - [ ] Larger render distance (32+ chunks)
 
 ---
@@ -508,10 +514,10 @@ Paradigm shift where GPU dynamically schedules new workloads at runtime.
 ```
 
 **Recommended Implementation Order:**
-1. Binary Greedy Meshing (replace `meshing.rs` algorithm)
+1. ~~Binary Greedy Meshing~~ ✓ (pure bitwise operations)
 2. Vertex compression to 16 bytes
 3. 16-bit indices
-4. Debug & enable MDI in `chunk_pool.rs`
+4. ~~Debug & enable MDI~~ ✓ (working, single draw call)
 5. GPU frustum culling (compute shader)
 6. Hi-Z occlusion culling
 7. GTAO post-process

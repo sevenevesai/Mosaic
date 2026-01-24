@@ -3,6 +3,7 @@
 //! Core modules for the voxel engine.
 
 pub mod app;
+pub mod audio;
 pub mod renderer;
 pub mod world;
 pub mod player;

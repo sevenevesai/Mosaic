@@ -10,7 +10,7 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 use ahash::AHashMap;
 
-use super::chunk::{Block, Chunk, ChunkPos};
+use super::chunk::{Chunk, ChunkPos};
 use crate::constants::{CHUNK_SIZE, CHUNK_SIZE_I32};
 
 /// Node in the light propagation queue

@@ -183,6 +183,16 @@ impl WorldStorage {
         Ok(())
     }
 
+    /// Get player spawn position
+    pub fn spawn_position(&self) -> [f32; 3] {
+        self.meta.spawn_position()
+    }
+
+    /// Set player spawn position
+    pub fn set_spawn(&mut self, x: f32, y: f32, z: f32) {
+        self.meta.set_spawn(x, y, z);
+    }
+
     /// Flush all open region files to disk
     pub fn flush(&mut self) -> Result<(), StorageError> {
         // Flush all cached regions

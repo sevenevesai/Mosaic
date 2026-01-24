@@ -86,6 +86,12 @@ pub struct DebugMetrics {
     pub light_level: u8,      // Combined light level at player position
     pub sky_light: u8,        // Sky light component
     pub block_light: u8,      // Block light component
+
+    // Meshing performance
+    pub mesh_chunks_total: u32,       // Total chunks meshed since reset
+    pub mesh_avg_time_us: f64,        // Average mesh time per chunk (microseconds)
+    pub mesh_total_time_ms: f64,      // Total mesh time since reset
+    pub mesh_total_quads: u64,        // Total quads generated
 }
 
 /// Debug overlay rendering system
@@ -501,7 +507,8 @@ impl DebugOverlay {
         let log_entry = format!(
             "[Session +{:>5.0}s] FPS: {:>4.0} | Frame: {:>5.2}ms | GPU: {:>5.2}ms | \
 Tris: {:>5}K | Chunks: {:>4} loaded {:>3} rendered | \
-Pending: {:>3} gen {:>3} mesh | Verts: {:>6}K\n",
+Pending: {:>3} gen {:>3} mesh | Verts: {:>6}K | \
+Mesh: {:>6.0}us/chunk ({} chunks, {:.1}ms total, {}K quads)\n",
             elapsed_secs,
             metrics.fps,
             metrics.frame_time_ms,
@@ -512,6 +519,10 @@ Pending: {:>3} gen {:>3} mesh | Verts: {:>6}K\n",
             metrics.chunks_pending_gen,
             metrics.chunks_pending_mesh,
             metrics.total_vertices / 1000,
+            metrics.mesh_avg_time_us,
+            metrics.mesh_chunks_total,
+            metrics.mesh_total_time_ms,
+            metrics.mesh_total_quads / 1000,
         );
 
         if let Ok(mut file) = OpenOptions::new()
@@ -576,6 +587,9 @@ Pending: {:>3} gen {:>3} mesh | Verts: {:>6}K\n",
             String::new(),
             format!("Pending: {} gen, {} mesh", metrics.chunks_pending_gen, metrics.chunks_pending_mesh),
             format!("Vertices: {}K", metrics.total_vertices / 1000),
+            String::new(),
+            format!("Mesh: {:.0}us/chunk ({} chunks)", metrics.mesh_avg_time_us, metrics.mesh_chunks_total),
+            format!("Mesh total: {:.1}ms, {}K quads", metrics.mesh_total_time_ms, metrics.mesh_total_quads / 1000),
             String::new(),
             format!("XYZ: {:.1}, {:.1}, {:.1}", metrics.pos_x, metrics.pos_y, metrics.pos_z),
             format!("Chunk: {}, {}, {}", metrics.chunk_x, metrics.chunk_y, metrics.chunk_z),
