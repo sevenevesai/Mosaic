@@ -417,6 +417,7 @@ impl WorldManager {
         }
     }
 
+    #[allow(dead_code)]
     fn queue_meshing(&mut self, pos: ChunkPos) {
         self.queue_meshing_with_lod(pos, LodLevel::Full);
     }

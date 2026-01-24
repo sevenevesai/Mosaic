@@ -36,6 +36,7 @@ pub fn generate_chunk_with_seed(pos: ChunkPos, seed: u64) -> Chunk {
 }
 
 /// Generate a chunk at the given position (uses default seed for backwards compatibility)
+#[allow(dead_code)]
 pub fn generate_chunk(pos: ChunkPos) -> Chunk {
     generate_chunk_with_seed(pos, 12345)
 }
@@ -218,7 +219,6 @@ impl TerrainGenerator {
     /// Checks an expanded area to capture trees from neighboring chunks that extend into this one
     fn add_trees(&self, chunk: &mut Chunk, pos: ChunkPos) {
         let world_x = pos.x * CHUNK_SIZE_I32;
-        let world_y = pos.y * CHUNK_SIZE_I32;
         let world_z = pos.z * CHUNK_SIZE_I32;
 
         // Tree canopy can extend up to 3 blocks in each direction

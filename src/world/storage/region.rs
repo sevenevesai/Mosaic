@@ -4,7 +4,7 @@
 //! Format inspired by Minecraft's region files but extended for 3D.
 
 use std::fs::{File, OpenOptions};
-use std::io::{self, Read, Write, Seek, SeekFrom, BufReader, BufWriter};
+use std::io::{Read, Write, Seek, SeekFrom};
 use std::path::Path;
 
 use super::chunk_io::{serialize_chunk, deserialize_chunk};
@@ -91,7 +91,8 @@ impl ChunkTableEntry {
 pub struct RegionFile {
     /// Underlying file
     file: File,
-    /// Path to the file
+    /// Path to the file (kept for debugging/logging)
+    #[allow(dead_code)]
     path: std::path::PathBuf,
     /// Chunk lookup table
     chunk_table: Vec<ChunkTableEntry>,

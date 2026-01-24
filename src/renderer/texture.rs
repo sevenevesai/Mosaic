@@ -1,7 +1,7 @@
 //! Texture atlas handling for voxel blocks
 
 use crate::constants::TEXTURE_TILE_SIZE;
-use image::{GenericImageView, ImageBuffer, Rgba};
+use image::{ImageBuffer, Rgba};
 use std::path::Path;
 
 /// Texture atlas for block textures

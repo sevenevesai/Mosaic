@@ -63,7 +63,7 @@
 ## Technical Debt
 
 - [x] **Fix MDI rendering** - Multi-draw indirect now working. Chunks sync to pool, single draw call for pooled chunks.
-- [ ] Clean up unused code warnings (`cargo fix --lib -p blocks`)
+- [x] Clean up unused code warnings (30 warnings fixed)
 - [ ] Remove `_unused` variable prefixes where possible
 - [ ] Document public APIs with doc comments
 - [ ] Add unit tests for chunk operations

@@ -378,6 +378,8 @@ pub fn build_chunk_mesh(
 }
 
 /// Simple face-by-face meshing (more triangles but guaranteed correct)
+/// Kept as fallback/reference implementation
+#[allow(dead_code)]
 fn build_chunk_mesh_simple(
     pos: ChunkPos,
     chunk: &Arc<Chunk>,
@@ -439,6 +441,7 @@ fn build_chunk_mesh_simple(
     }
 }
 
+#[allow(dead_code)]
 fn get_tile_uvs(tex_idx: u32) -> ([f32; 2], [f32; 2], [f32; 2], [f32; 2]) {
     let tiles_per_row = 4u32; // 4x4 grid of 256x256 tiles
     let tile_size = 1.0 / tiles_per_row as f32;
@@ -450,6 +453,7 @@ fn get_tile_uvs(tex_idx: u32) -> ([f32; 2], [f32; 2], [f32; 2], [f32; 2]) {
     ([u0, v1], [u1, v1], [u1, v0], [u0, v0])
 }
 
+#[allow(dead_code)]
 fn add_quad(
     vertices: &mut Vec<ChunkVertex>,
     indices: &mut Vec<u32>,
@@ -470,6 +474,7 @@ fn add_quad(
 // Order: bottom-left -> bottom-right -> top-right -> top-left
 
 // Top face (+Y normal) - camera above looking down
+#[allow(dead_code)]
 fn add_face_top(v: &mut Vec<ChunkVertex>, i: &mut Vec<u32>, x: f32, y: f32, z: f32, tex: u32) {
     let (uv0, uv1, uv2, uv3) = get_tile_uvs(tex);
     let s = BLOCK_SCALE;
@@ -487,6 +492,7 @@ fn add_face_top(v: &mut Vec<ChunkVertex>, i: &mut Vec<u32>, x: f32, y: f32, z: f
 }
 
 // Bottom face (-Y normal) - camera below looking up
+#[allow(dead_code)]
 fn add_face_bottom(v: &mut Vec<ChunkVertex>, i: &mut Vec<u32>, x: f32, y: f32, z: f32, tex: u32) {
     let (uv0, uv1, uv2, uv3) = get_tile_uvs(tex);
     let s = BLOCK_SCALE;
@@ -504,6 +510,7 @@ fn add_face_bottom(v: &mut Vec<ChunkVertex>, i: &mut Vec<u32>, x: f32, y: f32, z
 }
 
 // Front face (+Z normal) - camera in front looking at -Z
+#[allow(dead_code)]
 fn add_face_front(v: &mut Vec<ChunkVertex>, i: &mut Vec<u32>, x: f32, y: f32, z: f32, tex: u32) {
     let (uv0, uv1, uv2, uv3) = get_tile_uvs(tex);
     let s = BLOCK_SCALE;
@@ -521,6 +528,7 @@ fn add_face_front(v: &mut Vec<ChunkVertex>, i: &mut Vec<u32>, x: f32, y: f32, z:
 }
 
 // Back face (-Z normal) - camera behind looking at +Z
+#[allow(dead_code)]
 fn add_face_back(v: &mut Vec<ChunkVertex>, i: &mut Vec<u32>, x: f32, y: f32, z: f32, tex: u32) {
     let (uv0, uv1, uv2, uv3) = get_tile_uvs(tex);
     let s = BLOCK_SCALE;
@@ -538,6 +546,7 @@ fn add_face_back(v: &mut Vec<ChunkVertex>, i: &mut Vec<u32>, x: f32, y: f32, z: 
 }
 
 // Left face (-X normal) - camera to the left looking at +X
+#[allow(dead_code)]
 fn add_face_left(v: &mut Vec<ChunkVertex>, i: &mut Vec<u32>, x: f32, y: f32, z: f32, tex: u32) {
     let (uv0, uv1, uv2, uv3) = get_tile_uvs(tex);
     let s = BLOCK_SCALE;
@@ -555,6 +564,7 @@ fn add_face_left(v: &mut Vec<ChunkVertex>, i: &mut Vec<u32>, x: f32, y: f32, z: 
 }
 
 // Right face (+X normal) - camera to the right looking at -X
+#[allow(dead_code)]
 fn add_face_right(v: &mut Vec<ChunkVertex>, i: &mut Vec<u32>, x: f32, y: f32, z: f32, tex: u32) {
     let (uv0, uv1, uv2, uv3) = get_tile_uvs(tex);
     let s = BLOCK_SCALE;
@@ -1105,6 +1115,7 @@ fn greedy_mesh_axis_lod(
 }
 
 /// Check if face is visible for LOD (accounts for larger step sizes)
+#[allow(dead_code)]
 fn is_face_visible_lod(
     chunk: &Chunk,
     neighbors: &[Option<Arc<Chunk>>; 6],
@@ -1156,6 +1167,7 @@ fn is_face_visible(
 
 /// Get whether a block at the given position is solid (for AO calculation)
 /// Handles cross-chunk boundary lookups
+#[allow(dead_code)]
 fn is_block_solid_at(
     chunk: &Chunk,
     neighbors: &[Option<Arc<Chunk>>; 6],
@@ -1198,6 +1210,7 @@ fn is_block_solid_at(
 /// Calculate ambient occlusion for a vertex corner
 /// side1, side2, corner are the 3 blocks adjacent to this vertex that could occlude light
 /// Returns 0.0 (fully occluded) to 1.0 (no occlusion)
+#[allow(dead_code)]
 fn calculate_ao(side1: bool, side2: bool, corner: bool) -> f32 {
     // If both sides are solid, corner is considered occluded (prevents light leak)
     let effective_corner = if side1 && side2 { true } else { corner };
@@ -1216,6 +1229,7 @@ fn calculate_ao(side1: bool, side2: bool, corner: bool) -> f32 {
 
 /// Calculate AO values for all 4 corners of a face
 /// Returns [ao0, ao1, ao2, ao3] matching vertex order
+#[allow(dead_code)]
 fn calculate_face_ao(
     chunk: &Chunk,
     neighbors: &[Option<Arc<Chunk>>; 6],

@@ -99,13 +99,16 @@ pub struct DebugOverlay {
     enabled: bool,
     pipeline: wgpu::RenderPipeline,
     font_texture: wgpu::Texture,
+    #[allow(dead_code)]
     font_view: wgpu::TextureView,
+    #[allow(dead_code)]
     font_sampler: wgpu::Sampler,
     font_bind_group: wgpu::BindGroup,
     vertex_buffer: wgpu::Buffer,
     max_chars: usize,
 
     // Frame time history for smoothing
+    #[allow(dead_code)]
     frame_times: VecDeque<f32>,
 
     // Screen dimensions for layout
@@ -158,8 +161,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
 impl DebugOverlay {
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
-        // Generate bitmap font texture
-        let font_data = Self::generate_font_texture();
+        // Generate bitmap font texture (uploaded later via upload_font)
+        let _font_data = Self::generate_font_texture();
         let font_width = FONT_COLS * CHAR_WIDTH;
         let font_height = FONT_ROWS * CHAR_HEIGHT;
 

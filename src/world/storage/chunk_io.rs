@@ -14,7 +14,8 @@ const ZSTD_LEVEL: i32 = 3;
 /// Chunk payload flags
 const FLAG_HAS_BLOCKS: u8 = 0x01;
 const FLAG_HAS_LIGHT: u8 = 0x02;
-const FLAG_HAS_EXTRA: u8 = 0x04;
+#[allow(dead_code)]
+const FLAG_HAS_EXTRA: u8 = 0x04;  // Reserved for future use
 
 /// Compression type identifiers
 #[repr(u16)]

@@ -50,10 +50,12 @@ pub struct Renderer {
     chunk_pipeline: wgpu::RenderPipeline,
 
     // Bind groups
+    #[allow(dead_code)]
     camera_bind_group_layout: wgpu::BindGroupLayout,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
 
+    #[allow(dead_code)]
     texture_bind_group_layout: wgpu::BindGroupLayout,
     texture_bind_group: wgpu::BindGroup,
 

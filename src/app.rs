@@ -42,7 +42,7 @@ impl App {
         );
 
         // Initialize renderer
-        let mut renderer = Renderer::new(window.clone()).await;
+        let renderer = Renderer::new(window.clone()).await;
 
         // Initialize world manager with save directory
         let save_dir = std::path::PathBuf::from("saves/world1");

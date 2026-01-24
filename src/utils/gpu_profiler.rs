@@ -19,6 +19,7 @@ pub struct GpuProfiler {
     /// History of GPU frame times (nanoseconds)
     frame_times_ns: VecDeque<u64>,
     /// Timestamp period (nanoseconds per tick)
+    #[allow(dead_code)]
     timestamp_period: f32,
     /// Whether we have pending results to read
     pending_readback: bool,

@@ -298,9 +298,9 @@ impl LightEngine {
 
         // Now re-propagate from remaining light sources
         // This fills in any gaps that should still be lit
-        for source in relight_sources {
-            // We need to apply the removal updates first, then re-propagate
-            // For simplicity, we'll return the removal updates and let the caller handle re-propagation
+        for _source in relight_sources {
+            // TODO: Re-propagate from remaining sources
+            // For now, we return the removal updates and let the caller handle re-propagation
         }
 
         removal_updates
