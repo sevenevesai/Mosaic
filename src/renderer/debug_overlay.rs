@@ -62,6 +62,12 @@ pub struct DebugMetrics {
     pub chunks_culled: u32,
     pub gpu_time_ms: f64,
 
+    // Shadow pass stats
+    pub shadow_chunks_rendered: u32,
+    pub shadow_chunks_culled: u32,
+    pub shadow_pass_ms: f64,
+    pub main_pass_ms: f64,
+
     // Memory
     pub loaded_chunks: u32,
     pub total_vertices: u64,
@@ -75,6 +81,11 @@ pub struct DebugMetrics {
     pub chunk_z: i32,
     pub yaw: f32,
     pub pitch: f32,
+
+    // Lighting
+    pub light_level: u8,      // Combined light level at player position
+    pub sky_light: u8,        // Sky light component
+    pub block_light: u8,      // Block light component
 }
 
 /// Debug overlay rendering system
@@ -555,10 +566,12 @@ Pending: {:>3} gen {:>3} mesh | Verts: {:>6}K\n",
             format!("FPS: {:.0} ({:.2}ms)", metrics.fps, metrics.frame_time_ms),
             format!("GPU: {:.2}ms", metrics.gpu_time_ms),
             format!("World: {:.2}ms  Render: {:.2}ms", metrics.world_update_ms, metrics.render_ms),
+            format!("Shadow: {:.2}ms  Main: {:.2}ms", metrics.shadow_pass_ms, metrics.main_pass_ms),
             String::new(),
             format!("Triangles: {}K", metrics.triangles / 1000),
             format!("Draw calls: {}", metrics.draw_calls),
             format!("Chunks: {} rendered, {} culled", metrics.chunks_rendered, metrics.chunks_culled),
+            format!("Shadow: {} rendered, {} culled", metrics.shadow_chunks_rendered, metrics.shadow_chunks_culled),
             format!("Loaded: {} chunks", metrics.loaded_chunks),
             String::new(),
             format!("Pending: {} gen, {} mesh", metrics.chunks_pending_gen, metrics.chunks_pending_mesh),
@@ -567,6 +580,8 @@ Pending: {:>3} gen {:>3} mesh | Verts: {:>6}K\n",
             format!("XYZ: {:.1}, {:.1}, {:.1}", metrics.pos_x, metrics.pos_y, metrics.pos_z),
             format!("Chunk: {}, {}, {}", metrics.chunk_x, metrics.chunk_y, metrics.chunk_z),
             format!("Look: {:.1}, {:.1}", metrics.yaw.to_degrees(), metrics.pitch.to_degrees()),
+            String::new(),
+            format!("Light: {} (sky:{} block:{})", metrics.light_level, metrics.sky_light, metrics.block_light),
         ];
 
         // Generate vertices for all text

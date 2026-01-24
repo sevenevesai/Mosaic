@@ -247,7 +247,7 @@ struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) normal_packed: vec4<i32>,  // Sint8x4 unpacked to i32
     @location(2) uv: vec2<f32>,             // Unorm16x2 auto-normalized
-    @location(3) ao_tile_packed: vec4<f32>, // Unorm8x4: [ao, tile_u/255, tile_v/255, 0]
+    @location(3) ao_tile_packed: vec4<f32>, // Unorm8x4: [ao, tile_u/255, tile_v/255, light/255]
 };
 
 struct VertexOutput {
@@ -258,6 +258,7 @@ struct VertexOutput {
     @location(3) ao: f32,
     @location(4) tile_count: vec2<f32>,     // Tile repeat count for greedy meshing
     @location(5) shadow_pos: vec4<f32>,     // Position in light space for shadow lookup
+    @location(6) block_light: f32,          // Block light level (0.0-1.0, from torches etc)
 };
 
 @vertex
@@ -278,12 +279,14 @@ fn vs_main(in: VertexInput) -> VertexOutput {
         max(in.ao_tile_packed.y * 255.0, 1.0),
         max(in.ao_tile_packed.z * 255.0, 1.0)
     );
+    // Block light level (byte 3, 0-255 scaled to 0-1)
+    out.block_light = in.ao_tile_packed.w;
     // Transform position to light space for shadow lookup
     out.shadow_pos = light.view_proj * vec4<f32>(in.position, 1.0);
     return out;
 }
 
-// PCF shadow sampling for soft shadows
+// PCF shadow sampling with rotated kernel for smooth diagonal shadows
 fn calculate_shadow(shadow_pos: vec4<f32>, normal: vec3<f32>, light_dir: vec3<f32>) -> f32 {
     // Perspective divide
     let proj_coords = shadow_pos.xyz / shadow_pos.w;
@@ -307,43 +310,84 @@ fn calculate_shadow(shadow_pos: vec4<f32>, normal: vec3<f32>, light_dir: vec3<f3
         return 1.0;
     }
 
-    // Slope-based bias to prevent shadow acne
-    let bias = max(0.003 * (1.0 - dot(normal, light_dir)), 0.001);
+    // Minimal slope-based bias - small values for sharp shadow contact at object bases
+    let ndotl = dot(normal, light_dir);
+    let bias = max(0.0008 * (1.0 - ndotl), 0.0002);
     let biased_depth = current_depth - bias;
 
-    // PCF 3x3 sampling for soft shadows
-    let texel_size = 1.0 / 2048.0;  // Shadow map size
+    // Texel size for 4K shadow map
+    let texel_size = 1.0 / 4096.0;
+
+    // Rotated PCF kernel - samples at 45 degree angles for smooth diagonal shadows
+    // This avoids the axis-aligned stair-stepping of regular grid sampling
     var shadow = 0.0;
 
-    for (var x = -1; x <= 1; x++) {
-        for (var y = -1; y <= 1; y++) {
-            let offset = vec2<f32>(f32(x), f32(y)) * texel_size;
-            shadow += textureSampleCompare(t_shadow, s_shadow, shadow_uv + offset, biased_depth);
-        }
-    }
-    shadow /= 9.0;
+    // Center sample
+    shadow += textureSampleCompare(t_shadow, s_shadow, shadow_uv, biased_depth);
+
+    // Inner ring (rotated 45 degrees, radius ~1 texel)
+    let r1 = texel_size * 0.707;  // sqrt(2)/2 for 45 degree rotation
+    shadow += textureSampleCompare(t_shadow, s_shadow, shadow_uv + vec2<f32>(r1, r1), biased_depth);
+    shadow += textureSampleCompare(t_shadow, s_shadow, shadow_uv + vec2<f32>(-r1, r1), biased_depth);
+    shadow += textureSampleCompare(t_shadow, s_shadow, shadow_uv + vec2<f32>(r1, -r1), biased_depth);
+    shadow += textureSampleCompare(t_shadow, s_shadow, shadow_uv + vec2<f32>(-r1, -r1), biased_depth);
+
+    // Outer ring (axis-aligned, radius ~1.5 texels)
+    let r2 = texel_size * 1.5;
+    shadow += textureSampleCompare(t_shadow, s_shadow, shadow_uv + vec2<f32>(r2, 0.0), biased_depth);
+    shadow += textureSampleCompare(t_shadow, s_shadow, shadow_uv + vec2<f32>(-r2, 0.0), biased_depth);
+    shadow += textureSampleCompare(t_shadow, s_shadow, shadow_uv + vec2<f32>(0.0, r2), biased_depth);
+    shadow += textureSampleCompare(t_shadow, s_shadow, shadow_uv + vec2<f32>(0.0, -r2), biased_depth);
+
+    // Third ring (rotated 45 degrees, radius ~2 texels)
+    let r3 = texel_size * 1.414;  // sqrt(2) for larger diagonal
+    shadow += textureSampleCompare(t_shadow, s_shadow, shadow_uv + vec2<f32>(r3, r3), biased_depth);
+    shadow += textureSampleCompare(t_shadow, s_shadow, shadow_uv + vec2<f32>(-r3, r3), biased_depth);
+    shadow += textureSampleCompare(t_shadow, s_shadow, shadow_uv + vec2<f32>(r3, -r3), biased_depth);
+    shadow += textureSampleCompare(t_shadow, s_shadow, shadow_uv + vec2<f32>(-r3, -r3), biased_depth);
+
+    shadow /= 13.0;
 
     return shadow;
 }
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // Calculate tiled UV for greedy meshing
+    // Calculate tiled UV for greedy meshing using WORLD POSITION
+    // This ensures textures align to world grid regardless of how quads are merged
     let tiles_per_row = 4.0;  // 4x4 grid of 256x256 tiles = 1024x1024 atlas
     let tile_size = 1.0 / tiles_per_row;
 
-    // Get the base tile corner (floor to tile boundary)
+    // Get the base tile corner from UV (tells us WHICH texture to use)
     let tile_base = floor(in.uv / tile_size) * tile_size;
 
-    // Get local position within quad (0-1 range scaled by tile count)
-    let local_uv = (in.uv - tile_base) / tile_size;
-    let tiled_local = fract(local_uv * in.tile_count);
+    // Use world position for tiling (tells us WHERE in the texture)
+    // fract gives us 0-1 position within each block, aligned to world grid
+    let world_frac = fract(in.world_position);
 
-    // Final UV = base tile + tiled local position
+    // Select the right 2D coordinates based on face normal (triplanar-lite)
+    var tiled_local: vec2<f32>;
+    if (abs(in.normal.y) > 0.5) {
+        // Top/bottom face: use X and Z
+        tiled_local = vec2<f32>(world_frac.x, world_frac.z);
+    } else if (abs(in.normal.x) > 0.5) {
+        // Left/right face: use Z and Y
+        tiled_local = vec2<f32>(world_frac.z, world_frac.y);
+    } else {
+        // Front/back face: use X and Y
+        tiled_local = vec2<f32>(world_frac.x, world_frac.y);
+    }
+
+    // Final UV = base tile + world-aligned local position
     let tiled_uv = tile_base + tiled_local * tile_size;
 
     // Sample texture
     let tex_color = textureSample(t_diffuse, s_diffuse, tiled_uv);
+
+    // Alpha test: discard transparent pixels (cutout transparency like Minecraft leaves)
+    if (tex_color.a < 0.5) {
+        discard;
+    }
 
     // === LIGHTING SETUP ===
     // Sun direction from uniform (normalized)
@@ -391,13 +435,33 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let ambient_shadow = mix(0.7, 1.0, shadow);  // Darken ambient in shadow
     let ambient = vec3<f32>(0.28, 0.28, 0.32) * ambient_shadow;
 
+    // === BLOCK LIGHT (Torches, etc.) ===
+    // Block light provides warm illumination independent of sun
+    // in.block_light is 0-1 (scaled from 0-15 light levels)
+    let block_light_level = in.block_light;
+    // Apply a curve for more realistic light falloff (gamma-like)
+    let block_light_curve = pow(block_light_level, 1.4);
+    // Warm torch color (orange-yellow glow)
+    let torch_color = vec3<f32>(1.0, 0.85, 0.6);
+    // Block light is additive and not affected by shadows (it IS the light source)
+    let block_light_contribution = torch_color * block_light_curve * 0.9;
+
     // === AMBIENT OCCLUSION ===
     // Stronger AO contrast for better depth
     let ao_factor = mix(0.25, 1.0, in.ao);
 
     // === COMBINE LIGHTING ===
-    let total_light = (ambient + sun_contribution + sky_contribution + ground_contribution)
-                      * ao_factor * face_brightness;
+    // Natural light (sun, sky, ambient) is affected by face_brightness
+    // because it simulates directional light from the sky (top brighter, bottom darker)
+    let natural_light = (ambient + sun_contribution + sky_contribution + ground_contribution);
+    let natural_lit = natural_light * face_brightness;
+
+    // Block light (torches) is NOT affected by face_brightness because it's omnidirectional
+    // A torch illuminates ceilings and floors equally - only AO affects it
+    let block_lit = block_light_contribution;
+
+    // Combine natural and block light, then apply AO (local occlusion affects all light)
+    let total_light = (natural_lit + block_lit) * ao_factor;
     var final_color = tex_color.rgb * total_light;
 
     // === ATMOSPHERIC DEPTH ===
@@ -488,8 +552,8 @@ pub fn create_chunk_pipeline(
     })
 }
 
-/// Shadow map size (2048x2048 provides good quality)
-pub const SHADOW_MAP_SIZE: u32 = 2048;
+/// Shadow map size (4096x4096 for sharp diagonal shadows)
+pub const SHADOW_MAP_SIZE: u32 = 4096;
 
 /// Create shadow pass pipeline (depth-only, renders from light perspective)
 pub fn create_shadow_pipeline(
@@ -535,8 +599,8 @@ pub fn create_shadow_pipeline(
             depth_compare: wgpu::CompareFunction::Less,
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState {
-                constant: 2,       // Slight bias to prevent shadow acne
-                slope_scale: 2.0,
+                constant: 1,       // Minimal bias for sharp shadow contact
+                slope_scale: 1.0,  // Reduced for tighter shadows at object bases
                 clamp: 0.0,
             },
         }),

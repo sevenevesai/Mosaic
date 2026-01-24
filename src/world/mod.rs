@@ -4,9 +4,11 @@
 
 mod chunk;
 mod generation;
+pub mod lighting;
 mod meshing;
 
 pub use chunk::{Block, Chunk, ChunkPos};
+pub use lighting::{LightEngine, apply_light_updates};
 pub use meshing::{ChunkMesh, ChunkVertex, GpuMesh, LodLevel, build_chunk_mesh, build_chunk_mesh_lod};
 
 use std::sync::Arc;
@@ -166,6 +168,9 @@ pub struct WorldManager {
 
     /// Last player chunk position (for loading new chunks)
     last_player_chunk: Option<ChunkPos>,
+
+    /// Light propagation engine
+    light_engine: LightEngine,
 }
 
 impl WorldManager {
@@ -206,6 +211,7 @@ impl WorldManager {
             result_receiver,
             _workers: workers,
             last_player_chunk: None,
+            light_engine: LightEngine::new(),
         }
     }
 
@@ -438,6 +444,28 @@ impl WorldManager {
             .map(|chunk| chunk.get_block(local_x, local_y, local_z))
     }
 
+    /// Get light level at world coordinates
+    /// Returns (combined_light, sky_light, block_light)
+    pub fn get_light_at(&self, x: i32, y: i32, z: i32) -> (u8, u8, u8) {
+        let chunk_pos = ChunkPos {
+            x: x.div_euclid(CHUNK_SIZE_I32),
+            y: y.div_euclid(CHUNK_SIZE_I32),
+            z: z.div_euclid(CHUNK_SIZE_I32),
+        };
+
+        let local_x = x.rem_euclid(CHUNK_SIZE_I32) as usize;
+        let local_y = y.rem_euclid(CHUNK_SIZE_I32) as usize;
+        let local_z = z.rem_euclid(CHUNK_SIZE_I32) as usize;
+
+        if let Some(chunk) = self.chunks.read().get(&chunk_pos) {
+            let sky = chunk.get_sky_light(local_x, local_y, local_z);
+            let block = chunk.get_block_light(local_x, local_y, local_z);
+            (sky.max(block), sky, block)
+        } else {
+            (15, 15, 0) // Default to bright (outdoor)
+        }
+    }
+
     /// Set a block at world coordinates, returns true if successful
     pub fn set_block(&mut self, x: i32, y: i32, z: i32, block: Block) -> bool {
         let chunk_pos = ChunkPos {
@@ -450,51 +478,105 @@ impl WorldManager {
         let local_y = y.rem_euclid(CHUNK_SIZE_I32) as usize;
         let local_z = z.rem_euclid(CHUNK_SIZE_I32) as usize;
 
+        // Get the old block for light comparison
+        let old_block = {
+            let chunks_read = self.chunks.read();
+            chunks_read.get(&chunk_pos)
+                .map(|c| c.get_block(local_x, local_y, local_z))
+        };
+
+        let Some(old_block) = old_block else {
+            return false;
+        };
+
         // Get the chunk, clone it, modify, and replace
-        let mut chunks = self.chunks.write();
-        if let Some(old_chunk) = chunks.get(&chunk_pos) {
-            let mut new_chunk = Chunk::new();
-            // Copy all blocks from old chunk
-            for z in 0..16 {
-                for y in 0..16 {
-                    for x in 0..16 {
-                        new_chunk.set_block(x, y, z, old_chunk.get_block(x, y, z));
+        {
+            let mut chunks = self.chunks.write();
+            if let Some(old_chunk) = chunks.get(&chunk_pos) {
+                let mut new_chunk = Chunk::new();
+                // Copy all blocks AND light data from old chunk
+                for cz in 0..16 {
+                    for cy in 0..16 {
+                        for cx in 0..16 {
+                            new_chunk.set_block(cx, cy, cz, old_chunk.get_block(cx, cy, cz));
+                            new_chunk.set_light(cx, cy, cz, old_chunk.get_light(cx, cy, cz));
+                        }
                     }
                 }
+                // Set the new block
+                new_chunk.set_block(local_x, local_y, local_z, block);
+                chunks.insert(chunk_pos, Arc::new(new_chunk));
             }
-            // Set the new block
-            new_chunk.set_block(local_x, local_y, local_z, block);
-            chunks.insert(chunk_pos, Arc::new(new_chunk));
-            drop(chunks);
-
-            // Force remesh (keep old mesh until new one is ready to avoid flicker)
-            self.pending_meshing.remove(&chunk_pos); // Clear pending to allow re-queue
-            self.force_remesh(chunk_pos);
-
-            // Also remesh neighbors if block is on chunk boundary
-            if local_x == 0 {
-                self.remesh_if_exists(chunk_pos.offset(-1, 0, 0));
-            }
-            if local_x == 15 {
-                self.remesh_if_exists(chunk_pos.offset(1, 0, 0));
-            }
-            if local_y == 0 {
-                self.remesh_if_exists(chunk_pos.offset(0, -1, 0));
-            }
-            if local_y == 15 {
-                self.remesh_if_exists(chunk_pos.offset(0, 1, 0));
-            }
-            if local_z == 0 {
-                self.remesh_if_exists(chunk_pos.offset(0, 0, -1));
-            }
-            if local_z == 15 {
-                self.remesh_if_exists(chunk_pos.offset(0, 0, 1));
-            }
-
-            true
-        } else {
-            false
         }
+
+        // === LIGHT PROPAGATION ===
+        let old_emission = old_block.light_emission();
+        let new_emission = block.light_emission();
+
+        // Track chunks that need remeshing due to light changes
+        let mut light_dirty_chunks: Vec<ChunkPos> = Vec::new();
+
+        // Case 1: Placed a light source (torch)
+        if new_emission > 0 && old_emission == 0 {
+            tracing::debug!("Placed light source at ({}, {}, {}) with emission {}", x, y, z, new_emission);
+            let updates = self.light_engine.propagate_light(x, y, z, new_emission, &self.chunks);
+            apply_light_updates(updates, &self.chunks);
+            light_dirty_chunks.extend(self.light_engine.take_dirty_chunks());
+        }
+        // Case 2: Removed a light source
+        else if old_emission > 0 && new_emission == 0 {
+            tracing::debug!("Removed light source at ({}, {}, {})", x, y, z);
+            let updates = self.light_engine.remove_light(x, y, z, &self.chunks);
+            apply_light_updates(updates, &self.chunks);
+            light_dirty_chunks.extend(self.light_engine.take_dirty_chunks());
+        }
+        // Case 3: Placed solid block where transparent was (may block light)
+        else if !block.is_light_transparent() && old_block.is_light_transparent() {
+            // For simplicity, recalculate light in a small area
+            // A more sophisticated approach would trace affected light paths
+            let updates = self.light_engine.recalculate_area(x, y, z, 15, &self.chunks);
+            apply_light_updates(updates, &self.chunks);
+            light_dirty_chunks.extend(self.light_engine.take_dirty_chunks());
+        }
+        // Case 4: Removed solid block, light may flow in
+        else if block.is_light_transparent() && !old_block.is_light_transparent() {
+            let updates = self.light_engine.propagate_into(x, y, z, &self.chunks);
+            apply_light_updates(updates, &self.chunks);
+            light_dirty_chunks.extend(self.light_engine.take_dirty_chunks());
+        }
+
+        // Force remesh main chunk
+        self.pending_meshing.remove(&chunk_pos);
+        self.force_remesh(chunk_pos);
+
+        // Remesh neighbors if block is on chunk boundary
+        if local_x == 0 {
+            self.remesh_if_exists(chunk_pos.offset(-1, 0, 0));
+        }
+        if local_x == 15 {
+            self.remesh_if_exists(chunk_pos.offset(1, 0, 0));
+        }
+        if local_y == 0 {
+            self.remesh_if_exists(chunk_pos.offset(0, -1, 0));
+        }
+        if local_y == 15 {
+            self.remesh_if_exists(chunk_pos.offset(0, 1, 0));
+        }
+        if local_z == 0 {
+            self.remesh_if_exists(chunk_pos.offset(0, 0, -1));
+        }
+        if local_z == 15 {
+            self.remesh_if_exists(chunk_pos.offset(0, 0, 1));
+        }
+
+        // Remesh any additional chunks affected by light changes
+        for dirty_pos in light_dirty_chunks {
+            if dirty_pos != chunk_pos {
+                self.remesh_if_exists(dirty_pos);
+            }
+        }
+
+        true
     }
 
     fn remesh_if_exists(&mut self, pos: ChunkPos) {

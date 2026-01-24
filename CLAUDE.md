@@ -9,7 +9,7 @@ cargo build --release
 ./target/release/blocks.exe
 ```
 
-**Controls:** Click to capture mouse, WASD move, Space jump/fly-up, Shift fly-down, Ctrl sprint, F toggle fly mode, F3 debug overlay, 1-7 select block, Left-click break, Right-click place, P log performance, Escape release mouse.
+**Controls:** Click to capture mouse, WASD move, Space jump/fly-up, Shift fly-down, Ctrl sprint, F toggle fly mode, F3 debug overlay, 1-7 select block, 8 torch, Left-click break, Right-click place, P log performance, Escape release mouse.
 
 ---
 
@@ -29,8 +29,9 @@ src/
 │   └── chunk_pool.rs    # MDI mega-buffers (disabled, needs work)
 ├── world/
 │   ├── mod.rs           # WorldManager, chunk workers, LOD, raycast, set_block
-│   ├── chunk.rs         # Chunk data (16³), Block enum (15 types)
+│   ├── chunk.rs         # Chunk data (16³), Block enum (16 types), light storage
 │   ├── generation.rs    # Noise terrain, caves, ores, biomes
+│   ├── lighting.rs      # BFS flood fill light propagation system
 │   └── meshing.rs       # Greedy meshing, packed ChunkVertex (24 bytes)
 ├── player/
 │   └── mod.rs           # Player state, AABB collision, block interaction
@@ -49,12 +50,14 @@ src/
 - **Greedy meshing** with proper texture tiling (2.5x triangle reduction)
 - **Packed vertex format** (24 bytes vs 36 = 33% GPU memory reduction)
 - **LOD system** - Distance-based mesh detail (Full/Half/Quarter)
+- **BFS flood fill lighting** - Minecraft-style block light propagation
 - Frustum culling (skips off-screen chunks)
 - Low-latency rendering (Mailbox present mode)
 - FPS camera with mouse look, fly mode (F key)
 - Block placement/breaking with raycast
+- **Torch block** (key 8) - Light source with 14-block radius warm glow
 - AABB collision detection
-- F3 debug overlay (on-screen stats)
+- F3 debug overlay (on-screen stats + light levels)
 - Performance logging to `performance_log.txt`
 
 ### Known Issues
@@ -118,8 +121,32 @@ Edit `RENDER_DISTANCE` in `src/lib.rs`. Higher = more chunks = more GPU/CPU load
 - Check `src/world/meshing.rs` - greedy meshing in `build_chunk_mesh_lod()`, simple in `build_chunk_mesh_simple()`
 - Current: `build_chunk_mesh()` calls greedy meshing with Full LOD
 - Packed vertex: position (12B) + normal_packed (4B) + uv (4B) + ao_tile_packed (4B) = 24 bytes
-- Texture tiling: `ao_tile_packed` contains [ao, tile_u, tile_v, 0] for proper tiling on merged quads
+- Texture tiling: `ao_tile_packed` contains [ao, tile_u, tile_v, light_level] for proper tiling on merged quads
 - To test winding: set `cull_mode: None` in `pipeline.rs`
+
+### Lighting System
+The lighting uses Minecraft-style BFS flood fill propagation:
+
+**Data Storage:**
+- Each chunk has `light: Box<[u8; 4096]>` - 1 byte per block
+- Upper 4 bits = sky light (0-15), lower 4 bits = block light (0-15)
+- Light packed into vertex `ao_tile_packed.w` byte (0-255 scaled from 0-15)
+
+**Key Components:**
+- `src/world/lighting.rs` - `LightEngine` with BFS propagation/removal algorithms
+- `src/world/chunk.rs` - `Block::light_emission()` returns emission level (Torch = 14)
+- `src/world/meshing.rs` - `get_face_light()` samples light for mesh vertices
+- `src/renderer/pipeline.rs` - Shader applies warm torch color with gamma curve
+
+**Light Propagation:**
+1. When torch placed: BFS from source, decrementing level by 1 per block
+2. When torch removed: BFS removal, then re-propagate from nearby sources
+3. Cross-chunk propagation handled via neighbor chunk access
+
+**Adding New Light Sources:**
+1. Add variant to `Block` enum in `chunk.rs`
+2. Add emission value in `Block::light_emission()` (0-15)
+3. Ensure `Block::is_light_transparent()` returns appropriate value
 
 ---
 

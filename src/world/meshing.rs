@@ -44,26 +44,46 @@ impl ChunkVertex {
         [(uv[0] * 65535.0) as u16, (uv[1] * 65535.0) as u16]
     }
 
-    /// Pack AO value (0.0-1.0) and tile counts into u32
-    /// Layout: [ao (0-255), tile_u (1-16), tile_v (1-16), 0]
+    /// Pack AO value (0.0-1.0), tile counts, and light level into u32
+    /// Layout: [ao (0-255), tile_u (1-16), tile_v (1-16), light (0-255)]
+    /// Light is stored as 0-255 where 0=dark, 255=full brightness (scaled from 0-15)
     pub fn pack_ao_tile(ao: f32, tile_u: u8, tile_v: u8) -> u32 {
         let ao_byte = (ao * 255.0) as u8;
         u32::from_le_bytes([ao_byte, tile_u, tile_v, 0])
     }
 
-    /// Create vertex with tiling info (for greedy meshing)
-    pub fn new_tiled(position: [f32; 3], normal: [f32; 3], uv: [f32; 2], ao: f32, tile_u: u8, tile_v: u8) -> Self {
+    /// Pack AO, tile counts, and light level into u32
+    /// Light level is 0-15, scaled to 0-255 for shader
+    pub fn pack_ao_tile_light(ao: f32, tile_u: u8, tile_v: u8, light: u8) -> u32 {
+        let ao_byte = (ao * 255.0) as u8;
+        // Scale light from 0-15 to 0-255 (multiply by 17 gives 0,17,34,...,255)
+        let light_byte = light.min(15) * 17;
+        u32::from_le_bytes([ao_byte, tile_u, tile_v, light_byte])
+    }
+
+    /// Create vertex with tiling and light info (for greedy meshing with lighting)
+    pub fn new_tiled_lit(position: [f32; 3], normal: [f32; 3], uv: [f32; 2], ao: f32, tile_u: u8, tile_v: u8, light: u8) -> Self {
         Self {
             position,
             normal_packed: Self::pack_normal(normal),
             uv: Self::pack_uv(uv),
-            ao_tile_packed: Self::pack_ao_tile(ao, tile_u, tile_v),
+            ao_tile_packed: Self::pack_ao_tile_light(ao, tile_u, tile_v, light),
         }
+    }
+
+    /// Create vertex with tiling info (for greedy meshing)
+    pub fn new_tiled(position: [f32; 3], normal: [f32; 3], uv: [f32; 2], ao: f32, tile_u: u8, tile_v: u8) -> Self {
+        Self::new_tiled_lit(position, normal, uv, ao, tile_u, tile_v, 0)
     }
 
     /// Create vertex without tiling (single block face)
     pub fn new(position: [f32; 3], normal: [f32; 3], uv: [f32; 2], ao: f32) -> Self {
         Self::new_tiled(position, normal, uv, ao, 1, 1)
+    }
+
+    /// Create vertex with light but no tiling
+    pub fn new_lit(position: [f32; 3], normal: [f32; 3], uv: [f32; 2], ao: f32, light: u8) -> Self {
+        Self::new_tiled_lit(position, normal, uv, ao, 1, 1, light)
     }
 
     pub fn desc() -> wgpu::VertexBufferLayout<'static> {
@@ -155,6 +175,72 @@ enum Axis {
 struct FaceInfo {
     block: Block,
     texture_idx: u32,
+}
+
+/// Sample the combined light level at a block position
+/// Checks neighbor chunks if position is outside current chunk bounds
+fn sample_light_at(
+    chunk: &Chunk,
+    neighbors: &[Option<Arc<Chunk>>; 6],
+    x: i32,
+    y: i32,
+    z: i32,
+) -> u8 {
+    // Check if position is within current chunk
+    if x >= 0 && x < CHUNK_SIZE_I32 && y >= 0 && y < CHUNK_SIZE_I32 && z >= 0 && z < CHUNK_SIZE_I32 {
+        return chunk.get_combined_light(x as usize, y as usize, z as usize);
+    }
+
+    // Position is in a neighbor chunk
+    let (neighbor_idx, local_x, local_y, local_z) = if x < 0 {
+        (0, (CHUNK_SIZE_I32 - 1) as usize, y as usize, z as usize) // -X neighbor
+    } else if x >= CHUNK_SIZE_I32 {
+        (1, 0usize, y as usize, z as usize) // +X neighbor
+    } else if y < 0 {
+        (2, x as usize, (CHUNK_SIZE_I32 - 1) as usize, z as usize) // -Y neighbor
+    } else if y >= CHUNK_SIZE_I32 {
+        (3, x as usize, 0usize, z as usize) // +Y neighbor
+    } else if z < 0 {
+        (4, x as usize, y as usize, (CHUNK_SIZE_I32 - 1) as usize) // -Z neighbor
+    } else {
+        (5, x as usize, y as usize, 0usize) // +Z neighbor
+    };
+
+    // Bounds check the local coordinates before accessing
+    if local_x >= CHUNK_SIZE || local_y >= CHUNK_SIZE || local_z >= CHUNK_SIZE {
+        return 0;
+    }
+
+    if let Some(neighbor) = &neighbors[neighbor_idx] {
+        neighbor.get_combined_light(local_x, local_y, local_z)
+    } else {
+        // No neighbor loaded, assume full sky light (outdoor)
+        15
+    }
+}
+
+/// Get the light level for a face at the given position
+/// Samples light from the air block adjacent to the face
+fn get_face_light(
+    chunk: &Chunk,
+    neighbors: &[Option<Arc<Chunk>>; 6],
+    x: usize,
+    y: usize,
+    z: usize,
+    axis: Axis,
+    positive: bool,
+) -> u8 {
+    // Calculate the position of the air block adjacent to this face
+    let (ax, ay, az) = match (axis, positive) {
+        (Axis::X, true) => (x as i32 + 1, y as i32, z as i32),
+        (Axis::X, false) => (x as i32 - 1, y as i32, z as i32),
+        (Axis::Y, true) => (x as i32, y as i32 + 1, z as i32),
+        (Axis::Y, false) => (x as i32, y as i32 - 1, z as i32),
+        (Axis::Z, true) => (x as i32, y as i32, z as i32 + 1),
+        (Axis::Z, false) => (x as i32, y as i32, z as i32 - 1),
+    };
+
+    sample_light_at(chunk, neighbors, ax, ay, az)
 }
 
 /// Build mesh for a chunk using greedy meshing
@@ -609,6 +695,23 @@ fn binary_greedy_mesh_axis(
                     }
                 }
 
+                // Sample light from all 4 corners of the merged quad and take the max
+                // This prevents dark banding when light varies across a large merged face
+                let corners = [
+                    (start_u, start_v),
+                    (start_u + width - 1, start_v),
+                    (start_u, start_v + height - 1),
+                    (start_u + width - 1, start_v + height - 1),
+                ];
+                let light = corners.iter().map(|&(u, v)| {
+                    let (bx, by, bz) = match axis {
+                        Axis::X => (d, v, u),
+                        Axis::Y => (u, d, v),
+                        Axis::Z => (u, v, d),
+                    };
+                    get_face_light(chunk, neighbors, bx, by, bz, axis, positive)
+                }).max().unwrap_or(0);
+
                 // Emit quad
                 emit_greedy_quad(
                     vertices,
@@ -622,6 +725,7 @@ fn binary_greedy_mesh_axis(
                     width,
                     height,
                     face_info.texture_idx,
+                    light,
                 );
             }
         }
@@ -779,6 +883,24 @@ fn greedy_mesh_axis_lod(
                 // Emit quad (scaled by LOD step)
                 // For the slice position, use the outer face of the LOD cell
                 let d_emit = if positive { d_base + step - 1 } else { d_base };
+
+                // Sample light from all 4 corners of the merged quad and take the max
+                // Coordinates are scaled by LOD step
+                let corners = [
+                    (start_u * step, start_v * step),
+                    ((start_u + width - 1) * step, start_v * step),
+                    (start_u * step, (start_v + height - 1) * step),
+                    ((start_u + width - 1) * step, (start_v + height - 1) * step),
+                ];
+                let light = corners.iter().map(|&(u, v)| {
+                    let (bx, by, bz) = match axis {
+                        Axis::X => (d_emit, v, u),
+                        Axis::Y => (u, d_emit, v),
+                        Axis::Z => (u, v, d_emit),
+                    };
+                    get_face_light(chunk, neighbors, bx, by, bz, axis, positive)
+                }).max().unwrap_or(0);
+
                 emit_greedy_quad(
                     vertices,
                     indices,
@@ -791,6 +913,7 @@ fn greedy_mesh_axis_lod(
                     width * step,
                     height * step,
                     face_info.texture_idx,
+                    light,
                 );
             }
         }
@@ -1119,6 +1242,7 @@ fn emit_greedy_quad(
     width: usize,
     height: usize,
     texture_idx: u32,
+    light_level: u8,
 ) {
     let base_index = vertices.len() as u32;
 
@@ -1146,10 +1270,10 @@ fn emit_greedy_quad(
     let oy = world_origin.y;
     let oz = world_origin.z;
 
-    // Small epsilon to expand faces and prevent sub-pixel gaps at edges
+    // Epsilon to expand faces and prevent sub-pixel gaps at edges
     // This makes adjacent faces slightly overlap, eliminating white pixel artifacts
-    // The overlap is tiny (< 1mm in world units) and invisible to the player
-    let e = 0.001;
+    // Value must be large enough to cover gaps at all viewing angles
+    let e = 0.01;
 
     // Convert slice/u/v to world coordinates based on axis
     // Match vertex ordering exactly from simple meshing add_face_* functions
@@ -1241,9 +1365,9 @@ fn emit_greedy_quad(
         }
     };
 
-    // Add vertices with tiling info
+    // Add vertices with tiling and light info
     for i in 0..4 {
-        vertices.push(ChunkVertex::new_tiled(positions[i], normal, uvs[uv_order[i]], ao, tile_u, tile_v));
+        vertices.push(ChunkVertex::new_tiled_lit(positions[i], normal, uvs[uv_order[i]], ao, tile_u, tile_v, light_level));
     }
 
     // Same index pattern as add_quad: 0-2-1 and 0-3-2

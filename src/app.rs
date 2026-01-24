@@ -182,6 +182,11 @@ impl App {
         let pos = self.player.position();
         let chunk_pos = ChunkPos::from_world_pos(pos);
         let render_stats = self.profiler.render_stats();
+
+        // Get light level at player's feet position
+        let light_pos = (pos.x.floor() as i32, (pos.y - 0.1).floor() as i32, pos.z.floor() as i32);
+        let (light_level, sky_light, block_light) = self.world.get_light_at(light_pos.0, light_pos.1, light_pos.2);
+
         let debug_metrics = DebugMetrics {
             fps: self.profiler.fps() as f32,
             frame_time_ms: self.profiler.frame_time_ms() as f32,
@@ -194,6 +199,10 @@ impl App {
             chunks_rendered: render_stats.chunks_rendered,
             chunks_culled: render_stats.chunks_culled,
             gpu_time_ms: render_stats.gpu_time_ms,
+            shadow_chunks_rendered: render_stats.shadow_chunks_rendered,
+            shadow_chunks_culled: render_stats.shadow_chunks_culled,
+            shadow_pass_ms: render_stats.shadow_pass_ms,
+            main_pass_ms: render_stats.main_pass_ms,
             loaded_chunks: self.world.loaded_chunks_count() as u32,
             total_vertices: self.world.total_vertices(),
             pos_x: pos.x,
@@ -204,6 +213,9 @@ impl App {
             chunk_z: chunk_pos.z,
             yaw: self.player.camera.yaw,
             pitch: self.player.camera.pitch,
+            light_level,
+            sky_light,
+            block_light,
         };
 
         // Render

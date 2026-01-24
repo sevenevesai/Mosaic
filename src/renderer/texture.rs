@@ -25,9 +25,9 @@ const TEXTURE_FILES: &[&str] = &[
     "256_Brick 02.png",             // 4: Cobblestone (using brick as substitute)
     "256_Sand 01.png",              // 5: Sand
     "256_Water Shallow 01.png",     // 6: Water
-    "256_Wood Branches 01.png",     // 7: Wood bark
-    "256_Wood Planks 02.png",       // 8: Wood planks (cross-section)
-    "256_Grass 02 Blades.png",      // 9: Leaves (grass blades as leaf substitute)
+    "256_Wood Planks 01.png",       // 7: Wood bark (log sides)
+    "256_Wood Planks 02.png",       // 8: Wood planks (log top/bottom)
+    "256_Grass 01 Simple.png",      // 9: Leaves (using simple grass as leaf color)
     "256_Stone Dirt 01.png",        // 10: Coal ore (dark stone)
     "256_Cement 01.png",            // 11: Iron ore (gray cement)
     "256_Marble 02.png",            // 12: Gold ore (light marble)

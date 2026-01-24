@@ -131,6 +131,7 @@ impl Player {
             KeyCode::Digit5 => if pressed { self.selected_block = Block::Sand; }
             KeyCode::Digit6 => if pressed { self.selected_block = Block::Wood; }
             KeyCode::Digit7 => if pressed { self.selected_block = Block::Leaves; }
+            KeyCode::Digit8 => if pressed { self.selected_block = Block::Torch; }
             _ => {}
         }
     }

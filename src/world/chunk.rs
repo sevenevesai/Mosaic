@@ -59,15 +59,16 @@ pub enum Block {
     DiamondOre = 12,
     RedstoneOre = 13,
     Bedrock = 14,
+    Torch = 15,
 }
 
 impl Block {
     pub fn is_solid(&self) -> bool {
-        !matches!(self, Block::Air | Block::Water)
+        !matches!(self, Block::Air | Block::Water | Block::Torch)
     }
 
     pub fn is_transparent(&self) -> bool {
-        matches!(self, Block::Air | Block::Water | Block::Leaves)
+        matches!(self, Block::Air | Block::Water | Block::Leaves | Block::Torch)
     }
 
     /// Get texture indices for each face: [top, bottom, front, back, left, right]
@@ -88,7 +89,24 @@ impl Block {
             Block::DiamondOre => [13; 6],
             Block::RedstoneOre => [14; 6],
             Block::Bedrock => [15; 6],
+            Block::Torch => [12; 6], // Torch uses gold ore texture (yellow) temporarily
         }
+    }
+
+    /// Get light emission level (0-15) for this block type
+    /// Torches emit level 14, providing ~14 block illumination radius
+    #[inline]
+    pub fn light_emission(&self) -> u8 {
+        match self {
+            Block::Torch => 14,
+            _ => 0,
+        }
+    }
+
+    /// Check if this block allows light to pass through
+    #[inline]
+    pub fn is_light_transparent(&self) -> bool {
+        matches!(self, Block::Air | Block::Water | Block::Leaves | Block::Torch)
     }
 }
 
@@ -110,6 +128,7 @@ impl From<u8> for Block {
             12 => Block::DiamondOre,
             13 => Block::RedstoneOre,
             14 => Block::Bedrock,
+            15 => Block::Torch,
             _ => Block::Air,
         }
     }
@@ -119,12 +138,16 @@ impl From<u8> for Block {
 pub struct Chunk {
     /// Block data stored as flat array (x + y * SIZE + z * SIZE * SIZE)
     blocks: Box<[Block; CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE]>,
+    /// Light data: upper 4 bits = sky light, lower 4 bits = block light
+    /// Each value ranges 0-15, packed into one byte per block
+    light: Box<[u8; CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE]>,
 }
 
 impl Chunk {
     pub fn new() -> Self {
         Self {
             blocks: Box::new([Block::Air; CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE]),
+            light: Box::new([0u8; CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE]),
         }
     }
 
@@ -170,6 +193,74 @@ impl Chunk {
                 (0..CHUNK_SIZE).map(move |x| (x, y, z, self.get_block(x, y, z)))
             })
         })
+    }
+
+    // ============ LIGHT ACCESS METHODS ============
+
+    /// Get raw light value (sky << 4 | block)
+    #[inline]
+    pub fn get_light(&self, x: usize, y: usize, z: usize) -> u8 {
+        self.light[Self::index(x, y, z)]
+    }
+
+    /// Set raw light value (sky << 4 | block)
+    #[inline]
+    pub fn set_light(&mut self, x: usize, y: usize, z: usize, value: u8) {
+        self.light[Self::index(x, y, z)] = value;
+    }
+
+    /// Get sky light level (0-15) from upper 4 bits
+    #[inline]
+    pub fn get_sky_light(&self, x: usize, y: usize, z: usize) -> u8 {
+        self.light[Self::index(x, y, z)] >> 4
+    }
+
+    /// Set sky light level (0-15) in upper 4 bits
+    #[inline]
+    pub fn set_sky_light(&mut self, x: usize, y: usize, z: usize, level: u8) {
+        let idx = Self::index(x, y, z);
+        self.light[idx] = ((level & 0x0F) << 4) | (self.light[idx] & 0x0F);
+    }
+
+    /// Get block light level (0-15) from lower 4 bits
+    #[inline]
+    pub fn get_block_light(&self, x: usize, y: usize, z: usize) -> u8 {
+        self.light[Self::index(x, y, z)] & 0x0F
+    }
+
+    /// Set block light level (0-15) in lower 4 bits
+    #[inline]
+    pub fn set_block_light(&mut self, x: usize, y: usize, z: usize, level: u8) {
+        let idx = Self::index(x, y, z);
+        self.light[idx] = (self.light[idx] & 0xF0) | (level & 0x0F);
+    }
+
+    /// Get combined light level (max of sky and block light)
+    /// This is the effective brightness for rendering
+    #[inline]
+    pub fn get_combined_light(&self, x: usize, y: usize, z: usize) -> u8 {
+        let light = self.light[Self::index(x, y, z)];
+        (light >> 4).max(light & 0x0F)
+    }
+
+    /// Get light with bounds checking
+    #[inline]
+    pub fn get_light_checked(&self, x: i32, y: i32, z: i32) -> Option<u8> {
+        if Self::in_bounds(x, y, z) {
+            Some(self.get_light(x as usize, y as usize, z as usize))
+        } else {
+            None
+        }
+    }
+
+    /// Get block light with bounds checking
+    #[inline]
+    pub fn get_block_light_checked(&self, x: i32, y: i32, z: i32) -> Option<u8> {
+        if Self::in_bounds(x, y, z) {
+            Some(self.get_block_light(x as usize, y as usize, z as usize))
+        } else {
+            None
+        }
     }
 }
 

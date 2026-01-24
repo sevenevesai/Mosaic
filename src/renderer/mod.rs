@@ -31,6 +31,11 @@ pub struct RenderStats {
     pub chunks_culled: u32,
     pub triangles: u32,
     pub gpu_time_ms: f64,
+    // Shadow pass stats
+    pub shadow_chunks_rendered: u32,
+    pub shadow_chunks_culled: u32,
+    pub shadow_pass_ms: f64,
+    pub main_pass_ms: f64,
 }
 
 /// GPU state and rendering logic
@@ -587,6 +592,24 @@ impl Renderer {
         let mut chunks_rendered = 0u32;
         let mut chunks_culled = 0u32;
         let mut triangles = 0u32;
+        let mut shadow_chunks_rendered = 0u32;
+        let mut shadow_chunks_culled = 0u32;
+
+        // Calculate shadow frustum bounds for culling
+        // Shadow map covers ±120 units from camera in X/Z plane
+        let shadow_size = 120.0f32;
+        let shadow_min = Vec3::new(
+            camera.position.x - shadow_size,
+            -100.0, // Include all terrain heights
+            camera.position.z - shadow_size,
+        );
+        let shadow_max = Vec3::new(
+            camera.position.x + shadow_size,
+            500.0, // Include tall mountains
+            camera.position.z + shadow_size,
+        );
+
+        let shadow_start = std::time::Instant::now();
 
         // === SHADOW PASS ===
         // Render scene from light's perspective to shadow map
@@ -609,15 +632,31 @@ impl Renderer {
             shadow_pass.set_pipeline(&self.shadow_pipeline);
             shadow_pass.set_bind_group(0, &self.light_bind_group, &[]);
 
-            // Render chunks to shadow map (no frustum culling for shadows - render all visible)
+            // Render chunks to shadow map WITH frustum culling
             for chunk_mesh in world.visible_meshes() {
+                // Shadow frustum culling - only render chunks that can cast shadows into view
+                let chunk_min = chunk_mesh.pos.world_origin();
+                let chunk_max = chunk_min + glam::Vec3::splat(crate::constants::CHUNK_SIZE_F32);
+
+                // AABB intersection test with shadow bounds
+                if chunk_max.x < shadow_min.x || chunk_min.x > shadow_max.x ||
+                   chunk_max.y < shadow_min.y || chunk_min.y > shadow_max.y ||
+                   chunk_max.z < shadow_min.z || chunk_min.z > shadow_max.z {
+                    shadow_chunks_culled += 1;
+                    continue;
+                }
+
                 if let Some(gpu_mesh) = &chunk_mesh.gpu_mesh {
                     shadow_pass.set_vertex_buffer(0, gpu_mesh.vertex_buffer.slice(..));
                     shadow_pass.set_index_buffer(gpu_mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                     shadow_pass.draw_indexed(0..gpu_mesh.index_count, 0, 0..1);
+                    shadow_chunks_rendered += 1;
                 }
             }
         }
+
+        let shadow_elapsed = shadow_start.elapsed();
+        let main_start = std::time::Instant::now();
 
         // === MAIN RENDER PASS ===
         {
@@ -731,6 +770,8 @@ impl Renderer {
             self.debug_overlay.render(&mut render_pass, &self.queue, debug_metrics);
         }
 
+        let main_elapsed = main_start.elapsed();
+
         // Resolve GPU timestamps
         self.gpu_profiler.resolve(&mut encoder);
 
@@ -746,6 +787,10 @@ impl Renderer {
             chunks_culled,
             triangles,
             gpu_time_ms: self.gpu_profiler.avg_gpu_time_ms(),
+            shadow_chunks_rendered,
+            shadow_chunks_culled,
+            shadow_pass_ms: shadow_elapsed.as_secs_f64() * 1000.0,
+            main_pass_ms: main_elapsed.as_secs_f64() * 1000.0,
         };
 
         Ok(())
