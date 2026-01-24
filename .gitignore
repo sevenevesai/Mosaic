@@ -32,6 +32,7 @@ desktop.ini
 *.log
 *.log.*
 crash-*.txt
+performance_log.txt
 
 # Profiling
 *.prof
@@ -73,6 +74,17 @@ tarpaulin-report.html
 # *.xcf
 # *.blend
 # *.blend1
+
+# Loose images in root (screenshots, copies, etc.)
+/*.png
+/*.jpg
+/*.jpeg
+/*.gif
+/*.bmp
+
+# Assets - textures are ~5MB, uncomment to exclude from git
+# If using Git LFS, remove this and configure LFS for assets/**
+# /assets/
 
 # Environment
 .env

@@ -167,7 +167,8 @@ impl App {
         self.world.update(&self.player.position());
         self.profiler.end_section("world_update");
 
-        // Upload meshes to GPU
+        // Upload meshes to GPU (per-chunk buffers - for fallback)
+        // Note: Pool upload now happens during render after frustum culling
         self.world.upload_meshes(self.renderer.device());
 
         // Get target block for outline rendering

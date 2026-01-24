@@ -7,7 +7,7 @@ mod generation;
 mod meshing;
 
 pub use chunk::{Block, Chunk, ChunkPos};
-pub use meshing::{ChunkMesh, ChunkVertex, GpuMesh, LodLevel, build_chunk_mesh};
+pub use meshing::{ChunkMesh, ChunkVertex, GpuMesh, LodLevel, build_chunk_mesh, build_chunk_mesh_lod};
 
 use std::sync::Arc;
 
@@ -234,7 +234,8 @@ impl WorldManager {
                         ];
                         drop(chunks_read);
 
-                        let mesh = meshing::build_chunk_mesh(pos, &chunk, &neighbors);
+                        // Build mesh with specified LOD level
+                        let mesh = meshing::build_chunk_mesh_lod(pos, &chunk, &neighbors, lod);
                         let _ = result_tx.send(ChunkResult::Meshed(pos, mesh));
                     }
                 }
@@ -376,10 +377,21 @@ impl WorldManager {
     }
 
     /// Calculate LOD level based on distance from player
-    fn calculate_lod(&self, _chunk_pos: ChunkPos, _player_chunk: ChunkPos) -> LodLevel {
-        // TODO: Re-enable LOD once greedy meshing is verified working
-        // For now, always use full detail
-        LodLevel::Full
+    fn calculate_lod(&self, chunk_pos: ChunkPos, player_chunk: ChunkPos) -> LodLevel {
+        use crate::constants::{LOD_FULL_DETAIL, LOD_HALF_DETAIL};
+
+        // Calculate horizontal distance (ignore vertical for LOD)
+        let dx = (chunk_pos.x - player_chunk.x).abs();
+        let dz = (chunk_pos.z - player_chunk.z).abs();
+        let dist = dx.max(dz); // Chebyshev distance
+
+        if dist <= LOD_FULL_DETAIL {
+            LodLevel::Full
+        } else if dist <= LOD_HALF_DETAIL {
+            LodLevel::Half
+        } else {
+            LodLevel::Quarter
+        }
     }
 
     /// Get all visible chunk meshes for rendering

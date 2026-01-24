@@ -9,7 +9,7 @@ cargo build --release
 ./target/release/blocks.exe
 ```
 
-**Controls:** Click to capture mouse, WASD move, Space/Shift up/down, Ctrl sprint, F3 stats, Escape release mouse.
+**Controls:** Click to capture mouse, WASD move, Space jump/fly-up, Shift fly-down, Ctrl sprint, F toggle fly mode, F3 debug overlay, 1-7 select block, Left-click break, Right-click place, P log performance, Escape release mouse.
 
 ---
 
@@ -18,23 +18,25 @@ cargo build --release
 ```
 src/
 ├── main.rs              # Entry point, logging setup
-├── lib.rs               # Module exports, constants (RENDER_DISTANCE, LOD levels, CHUNK_SIZE)
+├── lib.rs               # Module exports, constants (RENDER_DISTANCE, LOD, physics)
 ├── app.rs               # Main loop, window events, input handling
 ├── renderer/
 │   ├── mod.rs           # GPU state, render pass, frustum culling
 │   ├── camera.rs        # FPS camera, Frustum for culling
-│   ├── pipeline.rs      # WGSL shaders (lighting, fog, AO)
-│   └── texture.rs       # Procedural texture atlas (16x16 tiles)
+│   ├── pipeline.rs      # WGSL shaders (packed vertex, lighting, fog, texture tiling)
+│   ├── texture.rs       # Procedural texture atlas (16x16 tiles)
+│   ├── debug_overlay.rs # F3 overlay with bitmap font rendering
+│   └── chunk_pool.rs    # MDI mega-buffers (disabled, needs work)
 ├── world/
-│   ├── mod.rs           # WorldManager, chunk worker threads, LOD
+│   ├── mod.rs           # WorldManager, chunk workers, LOD, raycast, set_block
 │   ├── chunk.rs         # Chunk data (16³), Block enum (15 types)
 │   ├── generation.rs    # Noise terrain, caves, ores, biomes
-│   └── meshing.rs       # Face meshing, greedy meshing (WIP)
+│   └── meshing.rs       # Greedy meshing, packed ChunkVertex (24 bytes)
 ├── player/
-│   └── mod.rs           # Player state, movement, input
+│   └── mod.rs           # Player state, AABB collision, block interaction
 └── utils/
     ├── profiler.rs      # CPU frame timing, section profiling
-    └── gpu_profiler.rs  # GPU timestamp queries (partially working)
+    └── gpu_profiler.rs  # GPU timestamp queries (shows 0.00ms)
 ```
 
 ---
@@ -44,23 +46,25 @@ src/
 ### Working
 - Procedural terrain with caves, ores, mountains
 - Chunk streaming with 8 worker threads
-- Simple face-culled meshing with correct winding order (all 6 faces render properly)
+- **Greedy meshing** with proper texture tiling (2.5x triangle reduction)
+- **Packed vertex format** (24 bytes vs 36 = 33% GPU memory reduction)
+- **LOD system** - Distance-based mesh detail (Full/Half/Quarter)
 - Frustum culling (skips off-screen chunks)
 - Low-latency rendering (Mailbox present mode)
-- FPS camera with mouse look
-- Back-face culling enabled (CCW front faces)
+- FPS camera with mouse look, fly mode (F key)
+- Block placement/breaking with raycast
+- AABB collision detection
+- F3 debug overlay (on-screen stats)
+- Performance logging to `performance_log.txt`
 
 ### Known Issues
-- **Greedy meshing disabled** - `build_chunk_mesh_lod()` exists but has winding bugs; using `build_chunk_mesh()` instead
-- **GPU profiler readback** - Disabled due to wgpu 0.19 async buffer mapping complexity
-- **LOD system** - Infrastructure exists but currently always returns Full LOD
-- **F3 overlay** - Logs to console only, no on-screen display
+- **GPU profiler readback** - Shows 0.00ms due to wgpu 0.19 async buffer mapping complexity
+- **MDI disabled** - Multi-draw indirect code exists in `renderer/chunk_pool.rs` but causes visual bugs (missing chunks). Needs debugging before enabling.
 
-### Performance Baseline
-- Render distance: 24 chunks
-- ~8 worker threads for generation/meshing
-- Frustum culling active
-- Simple meshing (more triangles than greedy)
+### Performance (RTX 2080 Ti, render distance 24)
+- ~550-600 FPS with greedy meshing + LOD
+- ~570K triangles, ~2.3K chunks rendered
+- ~3.7M vertices in GPU memory
 
 ---
 
@@ -111,11 +115,11 @@ Edit `src/world/generation.rs` - `TerrainGenerator` struct handles height, caves
 Edit `RENDER_DISTANCE` in `src/lib.rs`. Higher = more chunks = more GPU/CPU load.
 
 ### Debugging Mesh Issues
-- Check `src/world/meshing.rs` - face functions `add_face_*`
-- To test if faces are being generated: temporarily set `cull_mode: None` in `pipeline.rs:112`
-- If faces appear with culling off but not on: winding order is wrong
-- If faces are missing even with culling off: visibility check (`is_face_visible`) is wrong
-- World manager calls `build_chunk_mesh()` (simple) not `build_chunk_mesh_lod()` (greedy)
+- Check `src/world/meshing.rs` - greedy meshing in `build_chunk_mesh_lod()`, simple in `build_chunk_mesh_simple()`
+- Current: `build_chunk_mesh()` calls greedy meshing with Full LOD
+- Packed vertex: position (12B) + normal_packed (4B) + uv (4B) + ao_tile_packed (4B) = 24 bytes
+- Texture tiling: `ao_tile_packed` contains [ao, tile_u, tile_v, 0] for proper tiling on merged quads
+- To test winding: set `cull_mode: None` in `pipeline.rs`
 
 ---
 

@@ -32,7 +32,7 @@ pub mod constants {
     pub const LOD_QUARTER_DETAIL: i32 = 24;  // Skip 3/4 blocks
 
     /// Texture atlas tile size (pixel art)
-    pub const TEXTURE_TILE_SIZE: u32 = 16;
+    pub const TEXTURE_TILE_SIZE: u32 = 256;
 
     /// Block scale - size of each block in world units
     /// 1.0 = standard Minecraft-like blocks
