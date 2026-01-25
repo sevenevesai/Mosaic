@@ -39,10 +39,15 @@ const TEXTURE_FILES: &[&str] = &[
 const TEXTURE_DIR: &str = "assets/textures/256x256 Pixel Textures";
 
 impl TextureAtlas {
-    /// Load texture atlas from PNG files
+    /// Load texture atlas from PNG files with full mipmap chain and anisotropic filtering
+    /// This provides smooth, high-quality textures at all distances
     pub fn load(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
         let tiles_per_row = 4u32; // 4x4 grid = 16 tiles
         let atlas_size = TEXTURE_TILE_SIZE * tiles_per_row; // 256 * 4 = 1024
+
+        // Calculate mip levels: log2(1024) = 10 levels (1024 -> 512 -> 256 -> ... -> 1)
+        let mip_level_count = (atlas_size as f32).log2().floor() as u32 + 1;
+        log::info!("Creating texture atlas {}x{} with {} mip levels", atlas_size, atlas_size, mip_level_count);
 
         // Try to load from files, fall back to procedural if files not found
         let atlas_data = match Self::load_atlas_from_files(tiles_per_row) {
@@ -63,7 +68,7 @@ impl TextureAtlas {
                 height: atlas_size,
                 depth_or_array_layers: 1,
             },
-            mip_level_count: 1,
+            mip_level_count,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8UnormSrgb,
@@ -71,6 +76,7 @@ impl TextureAtlas {
             view_formats: &[],
         });
 
+        // Upload base mip level (level 0)
         queue.write_texture(
             wgpu::ImageCopyTexture {
                 texture: &texture,
@@ -91,17 +97,24 @@ impl TextureAtlas {
             },
         );
 
+        // Generate and upload mipmap chain
+        Self::generate_mipmaps(queue, &texture, &atlas_data, atlas_size, mip_level_count);
+
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        // Use nearest-neighbor sampling for pixel art
+        // High-quality sampler with anisotropic filtering
+        // Uses trilinear filtering with 16x anisotropy for smooth textures at all angles
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("Block Texture Sampler"),
             address_mode_u: wgpu::AddressMode::Repeat,
             address_mode_v: wgpu::AddressMode::Repeat,
             address_mode_w: wgpu::AddressMode::Repeat,
-            mag_filter: wgpu::FilterMode::Nearest, // Pixel-perfect!
-            min_filter: wgpu::FilterMode::Nearest,
-            mipmap_filter: wgpu::FilterMode::Nearest,
+            // Trilinear filtering: linear between texels and between mip levels
+            mag_filter: wgpu::FilterMode::Linear,  // Smooth when close
+            min_filter: wgpu::FilterMode::Linear,  // Smooth when far
+            mipmap_filter: wgpu::FilterMode::Linear, // Smooth mip transitions
+            // Anisotropic filtering for sharp textures at oblique angles
+            anisotropy_clamp: 16,
             ..Default::default()
         });
 
@@ -111,6 +124,60 @@ impl TextureAtlas {
             sampler,
             tiles_per_row,
         }
+    }
+
+    /// Generate and upload mipmap chain using high-quality Lanczos3 downsampling
+    fn generate_mipmaps(queue: &wgpu::Queue, texture: &wgpu::Texture, base_data: &[u8], base_size: u32, mip_count: u32) {
+        let mut current_data = base_data.to_vec();
+        let mut current_size = base_size;
+
+        for mip_level in 1..mip_count {
+            let new_size = (current_size / 2).max(1);
+
+            // Create image from current level
+            let current_image: ImageBuffer<Rgba<u8>, Vec<u8>> = ImageBuffer::from_raw(
+                current_size,
+                current_size,
+                current_data.clone(),
+            ).expect("Failed to create image buffer for mipmap");
+
+            // Downsample using high-quality Lanczos3 filter
+            // This provides excellent quality with minimal aliasing
+            let resized = image::imageops::resize(
+                &current_image,
+                new_size,
+                new_size,
+                image::imageops::FilterType::Lanczos3,
+            );
+
+            let mip_data: Vec<u8> = resized.into_raw();
+
+            // Upload this mip level
+            queue.write_texture(
+                wgpu::ImageCopyTexture {
+                    texture,
+                    mip_level,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &mip_data,
+                wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4 * new_size),
+                    rows_per_image: Some(new_size),
+                },
+                wgpu::Extent3d {
+                    width: new_size,
+                    height: new_size,
+                    depth_or_array_layers: 1,
+                },
+            );
+
+            current_data = mip_data;
+            current_size = new_size;
+        }
+
+        log::info!("Generated {} mipmap levels", mip_count - 1);
     }
 
     /// Load textures from PNG files and combine into atlas

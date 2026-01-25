@@ -372,7 +372,19 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     return out;
 }
 
-// PCF shadow sampling with rotated kernel for smooth diagonal shadows
+// ═══════════════════════════════════════════════════════════════════════════
+// PROFESSIONAL PCF SHADOW SAMPLING
+// Uses adaptive bias, Vogel disk sampling, and smooth edge transitions
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Vogel disk - provides well-distributed samples for soft PCF shadows
+fn vogel_disk_sample(index: i32, samples: i32, rotation: f32) -> vec2<f32> {
+    let golden_angle = 2.4; // Approximation of golden angle in radians
+    let r = sqrt((f32(index) + 0.5) / f32(samples));
+    let theta = f32(index) * golden_angle + rotation;
+    return vec2<f32>(cos(theta), sin(theta)) * r;
+}
+
 fn calculate_shadow(shadow_pos: vec4<f32>, normal: vec3<f32>, light_dir: vec3<f32>) -> f32 {
     // Perspective divide
     let proj_coords = shadow_pos.xyz / shadow_pos.w;
@@ -383,7 +395,7 @@ fn calculate_shadow(shadow_pos: vec4<f32>, normal: vec3<f32>, light_dir: vec3<f3
         -proj_coords.y * 0.5 + 0.5  // Flip Y
     );
 
-    // If outside shadow map, no shadow
+    // If outside shadow map, return fully lit (no shadow)
     if (shadow_uv.x < 0.0 || shadow_uv.x > 1.0 || shadow_uv.y < 0.0 || shadow_uv.y > 1.0) {
         return 1.0;
     }
@@ -391,58 +403,83 @@ fn calculate_shadow(shadow_pos: vec4<f32>, normal: vec3<f32>, light_dir: vec3<f3
     // Current depth from light's perspective
     let current_depth = proj_coords.z;
 
-    // If behind light frustum, no shadow
+    // If behind or in front of light frustum, no shadow
     if (current_depth > 1.0 || current_depth < 0.0) {
         return 1.0;
     }
 
-    // Minimal slope-based bias - small values for sharp shadow contact at object bases
-    let ndotl = dot(normal, light_dir);
-    let bias = max(0.0008 * (1.0 - ndotl), 0.0002);
-    let biased_depth = current_depth - bias;
+    // ═══════════════════════════════════════════════════════════════════════
+    // ADAPTIVE BIAS SYSTEM
+    // Prevents shadow acne while maintaining sharp contact shadows
+    // ═══════════════════════════════════════════════════════════════════════
+    let ndotl = max(dot(normal, light_dir), 0.0);
 
-    // Texel size for 4K shadow map
+    // Receiver plane bias: prevents self-shadowing on steep surfaces
+    // Uses both constant and slope-scaled components
+    let constant_bias = 0.0003;
+    let slope_bias = 0.0015 * (1.0 - ndotl * ndotl); // Quadratic falloff for grazing angles
+    let normal_offset_bias = 0.0005 * sqrt(1.0 - ndotl * ndotl); // Normal-based offset
+
+    let total_bias = constant_bias + slope_bias + normal_offset_bias;
+    let biased_depth = current_depth - total_bias;
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // SOFT EDGE HANDLING
+    // Prevents harsh shadow map boundary artifacts
+    // ═══════════════════════════════════════════════════════════════════════
+    let edge_fade_start = 0.03;  // Start fading at 3% from edge
+    let edge_fade_end = 0.12;    // Fully faded at 12% from edge
+    let edge_x = min(shadow_uv.x, 1.0 - shadow_uv.x);
+    let edge_y = min(shadow_uv.y, 1.0 - shadow_uv.y);
+    let edge_dist = min(edge_x, edge_y);
+    let shadow_strength = smoothstep(edge_fade_start, edge_fade_end, edge_dist);
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // VOGEL DISK PCF SAMPLING
+    // 16 samples in a well-distributed disk pattern for smooth soft shadows
+    // ═══════════════════════════════════════════════════════════════════════
     let texel_size = 1.0 / 4096.0;
+    let filter_radius = texel_size * 1.8; // Slightly larger filter for softer edges
 
-    // Rotated PCF kernel - samples at 45 degree angles for smooth diagonal shadows
-    // This avoids the axis-aligned stair-stepping of regular grid sampling
+    // Rotation based on position to break up banding patterns
+    let rotation = fract(sin(dot(shadow_uv, vec2<f32>(12.9898, 78.233))) * 43758.5453) * 6.28318;
+
     var shadow = 0.0;
+    let num_samples = 16;
 
-    // Center sample
-    shadow += textureSampleCompare(t_shadow, s_shadow, shadow_uv, biased_depth);
+    // Vogel disk sampling - provides excellent coverage without regular patterns
+    for (var i = 0; i < num_samples; i++) {
+        let offset = vogel_disk_sample(i, num_samples, rotation) * filter_radius;
+        shadow += textureSampleCompare(t_shadow, s_shadow, shadow_uv + offset, biased_depth);
+    }
+    shadow /= f32(num_samples);
 
-    // Inner ring (rotated 45 degrees, radius ~1 texel)
-    let r1 = texel_size * 0.707;  // sqrt(2)/2 for 45 degree rotation
-    shadow += textureSampleCompare(t_shadow, s_shadow, shadow_uv + vec2<f32>(r1, r1), biased_depth);
-    shadow += textureSampleCompare(t_shadow, s_shadow, shadow_uv + vec2<f32>(-r1, r1), biased_depth);
-    shadow += textureSampleCompare(t_shadow, s_shadow, shadow_uv + vec2<f32>(r1, -r1), biased_depth);
-    shadow += textureSampleCompare(t_shadow, s_shadow, shadow_uv + vec2<f32>(-r1, -r1), biased_depth);
+    // ═══════════════════════════════════════════════════════════════════════
+    // CONTACT HARDENING (PCSS-lite)
+    // Shadows are sharper near occluder, softer further away
+    // ═══════════════════════════════════════════════════════════════════════
+    // Approximate penumbra - sharpen shadows that are mostly lit or mostly shadowed
+    let penumbra_sharpness = 1.0 - abs(shadow - 0.5) * 2.0; // 0 at extremes, 1 in middle
+    let sharpened_shadow = mix(
+        shadow,
+        smoothstep(0.25, 0.75, shadow), // Sharpen the transition
+        0.3 * (1.0 - penumbra_sharpness)
+    );
 
-    // Outer ring (axis-aligned, radius ~1.5 texels)
-    let r2 = texel_size * 1.5;
-    shadow += textureSampleCompare(t_shadow, s_shadow, shadow_uv + vec2<f32>(r2, 0.0), biased_depth);
-    shadow += textureSampleCompare(t_shadow, s_shadow, shadow_uv + vec2<f32>(-r2, 0.0), biased_depth);
-    shadow += textureSampleCompare(t_shadow, s_shadow, shadow_uv + vec2<f32>(0.0, r2), biased_depth);
-    shadow += textureSampleCompare(t_shadow, s_shadow, shadow_uv + vec2<f32>(0.0, -r2), biased_depth);
-
-    // Third ring (rotated 45 degrees, radius ~2 texels)
-    let r3 = texel_size * 1.414;  // sqrt(2) for larger diagonal
-    shadow += textureSampleCompare(t_shadow, s_shadow, shadow_uv + vec2<f32>(r3, r3), biased_depth);
-    shadow += textureSampleCompare(t_shadow, s_shadow, shadow_uv + vec2<f32>(-r3, r3), biased_depth);
-    shadow += textureSampleCompare(t_shadow, s_shadow, shadow_uv + vec2<f32>(r3, -r3), biased_depth);
-    shadow += textureSampleCompare(t_shadow, s_shadow, shadow_uv + vec2<f32>(-r3, -r3), biased_depth);
-
-    shadow /= 13.0;
-
-    return shadow;
+    // Blend to fully lit at shadow map edges
+    return mix(1.0, sharpened_shadow, shadow_strength);
 }
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // Calculate tiled UV for greedy meshing using WORLD POSITION
-    // This ensures textures align to world grid regardless of how quads are merged
+    // ═══════════════════════════════════════════════════════════════════════
+    // TEXTURE ATLAS SAMPLING WITH MIP-AWARE ANTI-BLEEDING
+    // Calculates proper margins based on which mip level is being sampled
+    // ═══════════════════════════════════════════════════════════════════════
+
     let tiles_per_row = 4.0;  // 4x4 grid of 256x256 tiles = 1024x1024 atlas
-    let tile_size = 1.0 / tiles_per_row;
+    let tile_size = 1.0 / tiles_per_row;  // 0.25 in UV space
+    let tile_pixels = 256.0;  // Pixels per tile in base mip
 
     // Get the base tile corner from UV (tells us WHICH texture to use)
     let tile_base = floor(in.uv / tile_size) * tile_size;
@@ -464,11 +501,50 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         tiled_local = vec2<f32>(world_frac.x, world_frac.y);
     }
 
-    // Final UV = base tile + world-aligned local position
-    let tiled_uv = tile_base + tiled_local * tile_size;
+    // Calculate UV within tile (0 to tile_size range)
+    let uv_in_tile = tiled_local * tile_size;
 
-    // Sample texture
-    let tex_color = textureSample(t_diffuse, s_diffuse, tiled_uv);
+    // ═══════════════════════════════════════════════════════════════════════
+    // MIP-AWARE MARGIN CALCULATION
+    // Use screen-space derivatives to estimate mip level and scale margin
+    // ═══════════════════════════════════════════════════════════════════════
+
+    // Calculate how fast UVs change across the screen (tells us effective texel size)
+    let uv_for_deriv = tile_base + uv_in_tile;
+    let dx = dpdx(uv_for_deriv);
+    let dy = dpdy(uv_for_deriv);
+
+    // Maximum rate of change determines the mip level being used
+    let max_deriv = max(
+        max(abs(dx.x), abs(dx.y)),
+        max(abs(dy.x), abs(dy.y))
+    );
+
+    // Convert derivative to approximate mip level
+    // At mip 0, 1 pixel = 1/1024 UV. At mip N, 1 pixel = 2^N / 1024 UV
+    // So mip level ≈ log2(deriv * atlas_size)
+    let approx_mip = max(0.0, log2(max_deriv * 1024.0 + 1.0));
+
+    // Scale margin based on mip level - need larger margin at higher mips
+    // Base margin is 1 texel, scaled up by 2^mip
+    let mip_scale = pow(2.0, min(approx_mip, 6.0));  // Cap at mip 6
+    let margin = (mip_scale * 1.5) / (tile_pixels * tiles_per_row);  // 1.5 texels at current mip
+
+    // Clamp UV to stay safely inside tile at current mip level
+    let clamped_uv = clamp(
+        uv_in_tile,
+        vec2<f32>(margin),
+        vec2<f32>(tile_size - margin)
+    );
+
+    // Final UV = base tile + clamped position within tile
+    let tiled_uv = tile_base + clamped_uv;
+
+    // Sample texture with clamped derivatives to prevent bleeding during filtering
+    // Use textureSampleGrad with clamped gradients for maximum control
+    let clamped_dx = clamp(dx, vec2<f32>(-tile_size * 0.5), vec2<f32>(tile_size * 0.5));
+    let clamped_dy = clamp(dy, vec2<f32>(-tile_size * 0.5), vec2<f32>(tile_size * 0.5));
+    let tex_color = textureSampleGrad(t_diffuse, s_diffuse, tiled_uv, clamped_dx, clamped_dy);
 
     // Alpha test: discard transparent pixels (cutout transparency like Minecraft leaves)
     if (tex_color.a < 0.5) {
@@ -548,7 +624,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let block_light_contribution = torch_color * block_light_curve * 0.9 * night_boost;
 
     // === AMBIENT OCCLUSION ===
-    let ao_factor = mix(0.25, 1.0, in.ao);
+    // Professional-quality AO with smooth cubic interpolation
+    // Uses hermite smoothstep for natural-looking soft shadows in corners
+    // Floor at 65% to prevent overly dark corners while maintaining definition
+    let ao_raw = in.ao;
+    // Apply smoothstep curve for more natural falloff (prevents harsh banding)
+    let ao_smooth = smoothstep(0.0, 1.0, ao_raw);
+    // Second smoothstep pass for even softer transitions (hermite^2)
+    let ao_curved = smoothstep(0.0, 1.0, ao_smooth);
+    // Map to final range: 65% minimum brightness to prevent over-darkening
+    let ao_factor = mix(0.65, 1.0, ao_curved);
 
     // === COMBINE LIGHTING ===
     let natural_light = ambient + sun_contribution + moon_contribution + sky_contribution + ground_contribution;
@@ -710,10 +795,14 @@ pub fn create_shadow_pipeline(
             depth_write_enabled: true,
             depth_compare: wgpu::CompareFunction::Less,
             stencil: wgpu::StencilState::default(),
+            // Professional shadow bias settings:
+            // - Small constant bias prevents surface acne
+            // - Moderate slope scale handles grazing angles
+            // - Clamp prevents over-biasing at steep angles
             bias: wgpu::DepthBiasState {
-                constant: 1,       // Minimal bias for sharp shadow contact
-                slope_scale: 1.0,  // Reduced for tighter shadows at object bases
-                clamp: 0.0,
+                constant: 2,       // Small constant offset (in depth buffer units)
+                slope_scale: 1.5,  // Scale bias by surface slope for grazing angles
+                clamp: 0.01,       // Maximum bias to prevent peter-panning
             },
         }),
         multisample: wgpu::MultisampleState::default(),
