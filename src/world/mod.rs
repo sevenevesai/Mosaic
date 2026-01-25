@@ -344,8 +344,18 @@ impl WorldManager {
         // Calculate player's chunk position
         let player_chunk = ChunkPos::from_world_pos(*player_pos);
 
-        // Process results from workers
-        while let Ok(result) = self.result_receiver.try_recv() {
+        // Process results from workers - batch process for faster throughput
+        // Process up to 100 results per frame to avoid blocking the main loop too long
+        let mut results_processed = 0;
+        const MAX_RESULTS_PER_FRAME: usize = 100;
+
+        while results_processed < MAX_RESULTS_PER_FRAME {
+            let result = match self.result_receiver.try_recv() {
+                Ok(r) => r,
+                Err(_) => break,
+            };
+            results_processed += 1;
+
             match result {
                 ChunkResult::Generated(pos, chunk) => {
                     self.pending_generation.remove(&pos);
@@ -359,12 +369,25 @@ impl WorldManager {
                     if has_water {
                         self.queue_water_meshing(pos);
                     }
-                    // Also update neighbor meshes
-                    for offset in &[(-1, 0, 0), (1, 0, 0), (0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1)] {
-                        let neighbor = pos.offset(offset.0, offset.1, offset.2);
-                        if self.chunks.read().contains_key(&neighbor) {
-                            let neighbor_lod = self.calculate_lod(neighbor, player_chunk);
-                            self.queue_meshing_with_lod(neighbor, neighbor_lod);
+                    // OPTIMIZATION: Only remesh neighbors if most nearby chunks are already loaded
+                    // This prevents redundant remeshing during initial load
+                    // Count how many neighbors exist
+                    let chunks_read = self.chunks.read();
+                    let neighbor_count = [(-1, 0, 0), (1, 0, 0), (0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1)]
+                        .iter()
+                        .filter(|(dx, dy, dz)| chunks_read.contains_key(&pos.offset(*dx, *dy, *dz)))
+                        .count();
+                    drop(chunks_read);
+
+                    // Only trigger neighbor remesh if at least 4 neighbors exist
+                    // This ensures we don't waste time remeshing during initial world load
+                    if neighbor_count >= 4 {
+                        for offset in &[(-1, 0, 0), (1, 0, 0), (0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1)] {
+                            let neighbor = pos.offset(offset.0, offset.1, offset.2);
+                            if self.chunks.read().contains_key(&neighbor) {
+                                let neighbor_lod = self.calculate_lod(neighbor, player_chunk);
+                                self.queue_meshing_with_lod(neighbor, neighbor_lod);
+                            }
                         }
                     }
                 }
@@ -382,8 +405,8 @@ impl WorldManager {
         }
 
         // Queue chunks for generation around player, prioritized by distance
-        // Limit batch size to allow progressive loading (workers will process these then we queue more)
-        const MAX_PENDING_GEN: usize = 200; // Keep worker queue manageable
+        // Higher limit allows workers to stay busy and maximizes parallelism
+        const MAX_PENDING_GEN: usize = 500; // Increased for faster initial load
 
         // Only queue more if we have room
         if self.pending_generation.len() >= MAX_PENDING_GEN {

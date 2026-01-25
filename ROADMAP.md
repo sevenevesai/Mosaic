@@ -24,7 +24,7 @@
 
 - [ ] **GPU profiler fix** - Async buffer mapping in wgpu 0.19 is tricky. Either fix properly or upgrade to wgpu 0.20+ with better async support.
 
-- [ ] **Ambient occlusion** - AO calculation exists but simplified. Implement proper corner-based AO for better visual depth.
+- [x] **Ambient occlusion** - AO calculation exists but simplified. Implement proper corner-based AO for better visual depth.
 
 - [x] **Water rendering (basic)** - Smooth heightfield surface, Gerstner waves, fresnel reflections, foam, light integration. See "Water Enhancements" for remaining work.
 
@@ -38,9 +38,9 @@
 
 - [ ] **Biome system** - Temperature/humidity noise → distinct biomes with different terrain and vegetation.
 
-- [ ] **Tree generation** - Structure placement during chunk gen. Oak, birch, etc.
+- [x] **Tree generation** - Structure placement during chunk gen. Oak, birch, etc.
 
-- [ ] **Cave improvements** - Larger cave systems, stalactites, underground lakes.
+- [x] **Cave improvements** - Larger cave systems, stalactites, underground lakes.
 
 - [ ] **Inventory system** - Block selection, hotbar UI.
 
@@ -114,7 +114,7 @@ Current water system has smooth heightfield rendering with waves and reflections
 - [x] Basic audio (footsteps)
 
 ### v0.2 - Visual Polish
-- [ ] Proper AO (GTAO or corner-based)
+- [x] Proper AO (GTAO or corner-based)
 - [x] Water rendering (basic - waves, reflections, foam)
 - [ ] Water enhancements (refraction, caustics, underwater effects)
 - [x] Day/night cycle
