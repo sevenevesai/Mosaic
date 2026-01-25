@@ -221,6 +221,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_header_roundtrip() {
+        let header = ChunkDataHeader {
+            uncompressed_size: 8193,
+            compressed_size: 1024,
+            compression: CompressionType::Zstd,
+            version: 1,
+        };
+
+        let bytes = header.to_bytes();
+        let loaded = ChunkDataHeader::from_bytes(&bytes);
+
+        assert_eq!(loaded.uncompressed_size, 8193);
+        assert_eq!(loaded.compressed_size, 1024);
+        assert_eq!(loaded.compression, CompressionType::Zstd);
+        assert_eq!(loaded.version, 1);
+    }
+
+    #[test]
     fn test_chunk_roundtrip() {
         let mut chunk = Chunk::new();
 
@@ -251,5 +269,58 @@ mod tests {
         // Verify light
         assert_eq!(loaded.get_light(0, 0, 0), 0xF0);
         assert_eq!(loaded.get_light(1, 1, 1), 0x0E);
+    }
+
+    #[test]
+    fn test_chunk_preserves_light() {
+        let mut chunk = Chunk::new();
+
+        // Set up a torch-like light pattern
+        chunk.set_block(8, 8, 8, Block::Torch);
+        chunk.set_block_light(8, 8, 8, 14);
+        chunk.set_block_light(9, 8, 8, 13);
+        chunk.set_block_light(10, 8, 8, 12);
+
+        // Set sky light separately
+        chunk.set_sky_light(0, 15, 0, 15);
+        chunk.set_sky_light(0, 14, 0, 14);
+
+        // Serialize and deserialize
+        let data = serialize_chunk(&chunk).unwrap();
+        let loaded = deserialize_chunk(&data).unwrap();
+
+        // Verify block light preserved
+        assert_eq!(loaded.get_block_light(8, 8, 8), 14);
+        assert_eq!(loaded.get_block_light(9, 8, 8), 13);
+        assert_eq!(loaded.get_block_light(10, 8, 8), 12);
+
+        // Verify sky light preserved
+        assert_eq!(loaded.get_sky_light(0, 15, 0), 15);
+        assert_eq!(loaded.get_sky_light(0, 14, 0), 14);
+
+        // Verify combined light works
+        assert_eq!(loaded.get_combined_light(8, 8, 8), 14);
+    }
+
+    #[test]
+    fn test_all_block_types_roundtrip() {
+        let mut chunk = Chunk::new();
+
+        // Set one of each block type at different positions
+        for i in 0..16 {
+            chunk.set_block(i, 0, 0, Block::from(i as u8));
+        }
+
+        // Serialize and deserialize
+        let data = serialize_chunk(&chunk).unwrap();
+        let loaded = deserialize_chunk(&data).unwrap();
+
+        // Verify all block types preserved
+        assert_eq!(loaded.get_block(0, 0, 0), Block::Air);
+        assert_eq!(loaded.get_block(1, 0, 0), Block::Dirt);
+        assert_eq!(loaded.get_block(2, 0, 0), Block::Grass);
+        assert_eq!(loaded.get_block(3, 0, 0), Block::Stone);
+        assert_eq!(loaded.get_block(6, 0, 0), Block::Water);
+        assert_eq!(loaded.get_block(15, 0, 0), Block::Torch);
     }
 }

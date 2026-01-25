@@ -422,6 +422,157 @@ impl Default for LightEngine {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::world::chunk::Block;
+
+    /// Helper to create a chunk map with a single empty chunk
+    fn create_chunk_map() -> Arc<RwLock<AHashMap<ChunkPos, Arc<Chunk>>>> {
+        let mut map = AHashMap::new();
+        map.insert(ChunkPos { x: 0, y: 0, z: 0 }, Arc::new(Chunk::new()));
+        Arc::new(RwLock::new(map))
+    }
+
+    /// Helper to create a chunk map with a solid chunk (for testing light blocking)
+    fn create_solid_chunk_map() -> Arc<RwLock<AHashMap<ChunkPos, Arc<Chunk>>>> {
+        let mut chunk = Chunk::new();
+        // Fill with stone except center area
+        for z in 0..CHUNK_SIZE {
+            for y in 0..CHUNK_SIZE {
+                for x in 0..CHUNK_SIZE {
+                    if x < 6 || x > 10 || y < 6 || y > 10 || z < 6 || z > 10 {
+                        chunk.set_block(x, y, z, Block::Stone);
+                    }
+                }
+            }
+        }
+        let mut map = AHashMap::new();
+        map.insert(ChunkPos { x: 0, y: 0, z: 0 }, Arc::new(chunk));
+        Arc::new(RwLock::new(map))
+    }
+
+    #[test]
+    fn test_world_to_chunk_local() {
+        // Origin
+        let (pos, lx, ly, lz) = world_to_chunk_local(0, 0, 0);
+        assert_eq!((pos.x, pos.y, pos.z), (0, 0, 0));
+        assert_eq!((lx, ly, lz), (0, 0, 0));
+
+        // Positive within first chunk
+        let (pos, lx, ly, lz) = world_to_chunk_local(5, 10, 15);
+        assert_eq!((pos.x, pos.y, pos.z), (0, 0, 0));
+        assert_eq!((lx, ly, lz), (5, 10, 15));
+
+        // Positive second chunk
+        let (pos, lx, ly, lz) = world_to_chunk_local(17, 0, 0);
+        assert_eq!((pos.x, pos.y, pos.z), (1, 0, 0));
+        assert_eq!((lx, ly, lz), (1, 0, 0));
+
+        // Negative coordinates
+        let (pos, lx, ly, lz) = world_to_chunk_local(-1, -1, -1);
+        assert_eq!((pos.x, pos.y, pos.z), (-1, -1, -1));
+        assert_eq!((lx, ly, lz), (15, 15, 15)); // -1 mod 16 = 15
+
+        // Negative boundary
+        let (pos, lx, ly, lz) = world_to_chunk_local(-16, 0, 0);
+        assert_eq!((pos.x, pos.y, pos.z), (-1, 0, 0));
+        assert_eq!((lx, ly, lz), (0, 0, 0));
+    }
+
+    #[test]
+    fn test_propagate_single_source() {
+        let chunks = create_chunk_map();
+        let mut engine = LightEngine::new();
+
+        // Propagate from center of chunk with level 14
+        let updates = engine.propagate_light(8, 8, 8, 14, &chunks);
+
+        // Should have updates for chunk (0,0,0)
+        assert!(!updates.is_empty(), "Should have light updates");
+
+        // Find updates for the origin chunk
+        let origin_updates = updates.iter()
+            .find(|(pos, _)| pos.x == 0 && pos.y == 0 && pos.z == 0);
+        assert!(origin_updates.is_some(), "Should have updates for origin chunk");
+
+        let (_, light_changes) = origin_updates.unwrap();
+
+        // Source should have level 14
+        let source = light_changes.iter()
+            .find(|(x, y, z, _)| *x == 8 && *y == 8 && *z == 8);
+        assert!(source.is_some(), "Source position should be in updates");
+        assert_eq!(source.unwrap().3, 14, "Source should have level 14");
+
+        // Adjacent blocks should have level 13
+        let adjacent = light_changes.iter()
+            .find(|(x, y, z, _)| *x == 9 && *y == 8 && *z == 8);
+        assert!(adjacent.is_some(), "Adjacent position should be in updates");
+        assert_eq!(adjacent.unwrap().3, 13, "Adjacent should have level 13");
+
+        // Should mark chunk dirty
+        let dirty = engine.take_dirty_chunks();
+        assert!(dirty.contains(&ChunkPos { x: 0, y: 0, z: 0 }));
+    }
+
+    #[test]
+    fn test_propagate_stops_at_solid() {
+        let chunks = create_solid_chunk_map();
+        let mut engine = LightEngine::new();
+
+        // Propagate from center (which is air, surrounded by air, then stone)
+        let updates = engine.propagate_light(8, 8, 8, 14, &chunks);
+
+        // Find updates
+        let origin_updates = updates.iter()
+            .find(|(pos, _)| pos.x == 0 && pos.y == 0 && pos.z == 0);
+        assert!(origin_updates.is_some());
+
+        let (_, light_changes) = origin_updates.unwrap();
+
+        // Light should NOT propagate to stone blocks (e.g., x=5)
+        let blocked = light_changes.iter()
+            .find(|(x, y, z, _)| *x == 5 && *y == 8 && *z == 8);
+        assert!(blocked.is_none(), "Light should not propagate into solid blocks");
+
+        // Light SHOULD propagate to air blocks between source and stone
+        let in_air = light_changes.iter()
+            .find(|(x, y, z, _)| *x == 7 && *y == 8 && *z == 8);
+        assert!(in_air.is_some(), "Light should propagate through air");
+    }
+
+    #[test]
+    fn test_light_removal() {
+        let chunks = create_chunk_map();
+        let mut engine = LightEngine::new();
+
+        // First propagate light
+        let propagate_updates = engine.propagate_light(8, 8, 8, 14, &chunks);
+        apply_light_updates(propagate_updates, &chunks);
+
+        // Verify light was applied
+        {
+            let chunks_read = chunks.read();
+            let chunk = chunks_read.get(&ChunkPos { x: 0, y: 0, z: 0 }).unwrap();
+            assert_eq!(chunk.get_block_light(8, 8, 8), 14, "Source should have light");
+            assert_eq!(chunk.get_block_light(9, 8, 8), 13, "Adjacent should have light");
+        }
+
+        // Now remove the light
+        let removal_updates = engine.remove_light(8, 8, 8, &chunks);
+        apply_light_updates(removal_updates, &chunks);
+
+        // Verify light was removed
+        {
+            let chunks_read = chunks.read();
+            let chunk = chunks_read.get(&ChunkPos { x: 0, y: 0, z: 0 }).unwrap();
+            assert_eq!(chunk.get_block_light(8, 8, 8), 0, "Source should have no light");
+            // Note: Adjacent blocks might still have light if re-propagation from other sources
+            // In this test case with single source, they should be 0
+        }
+    }
+}
+
 /// Apply light updates to chunks (call after propagation)
 /// Takes ownership of chunks temporarily to apply batch updates
 pub fn apply_light_updates(

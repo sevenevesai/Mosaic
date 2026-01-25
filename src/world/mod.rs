@@ -10,7 +10,8 @@ pub mod storage;
 mod water_meshing;
 
 pub use chunk::{Block, Chunk, ChunkPos, ChunkWaterData, WaterColumn};
-pub use lighting::{LightEngine, apply_light_updates};
+pub use generation::{generate_chunk, generate_chunk_with_seed};
+pub use lighting::{LightEngine, apply_light_updates, world_to_chunk_local};
 pub use meshing::{ChunkMesh, ChunkVertex, GpuMesh, LodLevel, build_chunk_mesh, build_chunk_mesh_lod, MESH_STATS};
 pub use storage::{WorldStorage, SharedStorage, StorageError, create_shared_storage};
 pub use water_meshing::{WaterMesh, WaterVertex, GpuWaterMesh, build_water_mesh, chunk_has_water};

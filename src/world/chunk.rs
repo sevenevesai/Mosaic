@@ -534,3 +534,248 @@ impl Default for Chunk {
         Self::new()
     }
 }
+
+impl Chunk {
+    /// Create a chunk filled with a single block type (for testing/benchmarking)
+    pub fn new_solid(block: Block) -> Self {
+        let mut chunk = Self::new();
+        for z in 0..CHUNK_SIZE {
+            for y in 0..CHUNK_SIZE {
+                for x in 0..CHUNK_SIZE {
+                    chunk.set_block(x, y, z, block);
+                }
+            }
+        }
+        chunk
+    }
+
+    /// Create a chunk with random sparse blocks (for testing/benchmarking)
+    pub fn new_sparse(seed: u64, occupancy: f32) -> Self {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut chunk = Self::new();
+        let threshold = (occupancy * u64::MAX as f32) as u64;
+
+        for z in 0..CHUNK_SIZE {
+            for y in 0..CHUNK_SIZE {
+                for x in 0..CHUNK_SIZE {
+                    let mut hasher = DefaultHasher::new();
+                    (seed, x, y, z).hash(&mut hasher);
+                    let hash = hasher.finish();
+
+                    if hash < threshold {
+                        chunk.set_block(x, y, z, Block::Stone);
+                    }
+                }
+            }
+        }
+        chunk
+    }
+
+    /// Create a checkerboard pattern chunk (worst case for greedy meshing)
+    pub fn new_checkerboard() -> Self {
+        let mut chunk = Self::new();
+        for z in 0..CHUNK_SIZE {
+            for y in 0..CHUNK_SIZE {
+                for x in 0..CHUNK_SIZE {
+                    if (x + y + z) % 2 == 0 {
+                        chunk.set_block(x, y, z, Block::Stone);
+                    }
+                }
+            }
+        }
+        chunk
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ============ Block Tests ============
+
+    #[test]
+    fn test_block_is_solid() {
+        // Non-solid blocks
+        assert!(!Block::Air.is_solid(), "Air should not be solid");
+        assert!(!Block::Water.is_solid(), "Water should not be solid");
+        assert!(!Block::Torch.is_solid(), "Torch should not be solid");
+
+        // Solid blocks
+        assert!(Block::Stone.is_solid(), "Stone should be solid");
+        assert!(Block::Dirt.is_solid(), "Dirt should be solid");
+        assert!(Block::Grass.is_solid(), "Grass should be solid");
+        assert!(Block::Wood.is_solid(), "Wood should be solid");
+        assert!(Block::Leaves.is_solid(), "Leaves should be solid");
+        assert!(Block::Bedrock.is_solid(), "Bedrock should be solid");
+    }
+
+    #[test]
+    fn test_block_is_transparent() {
+        // Transparent blocks
+        assert!(Block::Air.is_transparent(), "Air should be transparent");
+        assert!(Block::Water.is_transparent(), "Water should be transparent");
+        assert!(Block::Leaves.is_transparent(), "Leaves should be transparent");
+        assert!(Block::Torch.is_transparent(), "Torch should be transparent");
+
+        // Opaque blocks
+        assert!(!Block::Stone.is_transparent(), "Stone should not be transparent");
+        assert!(!Block::Dirt.is_transparent(), "Dirt should not be transparent");
+        assert!(!Block::Grass.is_transparent(), "Grass should not be transparent");
+    }
+
+    #[test]
+    fn test_block_light_emission() {
+        // Torch emits light level 14
+        assert_eq!(Block::Torch.light_emission(), 14, "Torch should emit level 14");
+
+        // Other blocks don't emit light
+        assert_eq!(Block::Air.light_emission(), 0);
+        assert_eq!(Block::Stone.light_emission(), 0);
+        assert_eq!(Block::Water.light_emission(), 0);
+        assert_eq!(Block::Leaves.light_emission(), 0);
+    }
+
+    #[test]
+    fn test_block_is_light_transparent() {
+        // Light-transparent blocks
+        assert!(Block::Air.is_light_transparent());
+        assert!(Block::Water.is_light_transparent());
+        assert!(Block::Leaves.is_light_transparent());
+        assert!(Block::Torch.is_light_transparent());
+
+        // Light-blocking blocks
+        assert!(!Block::Stone.is_light_transparent());
+        assert!(!Block::Dirt.is_light_transparent());
+        assert!(!Block::Bedrock.is_light_transparent());
+    }
+
+    #[test]
+    fn test_block_texture_indices() {
+        // Grass: top=1, bottom=0, sides=2
+        let grass = Block::Grass.texture_indices();
+        assert_eq!(grass, [1, 0, 2, 2, 2, 2], "Grass texture indices incorrect");
+
+        // Wood: top/bottom=8 (cross-section), sides=7 (bark)
+        let wood = Block::Wood.texture_indices();
+        assert_eq!(wood, [8, 8, 7, 7, 7, 7], "Wood texture indices incorrect");
+
+        // Stone: all faces same
+        let stone = Block::Stone.texture_indices();
+        assert_eq!(stone, [3, 3, 3, 3, 3, 3], "Stone texture indices incorrect");
+    }
+
+    #[test]
+    fn test_block_from_u8() {
+        // Valid conversions
+        assert_eq!(Block::from(0), Block::Air);
+        assert_eq!(Block::from(1), Block::Dirt);
+        assert_eq!(Block::from(2), Block::Grass);
+        assert_eq!(Block::from(3), Block::Stone);
+        assert_eq!(Block::from(15), Block::Torch);
+
+        // Invalid values default to Air
+        assert_eq!(Block::from(16), Block::Air);
+        assert_eq!(Block::from(255), Block::Air);
+    }
+
+    // ============ ChunkPos Tests ============
+
+    #[test]
+    fn test_chunk_pos_from_world() {
+        // Origin
+        let pos = ChunkPos::from_world_pos(Vec3::new(0.0, 0.0, 0.0));
+        assert_eq!((pos.x, pos.y, pos.z), (0, 0, 0));
+
+        // Positive coordinates (assuming BLOCK_SCALE = 1.0 and CHUNK_SIZE = 16)
+        let pos = ChunkPos::from_world_pos(Vec3::new(17.0, 0.0, 0.0));
+        assert_eq!(pos.x, 1, "17.0 should be in chunk 1");
+
+        // Negative coordinates
+        let pos = ChunkPos::from_world_pos(Vec3::new(-1.0, -1.0, -1.0));
+        assert_eq!((pos.x, pos.y, pos.z), (-1, -1, -1), "Negative coords should be chunk -1");
+
+        // Exact boundary
+        let pos = ChunkPos::from_world_pos(Vec3::new(16.0, 0.0, 0.0));
+        assert_eq!(pos.x, 1, "Exactly 16.0 should be in chunk 1");
+    }
+
+    #[test]
+    fn test_chunk_pos_world_origin() {
+        let pos = ChunkPos { x: 1, y: 2, z: 3 };
+        let origin = pos.world_origin();
+
+        // Convert back and verify
+        let back = ChunkPos::from_world_pos(origin);
+        assert_eq!((back.x, back.y, back.z), (1, 2, 3), "Round-trip should preserve chunk pos");
+    }
+
+    // ============ Chunk Light Tests ============
+
+    #[test]
+    fn test_chunk_light_packing() {
+        let mut chunk = Chunk::new();
+
+        // Set block light only
+        chunk.set_block_light(0, 0, 0, 14);
+        assert_eq!(chunk.get_block_light(0, 0, 0), 14);
+        assert_eq!(chunk.get_sky_light(0, 0, 0), 0, "Sky light should be unaffected");
+
+        // Set sky light only
+        chunk.set_sky_light(1, 1, 1, 15);
+        assert_eq!(chunk.get_sky_light(1, 1, 1), 15);
+        assert_eq!(chunk.get_block_light(1, 1, 1), 0, "Block light should be unaffected");
+
+        // Set both on same block
+        chunk.set_block_light(2, 2, 2, 7);
+        chunk.set_sky_light(2, 2, 2, 10);
+        assert_eq!(chunk.get_block_light(2, 2, 2), 7);
+        assert_eq!(chunk.get_sky_light(2, 2, 2), 10);
+        assert_eq!(chunk.get_combined_light(2, 2, 2), 10, "Combined should be max");
+
+        // Test combined light (block > sky)
+        chunk.set_block_light(3, 3, 3, 12);
+        chunk.set_sky_light(3, 3, 3, 5);
+        assert_eq!(chunk.get_combined_light(3, 3, 3), 12, "Combined should be max");
+    }
+
+    #[test]
+    fn test_chunk_in_bounds() {
+        // Valid coordinates
+        assert!(Chunk::in_bounds(0, 0, 0));
+        assert!(Chunk::in_bounds(15, 15, 15));
+        assert!(Chunk::in_bounds(8, 8, 8));
+
+        // Invalid coordinates
+        assert!(!Chunk::in_bounds(-1, 0, 0));
+        assert!(!Chunk::in_bounds(0, -1, 0));
+        assert!(!Chunk::in_bounds(0, 0, -1));
+        assert!(!Chunk::in_bounds(16, 0, 0));
+        assert!(!Chunk::in_bounds(0, 16, 0));
+        assert!(!Chunk::in_bounds(0, 0, 16));
+    }
+
+    // ============ Test Fixture Tests ============
+
+    #[test]
+    fn test_new_solid() {
+        let chunk = Chunk::new_solid(Block::Stone);
+
+        // Check corners and center
+        assert_eq!(chunk.get_block(0, 0, 0), Block::Stone);
+        assert_eq!(chunk.get_block(15, 15, 15), Block::Stone);
+        assert_eq!(chunk.get_block(8, 8, 8), Block::Stone);
+    }
+
+    #[test]
+    fn test_new_checkerboard() {
+        let chunk = Chunk::new_checkerboard();
+
+        // Even sum = Stone, odd sum = Air
+        assert_eq!(chunk.get_block(0, 0, 0), Block::Stone); // 0+0+0 = 0 (even)
+        assert_eq!(chunk.get_block(1, 0, 0), Block::Air);   // 1+0+0 = 1 (odd)
+        assert_eq!(chunk.get_block(1, 1, 0), Block::Stone); // 1+1+0 = 2 (even)
+        assert_eq!(chunk.get_block(1, 1, 1), Block::Air);   // 1+1+1 = 3 (odd)
+    }
+}

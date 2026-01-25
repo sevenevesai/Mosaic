@@ -1,6 +1,8 @@
 //! GPU profiling using wgpu timestamp queries
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use wgpu::{Device, Queue};
 
 /// Number of frames to average for GPU timing
@@ -19,10 +21,11 @@ pub struct GpuProfiler {
     /// History of GPU frame times (nanoseconds)
     frame_times_ns: VecDeque<u64>,
     /// Timestamp period (nanoseconds per tick)
-    #[allow(dead_code)]
     timestamp_period: f32,
     /// Whether we have pending results to read
     pending_readback: bool,
+    /// Signal that mapping is complete
+    mapping_complete: Arc<AtomicBool>,
 }
 
 impl GpuProfiler {
@@ -40,6 +43,7 @@ impl GpuProfiler {
                 frame_times_ns: VecDeque::with_capacity(HISTORY_SIZE),
                 timestamp_period: 1.0,
                 pending_readback: false,
+                mapping_complete: Arc::new(AtomicBool::new(false)),
             };
         }
 
@@ -78,6 +82,7 @@ impl GpuProfiler {
             frame_times_ns: VecDeque::with_capacity(HISTORY_SIZE),
             timestamp_period,
             pending_readback: false,
+            mapping_complete: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -106,26 +111,69 @@ impl GpuProfiler {
     }
 
     /// Begin async readback of results
+    /// Call this after resolve() has been called and the command buffer submitted
     pub fn begin_readback(&mut self) {
-        // Disabled for now - wgpu 0.19 async buffer mapping is tricky
-        // GPU timing still works via timestamp queries, just not readable yet
-    }
-
-    /// Poll for readback completion and update stats
-    pub fn poll_results(&mut self, device: &Device) {
-        if !self.pending_readback {
+        if !self.supported || self.pending_readback {
             return;
         }
 
-        // Poll device to check if mapping is complete
+        if let Some(staging_buf) = &self.staging_buffer {
+            // Reset the mapping complete flag
+            self.mapping_complete.store(false, Ordering::SeqCst);
+
+            // Request async mapping
+            let mapping_complete = Arc::clone(&self.mapping_complete);
+            staging_buf.slice(..).map_async(wgpu::MapMode::Read, move |result| {
+                if result.is_ok() {
+                    mapping_complete.store(true, Ordering::SeqCst);
+                }
+            });
+
+            self.pending_readback = true;
+        }
+    }
+
+    /// Poll for readback completion and update stats
+    /// Call this at the start of the next frame to read previous frame's results
+    pub fn poll_results(&mut self, device: &Device) {
+        if !self.supported || !self.pending_readback {
+            return;
+        }
+
+        // Poll device to process the mapping callback
         device.poll(wgpu::Maintain::Wait);
 
-        // Give the mapping a frame to complete, then try to read
-        // This is a simplified approach - production code would use proper callbacks
-        self.pending_readback = false;
+        // Check if mapping completed
+        if !self.mapping_complete.load(Ordering::SeqCst) {
+            return;
+        }
 
-        // For now, skip reading to avoid panics - GPU profiling needs async handling
-        // which is complex to implement correctly with wgpu 0.19
+        // Read the mapped data
+        if let Some(staging_buf) = &self.staging_buffer {
+            {
+                let view = staging_buf.slice(..).get_mapped_range();
+                if view.len() >= 16 {
+                    // Parse the two u64 timestamps
+                    let start = u64::from_le_bytes(view[0..8].try_into().unwrap());
+                    let end = u64::from_le_bytes(view[8..16].try_into().unwrap());
+
+                    // Calculate delta in GPU ticks, then convert to nanoseconds
+                    let delta_ticks = end.saturating_sub(start);
+                    let delta_ns = (delta_ticks as f64 * self.timestamp_period as f64) as u64;
+
+                    // Update history
+                    if self.frame_times_ns.len() >= HISTORY_SIZE {
+                        self.frame_times_ns.pop_front();
+                    }
+                    self.frame_times_ns.push_back(delta_ns);
+                }
+            }
+
+            // Unmap the buffer so it can be used again
+            staging_buf.unmap();
+        }
+
+        self.pending_readback = false;
     }
 
     /// Get average GPU frame time in milliseconds
