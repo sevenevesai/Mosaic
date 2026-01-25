@@ -644,7 +644,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let total_light = (natural_lit + block_lit) * ao_factor;
     var final_color = tex_color.rgb * total_light;
 
-    // === ATMOSPHERIC DEPTH ===
+    // === ATMOSPHERIC DEPTH & HEIGHT-BASED FOG ===
     let dist = length(camera.view_pos.xyz - in.world_position);
     let is_underwater = camera.anim_data.w > 0.5;
 
@@ -654,28 +654,65 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     if (is_underwater) {
         // Underwater: heavy blue-green fog, very limited visibility
-        let underwater_density = 0.08;  // Much denser
+        let underwater_density = 0.08;
         fog_factor = 1.0 - exp(-dist * underwater_density);
-        fog_factor = clamp(fog_factor, 0.0, 0.95);  // Can get very foggy
-        fog_color = vec3<f32>(0.1, 0.3, 0.4);  // Deep blue-green
+        fog_factor = clamp(fog_factor, 0.0, 0.95);
+        fog_color = vec3<f32>(0.1, 0.3, 0.4);
     } else {
-        // Normal atmospheric fog - very minimal
-        let fog_density = 0.0003;
-        fog_factor = 1.0 - exp(-dist * fog_density);
-        fog_factor = clamp(fog_factor, 0.0, 0.15);  // Max 15% fog
-        fog_color = vec3<f32>(0.75, 0.82, 0.92);  // Horizon color
+        // ═══════════════════════════════════════════════════════════════════════
+        // REALISTIC VALLEY FOG (Radiation Fog)
+        // Based on real meteorology: cold air sinks into valleys, moisture from
+        // nearby water bodies condenses. Fog pools near water level (Y=32).
+        // Hills stay clear as warm air rises and moisture evaporates.
+        // ═══════════════════════════════════════════════════════════════════════
+
+        // Water/sea level where fog is most likely to form
+        let water_level = 32.0;
+        let fog_ceiling = 55.0;  // Fog dissipates above this
+
+        let frag_height = in.world_position.y;
+
+        // Height-based fog: strongest near water, fades as elevation increases
+        let height_factor = 1.0 - smoothstep(water_level, fog_ceiling, frag_height);
+        // Smooth cubic falloff for natural look
+        let height_influence = height_factor * height_factor * (3.0 - 2.0 * height_factor);
+
+        // Light distant haze (atmospheric perspective)
+        let base_fog_density = 0.00005;
+
+        // Valley/water fog - denser near sea level
+        let valley_fog_density = 0.0003;
+
+        // Blend based on height
+        let effective_density = mix(base_fog_density, valley_fog_density, height_influence);
+
+        // Push fog further from player - minimal fog nearby, builds up at distance
+        // At night, fog creeps closer for atmospheric effect
+        let time_of_day = light.ambient_color.a;
+        let is_night = smoothstep(0.25, 0.0, time_of_day) + smoothstep(0.75, 1.0, time_of_day);
+        let fog_start_dist = mix(80.0, 35.0, is_night);  // 80 blocks day, 35 blocks night
+        let dist_factor = smoothstep(fog_start_dist, fog_start_dist + 150.0, dist);
+
+        // Calculate fog with distance, scaled by distance factor
+        fog_factor = (1.0 - exp(-dist * effective_density)) * dist_factor;
+
+        // Fog caps: clear on hills (3%), misty in valleys (15%)
+        let max_fog = mix(0.03, 0.15, height_influence);
+        fog_factor = clamp(fog_factor, 0.0, max_fog);
+
+        // Fog color - cool morning mist near water, warmer haze at distance
+        let mist_color = vec3<f32>(0.78, 0.83, 0.90);  // Cool valley mist
+        let haze_color = vec3<f32>(0.82, 0.85, 0.90);  // Warm distant haze
+        fog_color = mix(haze_color, mist_color, height_influence);
     }
 
-    // Horizon color (warm sky) - for scattering
-    let horizon_color = vec3<f32>(0.75, 0.82, 0.92);
+    // Atmospheric scattering (Rayleigh) - subtle blue shift at distance
+    let scatter_factor = clamp((dist - 400.0) / 1200.0, 0.0, 0.05);
+    let scatter_color = vec3<f32>(0.75, 0.82, 0.90);
 
-    // Atmospheric scattering - minimal blue shift only at extreme distance
-    let scatter_factor = clamp((dist - 300.0) / 800.0, 0.0, 0.08);  // Starts at 300 blocks
-    let scatter_color = vec3<f32>(0.7, 0.76, 0.88);
-
-    // Minimal desaturation at extreme distance
+    // Subtle desaturation at extreme distance (aerial perspective)
     let luminance = dot(final_color, vec3<f32>(0.299, 0.587, 0.114));
-    let desat_factor = clamp((dist - 400.0) / 1000.0, 0.0, 0.08);  // Starts at 400 blocks
+    let desat_factor = clamp((dist - 500.0) / 1400.0, 0.0, 0.04);
     final_color = mix(final_color, vec3<f32>(luminance), desat_factor);
 
     // Apply atmospheric effects

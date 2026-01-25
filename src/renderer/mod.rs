@@ -725,8 +725,8 @@ impl Renderer {
         let mut shadow_chunks_culled = 0u32;
 
         // Calculate shadow frustum bounds for culling
-        // Shadow map covers ±120 units from camera in X/Z plane
-        let shadow_size = 120.0f32;
+        // Shadow map covers ±150 units from camera in X/Z plane
+        let shadow_size = 150.0f32;
         let shadow_min = Vec3::new(
             camera.position.x - shadow_size,
             -100.0, // Include all terrain heights
@@ -1303,15 +1303,8 @@ impl SkyUniform {
 
 impl Default for LightUniform {
     fn default() -> Self {
-        let cycle = DayNightCycle::from_time(0.35);
-        Self {
-            view_proj: Mat4::IDENTITY.to_cols_array_2d(),
-            sun_direction: [cycle.sun_direction.x, cycle.sun_direction.y, cycle.sun_direction.z, cycle.sun_intensity],
-            sun_color: [cycle.sun_color.x, cycle.sun_color.y, cycle.sun_color.z, 0.0],
-            moon_direction: [cycle.moon_direction.x, cycle.moon_direction.y, cycle.moon_direction.z, cycle.moon_intensity],
-            moon_color: [cycle.moon_color.x, cycle.moon_color.y, cycle.moon_color.z, 0.0],
-            ambient_color: [cycle.ambient.x, cycle.ambient.y, cycle.ambient.z, 0.35],
-        }
+        // Initialize with a proper shadow matrix at origin to prevent bright faces on first frame
+        Self::from_camera_position_and_time(Vec3::ZERO, 0.35)
     }
 }
 
@@ -1326,8 +1319,9 @@ impl LightUniform {
         let shadow_dir = cycle.sun_direction;
 
         // Create orthographic projection for shadow map
-        let shadow_distance = 100.0;
-        let shadow_size = 120.0;
+        // Larger coverage reduces edge artifacts at cost of shadow resolution
+        let shadow_distance = 120.0;
+        let shadow_size = 150.0;
 
         // === SHADOW MAP STABILIZATION ===
         let texels_per_unit = SHADOW_MAP_SIZE as f32 / (shadow_size * 2.0);

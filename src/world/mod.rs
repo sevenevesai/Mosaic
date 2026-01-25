@@ -137,7 +137,7 @@ pub fn raycast(
 /// Messages for chunk worker threads
 enum ChunkTask {
     Generate(ChunkPos),
-    Mesh(ChunkPos, LodLevel),
+    Mesh(ChunkPos, LodLevel, u64),  // Added generation counter to detect stale results
     MeshWater(ChunkPos),
     Shutdown,
 }
@@ -145,7 +145,7 @@ enum ChunkTask {
 /// Results from chunk workers
 enum ChunkResult {
     Generated(ChunkPos, Box<Chunk>),
-    Meshed(ChunkPos, ChunkMesh),
+    Meshed(ChunkPos, ChunkMesh, u64),  // Includes generation counter
     WaterMeshed(ChunkPos, WaterMesh),
 }
 
@@ -162,6 +162,10 @@ pub struct WorldManager {
 
     /// Chunks pending generation
     pending_generation: AHashMap<ChunkPos, ()>,
+
+    /// Mesh generation counter per chunk - used to discard stale mesh results
+    /// Incremented each time a mesh is requested, only accept results matching current gen
+    mesh_generation: AHashMap<ChunkPos, u64>,
 
     /// Chunks pending meshing
     pending_meshing: AHashMap<ChunkPos, ()>,
@@ -245,6 +249,7 @@ impl WorldManager {
             pending_generation: AHashMap::new(),
             pending_meshing: AHashMap::new(),
             pending_water_meshing: AHashMap::new(),
+            mesh_generation: AHashMap::new(),
             task_sender,
             result_receiver,
             _workers: workers,
@@ -286,7 +291,7 @@ impl WorldManager {
                     };
                     let _ = result_tx.send(ChunkResult::Generated(pos, Box::new(chunk)));
                 }
-                ChunkTask::Mesh(pos, lod) => {
+                ChunkTask::Mesh(pos, lod, generation) => {
                     let chunks_read = chunks.read();
                     if let Some(chunk) = chunks_read.get(&pos).cloned() {
                         // Get neighbor chunks for proper face culling
@@ -302,7 +307,8 @@ impl WorldManager {
 
                         // Build mesh with specified LOD level
                         let mesh = meshing::build_chunk_mesh_lod(pos, &chunk, &neighbors, lod);
-                        let _ = result_tx.send(ChunkResult::Meshed(pos, mesh));
+                        // Pass through generation so we can discard stale results
+                        let _ = result_tx.send(ChunkResult::Meshed(pos, mesh, generation));
                     }
                 }
                 ChunkTask::MeshWater(pos) => {
@@ -369,31 +375,45 @@ impl WorldManager {
                     if has_water {
                         self.queue_water_meshing(pos);
                     }
-                    // OPTIMIZATION: Only remesh neighbors if most nearby chunks are already loaded
-                    // This prevents redundant remeshing during initial load
-                    // Count how many neighbors exist
+                    // ALWAYS force remesh neighbors that exist (including edge-adjacent for diagonal structures)
+                    // This fixes AO artifacts at chunk boundaries where neighbors
+                    // were meshed before this chunk existed (they had no neighbor data)
+                    // Include all 26 neighbors (6 face + 12 edge + 8 corner) for trees spanning diagonally
                     let chunks_read = self.chunks.read();
-                    let neighbor_count = [(-1, 0, 0), (1, 0, 0), (0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1)]
-                        .iter()
-                        .filter(|(dx, dy, dz)| chunks_read.contains_key(&pos.offset(*dx, *dy, *dz)))
-                        .count();
-                    drop(chunks_read);
-
-                    // Only trigger neighbor remesh if at least 4 neighbors exist
-                    // This ensures we don't waste time remeshing during initial world load
-                    if neighbor_count >= 4 {
-                        for offset in &[(-1, 0, 0), (1, 0, 0), (0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1)] {
-                            let neighbor = pos.offset(offset.0, offset.1, offset.2);
-                            if self.chunks.read().contains_key(&neighbor) {
-                                let neighbor_lod = self.calculate_lod(neighbor, player_chunk);
-                                self.queue_meshing_with_lod(neighbor, neighbor_lod);
+                    let mut neighbors_to_remesh: Vec<ChunkPos> = Vec::new();
+                    for dx in -1..=1 {
+                        for dy in -1..=1 {
+                            for dz in -1..=1 {
+                                if dx == 0 && dy == 0 && dz == 0 {
+                                    continue; // Skip self
+                                }
+                                let neighbor = pos.offset(dx, dy, dz);
+                                if chunks_read.contains_key(&neighbor) {
+                                    neighbors_to_remesh.push(neighbor);
+                                }
                             }
                         }
                     }
+                    drop(chunks_read);
+
+                    for neighbor in neighbors_to_remesh {
+                        self.force_remesh(neighbor);
+                    }
+
+                    // ALSO remesh the current chunk itself after queuing neighbor remeshes
+                    // This handles the case where THIS chunk's initial mesh didn't see all neighbors
+                    // The generation system ensures correct ordering - stale meshes are discarded
+                    self.force_remesh(pos);
                 }
-                ChunkResult::Meshed(pos, mesh) => {
+                ChunkResult::Meshed(pos, mesh, generation) => {
                     self.pending_meshing.remove(&pos);
-                    self.meshes.insert(pos, mesh);
+                    // Only accept mesh if its generation matches the current expected generation
+                    // This discards stale meshes that were built with outdated neighbor data
+                    let current_gen = self.mesh_generation.get(&pos).copied().unwrap_or(0);
+                    if generation >= current_gen {
+                        self.meshes.insert(pos, mesh);
+                    }
+                    // else: discard stale mesh, a newer one is coming
                 }
                 ChunkResult::WaterMeshed(pos, water_mesh) => {
                     self.pending_water_meshing.remove(&pos);
@@ -490,12 +510,19 @@ impl WorldManager {
         self.queue_meshing_with_lod(pos, LodLevel::Full);
     }
 
-    /// Force a remesh regardless of current LOD (used after block modifications)
+    /// Force a remesh regardless of current LOD or pending status
+    /// Always queues a new mesh task - used after block modifications or neighbor changes
+    /// This handles race conditions where a mesh task is already running with stale neighbor data
     fn force_remesh(&mut self, pos: ChunkPos) {
-        if !self.pending_meshing.contains_key(&pos) {
-            self.pending_meshing.insert(pos, ());
-            let _ = self.task_sender.send(ChunkTask::Mesh(pos, LodLevel::Full));
-        }
+        // Increment generation - this invalidates any in-flight mesh tasks for this chunk
+        let gen = self.mesh_generation.entry(pos).or_insert(0);
+        *gen += 1;
+        let current_gen = *gen;
+
+        // Always queue, even if already pending - the in-flight task may have stale data
+        // The generation counter ensures only the latest result is accepted
+        self.pending_meshing.insert(pos, ());
+        let _ = self.task_sender.send(ChunkTask::Mesh(pos, LodLevel::Full, current_gen));
     }
 
     fn queue_meshing_with_lod(&mut self, pos: ChunkPos, lod: LodLevel) {
@@ -507,8 +534,12 @@ impl WorldManager {
         }
 
         if !self.pending_meshing.contains_key(&pos) {
+            // Increment generation for new mesh request
+            let gen = self.mesh_generation.entry(pos).or_insert(0);
+            *gen += 1;
+            let current_gen = *gen;
             self.pending_meshing.insert(pos, ());
-            let _ = self.task_sender.send(ChunkTask::Mesh(pos, lod));
+            let _ = self.task_sender.send(ChunkTask::Mesh(pos, lod, current_gen));
         }
     }
 
@@ -906,9 +937,13 @@ impl WorldManager {
                             self.queue_meshing_with_lod(pos, LodLevel::Full);
                         }
                     }
-                    ChunkResult::Meshed(pos, mesh) => {
+                    ChunkResult::Meshed(pos, mesh, generation) => {
                         self.pending_meshing.remove(&pos);
-                        self.meshes.insert(pos, mesh);
+                        // Only accept mesh if its generation matches the current expected generation
+                        let current_gen = self.mesh_generation.get(&pos).copied().unwrap_or(0);
+                        if generation >= current_gen {
+                            self.meshes.insert(pos, mesh);
+                        }
                     }
                     ChunkResult::WaterMeshed(pos, water_mesh) => {
                         self.pending_water_meshing.remove(&pos);
