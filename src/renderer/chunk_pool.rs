@@ -16,9 +16,10 @@ const MAX_VERTICES_PER_CHUNK: u32 = 4096;
 const MAX_INDICES_PER_CHUNK: u32 = 8192;
 
 /// Maximum number of chunk slots in the pool
-/// 2560 slots * 4096 verts * 24 bytes = 240MB vertex (under 256MB limit)
-/// 2560 slots * 8192 indices * 4 bytes = 80MB index
-const MAX_CHUNK_SLOTS: u32 = 2560;
+/// 2200 slots * 4096 verts * 28 bytes = 252MB vertex (under 256MB limit)
+/// 2200 slots * 8192 indices * 4 bytes = 72MB index
+/// (28-byte vertex now includes emergence_data field)
+const MAX_CHUNK_SLOTS: u32 = 2200;
 
 /// Information about a chunk's location in the mega-buffer
 #[derive(Clone, Copy, Debug)]

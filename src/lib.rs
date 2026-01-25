@@ -28,9 +28,10 @@ pub mod constants {
     pub const RENDER_DISTANCE: i32 = 24;
 
     /// LOD levels - distances at which to switch detail levels
-    pub const LOD_FULL_DETAIL: i32 = 8;      // Full mesh detail
-    pub const LOD_HALF_DETAIL: i32 = 16;     // Skip every other block
-    pub const LOD_QUARTER_DETAIL: i32 = 24;  // Skip 3/4 blocks
+    /// Set all to RENDER_DISTANCE to disable LOD and use full detail everywhere
+    pub const LOD_FULL_DETAIL: i32 = 24;     // Full mesh detail (all chunks)
+    pub const LOD_HALF_DETAIL: i32 = 24;     // Disabled - same as full
+    pub const LOD_QUARTER_DETAIL: i32 = 24;  // Disabled - same as full
 
     /// Texture atlas tile size (pixel art)
     pub const TEXTURE_TILE_SIZE: u32 = 256;
