@@ -7,11 +7,13 @@ mod generation;
 pub mod lighting;
 mod meshing;
 pub mod storage;
+mod water_meshing;
 
-pub use chunk::{Block, Chunk, ChunkPos};
+pub use chunk::{Block, Chunk, ChunkPos, ChunkWaterData, WaterColumn};
 pub use lighting::{LightEngine, apply_light_updates};
 pub use meshing::{ChunkMesh, ChunkVertex, GpuMesh, LodLevel, build_chunk_mesh, build_chunk_mesh_lod, MESH_STATS};
 pub use storage::{WorldStorage, SharedStorage, StorageError, create_shared_storage};
+pub use water_meshing::{WaterMesh, WaterVertex, GpuWaterMesh, build_water_mesh, chunk_has_water};
 
 use std::sync::Arc;
 
@@ -136,6 +138,7 @@ pub fn raycast(
 enum ChunkTask {
     Generate(ChunkPos),
     Mesh(ChunkPos, LodLevel),
+    MeshWater(ChunkPos),
     Shutdown,
 }
 
@@ -143,6 +146,7 @@ enum ChunkTask {
 enum ChunkResult {
     Generated(ChunkPos, Box<Chunk>),
     Meshed(ChunkPos, ChunkMesh),
+    WaterMeshed(ChunkPos, WaterMesh),
 }
 
 /// Manages all world chunks and coordinates generation/meshing
@@ -153,11 +157,17 @@ pub struct WorldManager {
     /// Chunk meshes ready for rendering
     meshes: AHashMap<ChunkPos, ChunkMesh>,
 
+    /// Water meshes ready for rendering
+    water_meshes: AHashMap<ChunkPos, WaterMesh>,
+
     /// Chunks pending generation
     pending_generation: AHashMap<ChunkPos, ()>,
 
     /// Chunks pending meshing
     pending_meshing: AHashMap<ChunkPos, ()>,
+
+    /// Chunks pending water meshing
+    pending_water_meshing: AHashMap<ChunkPos, ()>,
 
     /// Channel to send tasks to workers
     task_sender: Sender<ChunkTask>,
@@ -231,8 +241,10 @@ impl WorldManager {
         Self {
             chunks,
             meshes: AHashMap::new(),
+            water_meshes: AHashMap::new(),
             pending_generation: AHashMap::new(),
             pending_meshing: AHashMap::new(),
+            pending_water_meshing: AHashMap::new(),
             task_sender,
             result_receiver,
             _workers: workers,
@@ -293,6 +305,26 @@ impl WorldManager {
                         let _ = result_tx.send(ChunkResult::Meshed(pos, mesh));
                     }
                 }
+                ChunkTask::MeshWater(pos) => {
+                    let chunks_read = chunks.read();
+                    if let Some(chunk) = chunks_read.get(&pos).cloned() {
+                        // Only build water mesh if chunk has water
+                        if chunk.has_water() {
+                            let neighbors = [
+                                chunks_read.get(&pos.offset(-1, 0, 0)).cloned(),
+                                chunks_read.get(&pos.offset(1, 0, 0)).cloned(),
+                                chunks_read.get(&pos.offset(0, -1, 0)).cloned(),
+                                chunks_read.get(&pos.offset(0, 1, 0)).cloned(),
+                                chunks_read.get(&pos.offset(0, 0, -1)).cloned(),
+                                chunks_read.get(&pos.offset(0, 0, 1)).cloned(),
+                            ];
+                            drop(chunks_read);
+
+                            let water_mesh = water_meshing::build_water_mesh(pos, &chunk, &neighbors);
+                            let _ = result_tx.send(ChunkResult::WaterMeshed(pos, water_mesh));
+                        }
+                    }
+                }
                 ChunkTask::Shutdown => break,
             }
         }
@@ -317,10 +349,16 @@ impl WorldManager {
             match result {
                 ChunkResult::Generated(pos, chunk) => {
                     self.pending_generation.remove(&pos);
+                    // Check if chunk has water before inserting
+                    let has_water = chunk.has_water();
                     self.chunks.write().insert(pos, Arc::new(*chunk));
                     // Queue meshing with appropriate LOD
                     let lod = self.calculate_lod(pos, player_chunk);
                     self.queue_meshing_with_lod(pos, lod);
+                    // Queue water meshing if chunk has water
+                    if has_water {
+                        self.queue_water_meshing(pos);
+                    }
                     // Also update neighbor meshes
                     for offset in &[(-1, 0, 0), (1, 0, 0), (0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1)] {
                         let neighbor = pos.offset(offset.0, offset.1, offset.2);
@@ -333,6 +371,12 @@ impl WorldManager {
                 ChunkResult::Meshed(pos, mesh) => {
                     self.pending_meshing.remove(&pos);
                     self.meshes.insert(pos, mesh);
+                }
+                ChunkResult::WaterMeshed(pos, water_mesh) => {
+                    self.pending_water_meshing.remove(&pos);
+                    if !water_mesh.is_empty() {
+                        self.water_meshes.insert(pos, water_mesh);
+                    }
                 }
             }
         }
@@ -414,6 +458,7 @@ impl WorldManager {
         for pos in to_remove {
             self.chunks.write().remove(&pos);
             self.meshes.remove(&pos);
+            self.water_meshes.remove(&pos);
         }
     }
 
@@ -444,6 +489,14 @@ impl WorldManager {
         }
     }
 
+    /// Queue water meshing for a chunk
+    fn queue_water_meshing(&mut self, pos: ChunkPos) {
+        if !self.pending_water_meshing.contains_key(&pos) {
+            self.pending_water_meshing.insert(pos, ());
+            let _ = self.task_sender.send(ChunkTask::MeshWater(pos));
+        }
+    }
+
     /// Calculate LOD level based on distance from player
     fn calculate_lod(&self, chunk_pos: ChunkPos, player_chunk: ChunkPos) -> LodLevel {
         use crate::constants::{LOD_FULL_DETAIL, LOD_HALF_DETAIL};
@@ -467,6 +520,20 @@ impl WorldManager {
         self.meshes.values()
     }
 
+    /// Get all visible water meshes for rendering
+    pub fn visible_water_meshes(&self) -> impl Iterator<Item = &WaterMesh> {
+        self.water_meshes.values()
+    }
+
+    /// Upload pending water meshes to GPU (must be called from main thread)
+    pub fn upload_water_meshes(&mut self, device: &wgpu::Device) {
+        for mesh in self.water_meshes.values_mut() {
+            if mesh.gpu_mesh.is_none() && !mesh.vertices.is_empty() {
+                mesh.upload(device);
+            }
+        }
+    }
+
     /// Get counts for debug display
     pub fn pending_generation_count(&self) -> usize {
         self.pending_generation.len()
@@ -484,8 +551,16 @@ impl WorldManager {
         self.meshes.len()
     }
 
+    pub fn water_mesh_count(&self) -> usize {
+        self.water_meshes.len()
+    }
+
     pub fn total_vertices(&self) -> u64 {
         self.meshes.values().map(|m| m.vertices.len() as u64).sum()
+    }
+
+    pub fn total_water_vertices(&self) -> u64 {
+        self.water_meshes.values().map(|m| m.vertices.len() as u64).sum()
     }
 
     /// Get a block at world coordinates
@@ -811,6 +886,12 @@ impl WorldManager {
                     ChunkResult::Meshed(pos, mesh) => {
                         self.pending_meshing.remove(&pos);
                         self.meshes.insert(pos, mesh);
+                    }
+                    ChunkResult::WaterMeshed(pos, water_mesh) => {
+                        self.pending_water_meshing.remove(&pos);
+                        if !water_mesh.is_empty() {
+                            self.water_meshes.insert(pos, water_mesh);
+                        }
                     }
                 }
             }

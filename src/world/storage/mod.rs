@@ -91,8 +91,15 @@ impl WorldStorage {
             // Create directories
             std::fs::create_dir_all(&region_dir)?;
 
-            // Create new metadata with provided or default seed
-            let new_meta = WorldMeta::new(seed.unwrap_or(12345));
+            // Create new metadata with provided seed or random seed
+            let actual_seed = seed.unwrap_or_else(|| {
+                use std::time::{SystemTime, UNIX_EPOCH};
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as u64)
+                    .unwrap_or(12345)
+            });
+            let new_meta = WorldMeta::new(actual_seed);
             new_meta.save(&meta_path)?;
             new_meta
         };

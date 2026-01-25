@@ -9,7 +9,7 @@ cargo build --release
 ./target/release/neolith.exe
 ```
 
-**Controls:** Click to capture mouse, WASD move, Space jump/fly-up, Shift fly-down, Ctrl sprint, F toggle fly mode, F3 debug overlay, T cycle day/night speed, 1-7 select block, 8 torch, Left-click break, Right-click place, P log performance, Escape release mouse.
+**Controls:** Click to capture mouse, WASD move, Space jump/fly-up (swim up in water), Shift fly-down (sink in water), Ctrl sprint, F toggle fly mode, F3 debug overlay, T cycle day/night speed, 1-7 select block, 8 torch, Left-click break, Right-click place, P log performance, Escape release mouse.
 
 ---
 
@@ -31,10 +31,11 @@ src/
 │   └── chunk_pool.rs    # MDI mega-buffers for multi-draw indirect rendering
 ├── world/
 │   ├── mod.rs           # WorldManager, chunk workers, LOD, raycast, set_block
-│   ├── chunk.rs         # Chunk data (16³), Block enum (16 types), light storage
-│   ├── generation.rs    # Noise terrain, caves, ores, biomes, trees
+│   ├── chunk.rs         # Chunk data (16³), Block enum (16 types), light storage, water data
+│   ├── generation.rs    # Noise terrain, caves, ores, biomes, trees, water heightfield
 │   ├── lighting.rs      # BFS flood fill light propagation system
 │   ├── meshing.rs       # Binary greedy meshing, packed ChunkVertex (24 bytes)
+│   ├── water_meshing.rs # Water heightfield mesh generation, WaterVertex (24 bytes)
 │   └── storage/         # World persistence system
 │       ├── mod.rs       # WorldStorage API, LRU region cache
 │       ├── region.rs    # Region files (32³ chunks, 4KB sectors)
@@ -74,6 +75,9 @@ src/
 - **World persistence** - Region-based save/load with zstd compression
 - **Player position saving** - Spawn at last position on reload
 - **Audio system** - Footstep sounds (rodio)
+- **Water rendering** - Smooth heightfield surface, unified Gerstner waves, Schlick fresnel, depth-based color absorption, caustic shimmer, foam at shorelines
+- **Swimming** - 3D movement in water (Space up, Shift down), buoyancy, water drag
+- **Underwater effect** - Blue-green fog when camera submerged
 
 ### Known Issues
 - **GPU profiler readback** - Shows 0.00ms due to wgpu 0.19 async buffer mapping complexity
@@ -229,6 +233,62 @@ Simple footstep audio using rodio:
 - 400ms interval (280ms when sprinting)
 - 15% volume (subtle)
 - Disabled in fly mode
+
+### Water Rendering System
+Novel heightfield-based water with smooth animated surface:
+
+**Architecture:**
+- Water stored as 2D heightfield per chunk (`ChunkWaterData` in `chunk.rs`)
+- Each column stores: surface_y, foam factor, flow angle
+- Separate mesh generation (`water_meshing.rs`) produces smooth surface
+- Dedicated render pass after opaque geometry with alpha blending
+
+**Data Structures:**
+```rust
+// Per-chunk water heightfield (only allocated if chunk has water)
+pub struct ChunkWaterData {
+    columns: Box<[[WaterColumn; 16]; 16]>,  // 16x16 grid
+    has_any_water: bool,
+    min_water_y: f32,
+    max_water_y: f32,
+}
+
+// WaterVertex format (24 bytes, matches ChunkVertex)
+pub struct WaterVertex {
+    position: [f32; 3],     // 12 bytes
+    normal_packed: u32,     // 4 bytes
+    uv_data: u32,           // [foam, depth, flow_lo, flow_hi]
+    light_data: u32,        // [block_light, sky_light, 0, 0]
+}
+```
+
+**Shader Effects:**
+- **Gerstner waves** - 4 overlapping waves with different directions/frequencies
+- **Fresnel reflection** - More reflective at grazing angles
+- **Sun specular** - Bright highlights when looking toward sun
+- **Foam** - White foam at shorelines and block edges
+- **Subsurface scattering** - Light transmission effect
+- **Depth-based opacity** - Deeper water is more opaque
+
+**Key Constants (lib.rs):**
+```rust
+WATER_SEA_LEVEL: 32          // Y level where water generates
+WATER_FULL_HEIGHT: 0.875     // Surface height within block (leaves wave headroom)
+WATER_WAVE_STRENGTH: 0.12    // Wave displacement amplitude
+WATER_FRESNEL_POWER: 4.0     // Fresnel reflection exponent
+```
+
+**Rendering Pipeline:**
+1. Opaque chunks rendered first (writes depth)
+2. Water pass renders with alpha blending, depth test only (no depth write)
+3. Water uses separate bind groups for camera, light, and water uniforms
+
+**Future Enhancements:**
+- Screen-space refraction (distort scene behind water)
+- Caustics texture projection on underwater surfaces
+- Underwater camera fog effect
+- Water flow simulation (cellular automata)
+- Underwater post-processing
 
 ---
 

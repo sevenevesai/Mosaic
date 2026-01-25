@@ -4,6 +4,199 @@ use glam::Vec3;
 
 use crate::constants::{CHUNK_SIZE, CHUNK_SIZE_F32, CHUNK_SIZE_I32, BLOCK_SCALE};
 
+/// Water data for a single column in a chunk
+/// Stores the water surface height for heightfield rendering
+#[derive(Debug, Clone, Copy)]
+pub struct WaterColumn {
+    /// Water surface height in world Y coordinates
+    /// This is the actual Y position of the water surface
+    pub surface_y: f32,
+    /// Whether this column has water at all
+    pub has_water: bool,
+    /// Foam factor (0.0-1.0) - higher near block edges
+    pub foam: f32,
+    /// Flow direction for animation (radians, 0 = +X direction)
+    pub flow_angle: f32,
+}
+
+impl Default for WaterColumn {
+    fn default() -> Self {
+        Self {
+            surface_y: 0.0,
+            has_water: false,
+            foam: 0.0,
+            flow_angle: 0.0,
+        }
+    }
+}
+
+/// Water heightfield data for a chunk
+/// Stored as a 2D grid (X-Z plane) since water surface is primarily horizontal
+pub struct ChunkWaterData {
+    /// 16x16 grid of water columns (X, Z indexed)
+    columns: Box<[[WaterColumn; CHUNK_SIZE]; CHUNK_SIZE]>,
+    /// Cached: does this chunk have any water?
+    has_any_water: bool,
+    /// Cached: minimum water Y in this chunk (for culling)
+    min_water_y: f32,
+    /// Cached: maximum water Y in this chunk (for culling)
+    max_water_y: f32,
+}
+
+impl ChunkWaterData {
+    pub fn new() -> Self {
+        Self {
+            columns: Box::new([[WaterColumn::default(); CHUNK_SIZE]; CHUNK_SIZE]),
+            has_any_water: false,
+            min_water_y: f32::MAX,
+            max_water_y: f32::MIN,
+        }
+    }
+
+    /// Get water column at local chunk coordinates
+    #[inline]
+    pub fn get_column(&self, x: usize, z: usize) -> &WaterColumn {
+        &self.columns[z][x]
+    }
+
+    /// Get mutable water column at local chunk coordinates
+    #[inline]
+    pub fn get_column_mut(&mut self, x: usize, z: usize) -> &mut WaterColumn {
+        &mut self.columns[z][x]
+    }
+
+    /// Set water surface height at a column
+    pub fn set_water(&mut self, x: usize, z: usize, surface_y: f32, foam: f32) {
+        let col = &mut self.columns[z][x];
+        col.surface_y = surface_y;
+        col.has_water = true;
+        col.foam = foam;
+        self.has_any_water = true;
+        self.min_water_y = self.min_water_y.min(surface_y);
+        self.max_water_y = self.max_water_y.max(surface_y);
+    }
+
+    /// Clear water at a column
+    pub fn clear_water(&mut self, x: usize, z: usize) {
+        self.columns[z][x].has_water = false;
+        // Note: has_any_water cache not updated here for performance
+        // Call recalculate_bounds() if needed
+    }
+
+    /// Check if this chunk has any water
+    #[inline]
+    pub fn has_water(&self) -> bool {
+        self.has_any_water
+    }
+
+    /// Get the water surface height at a position, with bilinear interpolation
+    /// Returns None if no water at this position
+    pub fn sample_height(&self, local_x: f32, local_z: f32) -> Option<f32> {
+        // Clamp to valid range
+        let x = local_x.clamp(0.0, (CHUNK_SIZE - 1) as f32);
+        let z = local_z.clamp(0.0, (CHUNK_SIZE - 1) as f32);
+
+        let x0 = x.floor() as usize;
+        let z0 = z.floor() as usize;
+        let x1 = (x0 + 1).min(CHUNK_SIZE - 1);
+        let z1 = (z0 + 1).min(CHUNK_SIZE - 1);
+
+        let fx = x.fract();
+        let fz = z.fract();
+
+        // Sample four corners
+        let c00 = &self.columns[z0][x0];
+        let c10 = &self.columns[z0][x1];
+        let c01 = &self.columns[z1][x0];
+        let c11 = &self.columns[z1][x1];
+
+        // Check if any corner has water
+        if !c00.has_water && !c10.has_water && !c01.has_water && !c11.has_water {
+            return None;
+        }
+
+        // Bilinear interpolation of heights
+        // For corners without water, use the average of those with water
+        let h00 = if c00.has_water { c00.surface_y } else { 0.0 };
+        let h10 = if c10.has_water { c10.surface_y } else { 0.0 };
+        let h01 = if c01.has_water { c01.surface_y } else { 0.0 };
+        let h11 = if c11.has_water { c11.surface_y } else { 0.0 };
+
+        let h0 = h00 * (1.0 - fx) + h10 * fx;
+        let h1 = h01 * (1.0 - fx) + h11 * fx;
+        let height = h0 * (1.0 - fz) + h1 * fz;
+
+        Some(height)
+    }
+
+    /// Sample foam factor with bilinear interpolation
+    pub fn sample_foam(&self, local_x: f32, local_z: f32) -> f32 {
+        let x = local_x.clamp(0.0, (CHUNK_SIZE - 1) as f32);
+        let z = local_z.clamp(0.0, (CHUNK_SIZE - 1) as f32);
+
+        let x0 = x.floor() as usize;
+        let z0 = z.floor() as usize;
+        let x1 = (x0 + 1).min(CHUNK_SIZE - 1);
+        let z1 = (z0 + 1).min(CHUNK_SIZE - 1);
+
+        let fx = x.fract();
+        let fz = z.fract();
+
+        let f00 = self.columns[z0][x0].foam;
+        let f10 = self.columns[z0][x1].foam;
+        let f01 = self.columns[z1][x0].foam;
+        let f11 = self.columns[z1][x1].foam;
+
+        let f0 = f00 * (1.0 - fx) + f10 * fx;
+        let f1 = f01 * (1.0 - fx) + f11 * fx;
+        f0 * (1.0 - fz) + f1 * fz
+    }
+
+    /// Get Y bounds of water in this chunk
+    #[inline]
+    pub fn get_y_bounds(&self) -> (f32, f32) {
+        (self.min_water_y, self.max_water_y)
+    }
+
+    /// Recalculate cached bounds (call after bulk modifications)
+    pub fn recalculate_bounds(&mut self) {
+        self.has_any_water = false;
+        self.min_water_y = f32::MAX;
+        self.max_water_y = f32::MIN;
+
+        for z in 0..CHUNK_SIZE {
+            for x in 0..CHUNK_SIZE {
+                let col = &self.columns[z][x];
+                if col.has_water {
+                    self.has_any_water = true;
+                    self.min_water_y = self.min_water_y.min(col.surface_y);
+                    self.max_water_y = self.max_water_y.max(col.surface_y);
+                }
+            }
+        }
+    }
+
+    /// Iterator over all columns with water
+    pub fn iter_water_columns(&self) -> impl Iterator<Item = (usize, usize, &WaterColumn)> {
+        (0..CHUNK_SIZE).flat_map(move |z| {
+            (0..CHUNK_SIZE).filter_map(move |x| {
+                let col = &self.columns[z][x];
+                if col.has_water {
+                    Some((x, z, col))
+                } else {
+                    None
+                }
+            })
+        })
+    }
+}
+
+impl Default for ChunkWaterData {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Position of a chunk in chunk coordinates
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ChunkPos {
@@ -148,6 +341,8 @@ pub struct Chunk {
     /// Light data: upper 4 bits = sky light, lower 4 bits = block light
     /// Each value ranges 0-15, packed into one byte per block
     light: Box<[u8; CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE]>,
+    /// Optional water heightfield data - only allocated if chunk contains water
+    water: Option<Box<ChunkWaterData>>,
 }
 
 impl Chunk {
@@ -155,6 +350,7 @@ impl Chunk {
         Self {
             blocks: Box::new([Block::Air; CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE]),
             light: Box::new([0u8; CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE]),
+            water: None,
         }
     }
 
@@ -268,6 +464,68 @@ impl Chunk {
         } else {
             None
         }
+    }
+
+    // ============ WATER ACCESS METHODS ============
+
+    /// Check if this chunk has water data allocated
+    #[inline]
+    pub fn has_water_data(&self) -> bool {
+        self.water.is_some()
+    }
+
+    /// Check if this chunk has any water
+    #[inline]
+    pub fn has_water(&self) -> bool {
+        self.water.as_ref().map_or(false, |w| w.has_water())
+    }
+
+    /// Get reference to water data if present
+    #[inline]
+    pub fn water_data(&self) -> Option<&ChunkWaterData> {
+        self.water.as_deref()
+    }
+
+    /// Get mutable reference to water data if present
+    #[inline]
+    pub fn water_data_mut(&mut self) -> Option<&mut ChunkWaterData> {
+        self.water.as_deref_mut()
+    }
+
+    /// Ensure water data is allocated and return mutable reference
+    pub fn ensure_water_data(&mut self) -> &mut ChunkWaterData {
+        if self.water.is_none() {
+            self.water = Some(Box::new(ChunkWaterData::new()));
+        }
+        self.water.as_deref_mut().unwrap()
+    }
+
+    /// Set water surface at a column (allocates water data if needed)
+    pub fn set_water_surface(&mut self, x: usize, z: usize, surface_y: f32, foam: f32) {
+        self.ensure_water_data().set_water(x, z, surface_y, foam);
+    }
+
+    /// Clear all water data from this chunk
+    pub fn clear_water(&mut self) {
+        self.water = None;
+    }
+
+    /// Get water height at a column (returns None if no water)
+    #[inline]
+    pub fn get_water_height(&self, x: usize, z: usize) -> Option<f32> {
+        self.water.as_ref().and_then(|w| {
+            let col = w.get_column(x, z);
+            if col.has_water {
+                Some(col.surface_y)
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Sample water height with interpolation
+    pub fn sample_water_height(&self, local_x: f32, local_z: f32) -> Option<f32> {
+        self.water.as_ref().and_then(|w| w.sample_height(local_x, local_z))
     }
 }
 

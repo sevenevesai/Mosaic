@@ -69,6 +69,7 @@ pub struct Player {
 
     // Physics
     on_ground: bool,
+    in_water: bool,
 
     // Mode
     fly_mode: bool,
@@ -93,6 +94,7 @@ impl Player {
             place_requested: false,
             selected_block: Block::Stone,
             on_ground: false,
+            in_water: false,
             fly_mode: false,
         }
     }
@@ -119,6 +121,10 @@ impl Player {
     /// Check if player is in fly mode
     pub fn is_flying(&self) -> bool {
         self.fly_mode
+    }
+
+    pub fn is_in_water(&self) -> bool {
+        self.in_water
     }
 
     /// Get the block currently being targeted (for rendering outline)
@@ -300,6 +306,19 @@ impl Player {
     }
 
     fn update_normal_mode(&mut self, dt_secs: f32, world: Option<&WorldManager>) {
+        // Check if player is in water
+        if let Some(world) = world {
+            self.in_water = self.check_in_water(world);
+        }
+
+        if self.in_water {
+            self.update_swimming(dt_secs, world);
+        } else {
+            self.update_walking(dt_secs, world);
+        }
+    }
+
+    fn update_walking(&mut self, dt_secs: f32, world: Option<&WorldManager>) {
         // Calculate horizontal movement direction
         let mut move_dir = Vec3::ZERO;
 
@@ -349,6 +368,88 @@ impl Player {
             // No world, just move freely
             self.feet_pos += self.velocity * dt_secs;
         }
+    }
+
+    fn update_swimming(&mut self, dt_secs: f32, world: Option<&WorldManager>) {
+        // Swimming: 3D movement like flying but slower with water drag
+        let mut move_dir = Vec3::ZERO;
+
+        if self.move_forward {
+            move_dir += self.camera.forward();
+        }
+        if self.move_backward {
+            move_dir -= self.camera.forward();
+        }
+        if self.move_left {
+            move_dir -= self.camera.right();
+        }
+        if self.move_right {
+            move_dir += self.camera.right();
+        }
+
+        // Swim up with jump, sink with sneak
+        if self.jump_pressed {
+            move_dir.y += 1.0;
+        }
+        if self.sneak {
+            move_dir.y -= 1.0;
+        }
+
+        if move_dir.length_squared() > 0.0 {
+            move_dir = move_dir.normalize();
+        }
+
+        // Water speed is slower
+        let base_speed = 2.5;
+        let speed = if self.sprint { base_speed * 1.5 } else { base_speed };
+
+        // Target velocity with water drag
+        let target_vel = move_dir * speed;
+        let water_accel = 8.0;
+        self.velocity.x = lerp(self.velocity.x, target_vel.x, water_accel * dt_secs);
+        self.velocity.y = lerp(self.velocity.y, target_vel.y, water_accel * dt_secs);
+        self.velocity.z = lerp(self.velocity.z, target_vel.z, water_accel * dt_secs);
+
+        // Slight buoyancy when not actively moving down
+        if !self.sneak && move_dir.length_squared() < 0.1 {
+            self.velocity.y += 1.5 * dt_secs;  // Gentle float up
+        }
+
+        // Apply weak gravity (sinking when not swimming)
+        if !self.jump_pressed && !self.sneak && move_dir.length_squared() < 0.1 {
+            self.velocity.y -= 2.0 * dt_secs;
+        }
+
+        // Clamp vertical velocity in water
+        self.velocity.y = self.velocity.y.clamp(-3.0, 3.0);
+
+        // Move with collision detection
+        if let Some(world) = world {
+            self.move_with_collision(dt_secs, world);
+        } else {
+            self.feet_pos += self.velocity * dt_secs;
+        }
+
+        // Not "on ground" while swimming
+        self.on_ground = false;
+    }
+
+    /// Check if player's body is in water
+    fn check_in_water(&self, world: &WorldManager) -> bool {
+        // Check at feet level and mid-body
+        let check_positions = [
+            (self.feet_pos.x as i32, self.feet_pos.y as i32, self.feet_pos.z as i32),
+            (self.feet_pos.x as i32, (self.feet_pos.y + 1.0) as i32, self.feet_pos.z as i32),
+        ];
+
+        for (bx, by, bz) in check_positions {
+            if let Some(block) = world.get_block(bx, by, bz) {
+                if block == Block::Water {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     fn move_with_collision(&mut self, dt_secs: f32, world: &WorldManager) {

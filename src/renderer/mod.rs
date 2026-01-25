@@ -21,7 +21,7 @@ use crate::utils::gpu_profiler::GpuProfiler;
 use crate::utils::profiler::FrameProfiler;
 use crate::world::WorldManager;
 
-use pipeline::{UiVertex, LineVertex, SHADOW_MAP_SIZE};
+use pipeline::{UiVertex, LineVertex, SHADOW_MAP_SIZE, WaterUniform, create_water_bind_group_layout, create_water_pipeline};
 use glam::{Vec3, Mat4};
 
 /// Render statistics for the current frame
@@ -90,6 +90,12 @@ pub struct Renderer {
 
     // Chunk buffer pool for multi-draw indirect
     chunk_pool: ChunkPool,
+
+    // Water rendering
+    water_pipeline: wgpu::RenderPipeline,
+    water_buffer: wgpu::Buffer,
+    water_bind_group: wgpu::BindGroup,
+    water_light_bind_group: wgpu::BindGroup,
 
     // Stats from last frame
     pub stats: RenderStats,
@@ -475,6 +481,54 @@ impl Renderer {
         let mdi_available = features_to_use.contains(wgpu::Features::MULTI_DRAW_INDIRECT);
         let chunk_pool = ChunkPool::new(&device, mdi_available);
 
+        // === WATER RENDERING SETUP ===
+        // Water needs light uniform visible in both vertex and fragment shaders
+        let water_light_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Water Light Bind Group Layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let water_light_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Water Light Bind Group"),
+            layout: &water_light_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: light_buffer.as_entire_binding(),
+            }],
+        });
+
+        // Create water uniform bind group layout and buffer
+        let water_bind_group_layout = create_water_bind_group_layout(&device);
+        let water_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Water Uniform Buffer"),
+            contents: bytemuck::cast_slice(&[WaterUniform::default()]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let water_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Water Bind Group"),
+            layout: &water_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: water_buffer.as_entire_binding(),
+            }],
+        });
+        // Create water pipeline (uses water_light_bind_group_layout for lighting)
+        let water_pipeline = create_water_pipeline(
+            &device,
+            surface_format,
+            &camera_bind_group_layout,
+            &water_light_bind_group_layout,
+            &water_bind_group_layout,
+        );
+
         Self {
             surface,
             device,
@@ -503,6 +557,10 @@ impl Renderer {
             outline_vertex_buffer,
             debug_overlay,
             chunk_pool,
+            water_pipeline,
+            water_buffer,
+            water_bind_group,
+            water_light_bind_group,
             stats: RenderStats::default(),
             start_time: std::time::Instant::now(),
             time_of_day: 0.35,   // Start at mid-morning
@@ -604,9 +662,26 @@ impl Renderer {
         // Update camera uniform with animation timing
         let current_time = self.start_time.elapsed().as_secs_f32();
         let spawn_time = 0.0;  // World starts loading at time 0
-        let camera_uniform = CameraUniform::from_camera_with_anim(camera, current_time, spawn_time);
+
+        // Check if camera is underwater
+        let cam_block_x = camera.position.x.floor() as i32;
+        let cam_block_y = camera.position.y.floor() as i32;
+        let cam_block_z = camera.position.z.floor() as i32;
+        let is_underwater = world.get_block(cam_block_x, cam_block_y, cam_block_z)
+            .map(|b| b == crate::world::Block::Water)
+            .unwrap_or(false);
+
+        let camera_uniform = CameraUniform::from_camera_with_anim(camera, current_time, spawn_time, is_underwater);
         self.queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[camera_uniform]));
+
+        // Update water uniform with current time for wave animation
+        let water_uniform = WaterUniform {
+            time: current_time,
+            ..WaterUniform::default()
+        };
+        self.queue
+            .write_buffer(&self.water_buffer, 0, bytemuck::cast_slice(&[water_uniform]));
 
         // Update light uniform with day/night cycle (center shadow map on camera)
         let light_uniform = LightUniform::from_camera_position_and_time(camera.position, self.time_of_day);
@@ -842,6 +917,33 @@ impl Renderer {
                 }
             }
 
+            // === WATER RENDER PASS ===
+            // Render water meshes with transparency (after opaque geometry)
+            render_pass.set_pipeline(&self.water_pipeline);
+            render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+            render_pass.set_bind_group(1, &self.water_light_bind_group, &[]);
+            render_pass.set_bind_group(2, &self.water_bind_group, &[]);
+
+            for water_mesh in world.visible_water_meshes() {
+                let chunk_min = water_mesh.pos.world_origin();
+                let chunk_max = chunk_min + glam::Vec3::splat(crate::constants::CHUNK_SIZE_F32);
+
+                // Frustum cull water chunks
+                if !frustum.test_aabb(chunk_min, chunk_max) {
+                    continue;
+                }
+
+                if let Some(gpu_mesh) = &water_mesh.gpu_mesh {
+                    render_pass.set_vertex_buffer(0, gpu_mesh.vertex_buffer.slice(..));
+                    render_pass.set_index_buffer(
+                        gpu_mesh.index_buffer.slice(..),
+                        wgpu::IndexFormat::Uint32,
+                    );
+                    render_pass.draw_indexed(0..gpu_mesh.index_count, 0, 0..1);
+                    triangles += gpu_mesh.index_count / 3;
+                }
+            }
+
             // Render block outline if targeting a block
             if let Some([bx, by, bz]) = target_block {
                 // Update outline vertices for this block position
@@ -1003,15 +1105,15 @@ impl Default for CameraUniform {
 }
 
 impl CameraUniform {
-    fn from_camera_with_anim(camera: &Camera, current_time: f32, spawn_time: f32) -> Self {
+    fn from_camera_with_anim(camera: &Camera, current_time: f32, spawn_time: f32, is_underwater: bool) -> Self {
         Self {
             view_proj: camera.view_projection_matrix().to_cols_array_2d(),
             view_pos: camera.position.extend(1.0).to_array(),
             anim_data: [
-                current_time,    // Current time in seconds
-                spawn_time,      // When the world started loading
-                80.0,            // Wave speed: 80 blocks per second (fast expansion)
-                10.0,            // Drop height: 10 blocks base
+                current_time,                      // Current time in seconds
+                spawn_time,                        // When the world started loading
+                80.0,                              // Wave speed: 80 blocks per second
+                if is_underwater { 1.0 } else { 0.0 },  // Underwater flag
             ],
         }
     }

@@ -225,6 +225,7 @@ impl App {
         // Upload meshes to GPU (per-chunk buffers - for fallback)
         // Note: Pool upload now happens during render after frustum culling
         self.world.upload_meshes(self.renderer.device());
+        self.world.upload_water_meshes(self.renderer.device());
 
         // Get target block for outline rendering
         let target_block = if self.cursor_grabbed {

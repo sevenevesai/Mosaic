@@ -58,4 +58,37 @@ pub mod constants {
     pub const JUMP_VELOCITY: f32 = 9.0;
     /// Terminal falling velocity (blocks/s)
     pub const TERMINAL_VELOCITY: f32 = 78.0;
+
+    // ============ WATER CONSTANTS ============
+
+    /// Sea level Y coordinate (world blocks)
+    pub const WATER_SEA_LEVEL: i32 = 32;
+
+    /// Water surface height within a full water block (0.0-1.0)
+    /// Slightly below 1.0 to allow for wave animation headroom
+    pub const WATER_FULL_HEIGHT: f32 = 0.875;
+
+    /// Maximum wave amplitude (blocks)
+    pub const WATER_WAVE_AMPLITUDE: f32 = 0.15;
+
+    /// Base wave speed multiplier
+    pub const WATER_WAVE_SPEED: f32 = 0.8;
+
+    /// Water transparency (alpha) - shallow water
+    pub const WATER_ALPHA_SHALLOW: f32 = 0.7;
+
+    /// Water transparency (alpha) - deep water
+    pub const WATER_ALPHA_DEEP: f32 = 0.92;
+
+    /// Light absorption rate per block depth (exponential decay factor)
+    pub const WATER_LIGHT_ABSORPTION: f32 = 0.15;
+
+    /// Underwater visibility distance (blocks) before full fog
+    pub const WATER_VISIBILITY: f32 = 24.0;
+
+    /// Refraction distortion strength
+    pub const WATER_REFRACTION_STRENGTH: f32 = 0.04;
+
+    /// Fresnel power for reflection blend
+    pub const WATER_FRESNEL_POWER: f32 = 4.0;
 }

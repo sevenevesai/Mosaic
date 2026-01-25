@@ -49,8 +49,8 @@ callgrind.out.*
 renderdoc/
 
 # World saves (if you want to ignore test saves)
-# saves/
-# *.world
+saves/
+*.world
 
 # Temporary files
 *.tmp
@@ -70,10 +70,20 @@ tarpaulin-report.html
 /docs/build/
 
 # Asset source files (keep compiled assets, ignore source)
-# *.psd
-# *.xcf
-# *.blend
-# *.blend1
+*.psd
+*.png
+*.jpeg
+*.jpg
+*.gif
+*.xcf
+*.blend
+*.blend1
+*.fbx
+*.glb
+*.vox
+*.mtl
+*.obj
+*.dae
 
 # Loose images in root (screenshots, copies, etc.)
 /*.png

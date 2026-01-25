@@ -26,7 +26,7 @@
 
 - [ ] **Ambient occlusion** - AO calculation exists but simplified. Implement proper corner-based AO for better visual depth.
 
-- [ ] **Water rendering** - Water blocks exist but render as solid. Need transparency, separate render pass, wave animation.
+- [x] **Water rendering (basic)** - Smooth heightfield surface, Gerstner waves, fresnel reflections, foam, light integration. See "Water Enhancements" for remaining work.
 
 - [x] **Day/night cycle** - Full sun/moon system with warm color palette, smooth shadow transitions, T key speed control.
 
@@ -60,6 +60,38 @@
 
 ---
 
+## Water Enhancements (Remaining)
+
+Current water system has smooth heightfield rendering with waves and reflections. Remaining work:
+
+### Visual Effects
+- [ ] **Screen-space refraction** - Distort scene behind water based on surface normals
+- [x] **Caustics shimmer** - Animated light patterns on water surface (basic implementation)
+- [x] **Underwater camera** - Blue-green fog when submerged, reduced visibility
+- [x] **Improved foam** - Depth-based foam at shorelines, wave-responsive
+- [x] **Unified wave direction** - Waves flow cohesively, no grid/X-pattern artifacts
+- [x] **Schlick fresnel + depth absorption** - Realistic color gradient (turquoise→teal→deep blue)
+
+### Physics & Simulation
+- [ ] **Water flow simulation** - Cellular automata spreading/flowing
+- [ ] **Source blocks** - Infinite water sources (like Minecraft)
+- [x] **Swimming physics** - Buoyancy, drag, 3D movement (Space up, Shift down)
+- [ ] **Water level per block** - Variable water heights (0-8 levels)
+- [x] **Underwater cave filling** - Caves below sea level fill with water
+
+### Performance
+- [ ] **Water mesh LOD** - Simplified mesh for distant water
+- [ ] **Chunk-based water culling** - Skip fully submerged chunks
+- [ ] **GPU flow simulation** - Compute shader for water physics
+
+### Integration
+- [ ] **Water block placement** - Place/remove water with bucket
+- [ ] **Waterlogged blocks** - Blocks that can contain water (slabs, stairs)
+- [ ] **Rain filling** - Weather system fills exposed water
+- [x] **Random world seeds** - New worlds get unique timestamp-based seeds
+
+---
+
 ## Technical Debt
 
 - [x] **Fix MDI rendering** - Multi-draw indirect now working. Chunks sync to pool, single draw call for pooled chunks.
@@ -83,8 +115,10 @@
 
 ### v0.2 - Visual Polish
 - [ ] Proper AO (GTAO or corner-based)
-- [ ] Water rendering
+- [x] Water rendering (basic - waves, reflections, foam)
+- [ ] Water enhancements (refraction, caustics, underwater effects)
 - [x] Day/night cycle
+- [x] Chunk fade-in animation (smooth alpha fade when chunks load)
 - [ ] Block-specific sounds
 
 ### v0.3 - Gameplay
