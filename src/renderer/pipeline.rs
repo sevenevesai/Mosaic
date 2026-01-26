@@ -1115,6 +1115,46 @@ fn trace_voxel_ao(world_pos: vec3<f32>, normal: vec3<f32>) -> f32 {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// SKY OCCLUSION - Check if position has sky access (for cave darkness)
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn trace_sky_occlusion(world_pos: vec3<f32>) -> f32 {
+    // Trace upward to check for sky access
+    // Returns 0.0 = fully enclosed (cave), 1.0 = full sky access
+    let up_dir = vec3<f32>(0.0, 1.0, 0.0);
+    let max_steps = 32;
+    let step_size = 2.0;  // Larger steps for efficiency
+
+    var accumulated_opacity = 0.0;
+    var pos = world_pos + up_dir * 1.0;  // Start slightly above surface
+
+    for (var i = 0; i < max_steps; i++) {
+        pos += up_dir * step_size;
+        let uv = world_to_voxel_uv(pos);
+
+        // If we exit the volume upward without hitting anything, we have sky access
+        if (uv.y > 1.0) {
+            break;
+        }
+
+        // If outside volume horizontally, assume some sky access
+        if (!is_in_volume(uv)) {
+            accumulated_opacity += 0.3;
+            break;
+        }
+
+        let voxel = textureSampleLevel(t_voxel, s_voxel, uv, 0.0);
+        accumulated_opacity += voxel.r * 0.15;
+
+        if (accumulated_opacity >= 1.0) {
+            break;
+        }
+    }
+
+    return 1.0 - clamp(accumulated_opacity, 0.0, 1.0);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // VOXEL-BASED TORCH/EMISSIVE LIGHTING
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -1242,6 +1282,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let voxel_ao_raw = trace_voxel_ao(in.world_position, in.normal);
     let voxel_ao = mix(0.85, 1.0, voxel_ao_raw);  // Subtle effect (0.85-1.0 range)
 
+    // Sky occlusion - check if we're in an enclosed space (cave)
+    let sky_access = trace_sky_occlusion(in.world_position);
+
     // Per-vertex AO
     let ao_raw = in.ao;
     let ao_smooth = smoothstep(0.0, 1.0, ao_raw);
@@ -1260,12 +1303,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let block_light_contribution = voxel_torch_light * night_boost;
 
     // Combine all lighting
-    // Apply shadow to reduce TOTAL natural light, not just sun contribution
-    let sky_contrib = ambient_base * 0.2 * (0.2 + sun_intensity * 0.8);
-    let natural_light_raw = ambient_base + sun_contribution + moon_contribution + sky_contrib + gi * 0.3;
+    // Sky access affects ambient - caves get much less ambient light
+    let cave_ambient_factor = mix(0.05, 1.0, sky_access);  // 5% ambient in full cave, 100% with sky
+    let sky_contrib = ambient_base * 0.2 * (0.2 + sun_intensity * 0.8) * cave_ambient_factor;
+    let ambient_with_sky = ambient_base * cave_ambient_factor;
+    let natural_light_raw = ambient_with_sky + sun_contribution + moon_contribution + sky_contrib + gi * 0.3;
 
-    // Shadow affects the whole natural light result (stronger effect)
-    let shadow_multiplier = mix(0.3, 1.0, final_shadow);  // Even in full shadow, get 30% light
+    // Shadow affects the whole natural light result
+    // In caves (no sky access), shadow multiplier is lower
+    let min_shadow_light = mix(0.02, 0.3, sky_access);  // 2% minimum in caves, 30% with sky
+    let shadow_multiplier = mix(min_shadow_light, 1.0, final_shadow);
     let natural_light = natural_light_raw * shadow_multiplier;
     let natural_lit = natural_light * face_brightness;
 
