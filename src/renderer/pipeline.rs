@@ -921,44 +921,65 @@ fn is_in_volume(uv: vec3<f32>) -> bool {
 }
 
 fn ray_march_shadow(world_pos: vec3<f32>, light_dir: vec3<f32>) -> f32 {
-    let max_steps = 64;
-    let step_size = 0.5;  // Smaller steps for more accuracy
+    let max_steps = 48;
+    let step_size = 1.0;
 
     var accumulated_opacity = 0.0;
-    // Start slightly above surface to avoid self-shadowing
-    var pos = world_pos + light_dir * 1.0;
+    var min_distance_to_occluder = 1000.0;
+    var hit_distance = 0.0;
 
-    let voxel_start = world_to_voxel_uv(pos);
-    if (!is_in_volume(voxel_start)) {
-        return 1.0;  // Outside volume = fully lit
-    }
+    // Start just slightly offset to avoid self-shadowing
+    var pos = world_pos + light_dir * 0.5;
+    var total_distance = 0.5;
 
     for (var i = 0; i < max_steps; i++) {
         pos += light_dir * step_size;
+        total_distance += step_size;
+
         let uv = world_to_voxel_uv(pos);
 
-        if (!is_in_volume(uv)) {
-            break;  // Exited volume = no more occlusion possible
+        // Fade shadow near volume edges instead of hard cutoff
+        let edge_dist = min(
+            min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y)),
+            min(uv.z, 1.0 - uv.z)
+        );
+
+        if (edge_dist < 0.0) {
+            break;  // Exited volume
         }
+
+        // Edge fade factor (smooth transition at volume boundary)
+        let edge_fade = smoothstep(0.0, 0.05, edge_dist);
 
         let voxel = textureSampleLevel(t_voxel, s_voxel, uv, 0.0);
-        let opacity = voxel.r;
+        let opacity = voxel.r * edge_fade;
 
-        // Hard shadow: any solid voxel blocks light completely
-        if (opacity > 0.5) {
-            return 0.0;  // Full shadow - DARK
+        // Track closest occluder for penumbra calculation
+        if (opacity > 0.3 && min_distance_to_occluder > 999.0) {
+            min_distance_to_occluder = total_distance;
+            hit_distance = total_distance;
         }
 
-        // Soft accumulation for semi-transparent (leaves, etc)
-        accumulated_opacity += opacity * 0.5;
+        // Accumulate opacity
+        accumulated_opacity += opacity * 0.15;
 
-        if (accumulated_opacity >= 0.5) {
-            return 0.0;  // Accumulated enough = full shadow
+        // Early exit if fully shadowed
+        if (accumulated_opacity >= 1.0) {
+            break;
         }
     }
 
-    // Partial shadow based on accumulated opacity
-    return 1.0 - clamp(accumulated_opacity * 1.5, 0.0, 1.0);
+    // Calculate shadow with distance-based softness (penumbra)
+    var shadow = 1.0 - clamp(accumulated_opacity, 0.0, 1.0);
+
+    // Soft penumbra: shadows get softer further from occluder
+    // Close occluders = sharp shadow, far occluders = soft shadow
+    if (min_distance_to_occluder < 999.0) {
+        let penumbra_softness = smoothstep(1.0, 12.0, min_distance_to_occluder);
+        shadow = mix(shadow * 0.3, shadow, penumbra_softness * 0.5 + 0.5);
+    }
+
+    return shadow;
 }
 
 // Soft shadow with penumbra - simplified for performance
@@ -1068,6 +1089,31 @@ fn trace_voxel_ao(world_pos: vec3<f32>, normal: vec3<f32>) -> f32 {
     return 1.0 - clamp(occlusion, 0.0, 0.5);
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// VOXEL-BASED TORCH/EMISSIVE LIGHTING
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn sample_torch_light(world_pos: vec3<f32>) -> vec3<f32> {
+    // Sample pre-propagated light from the voxel volume
+    // Light is propagated on CPU and stored in the A channel
+    let torch_color = vec3<f32>(1.0, 0.85, 0.6);
+
+    let uv = world_to_voxel_uv(world_pos);
+    if (!is_in_volume(uv)) {
+        return vec3<f32>(0.0);
+    }
+
+    // Sample the voxel - A channel contains propagated light intensity
+    // Linear filtering provides smooth interpolation between voxels
+    let voxel = textureSampleLevel(t_voxel, s_voxel, uv, 0.0);
+    let light_intensity = voxel.a;  // A channel = propagated light (0-1)
+
+    // Apply gamma curve for more natural falloff
+    let curved_light = pow(light_intensity, 1.5);
+
+    return torch_color * curved_light * 1.2;
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Texture sampling (same as original)
@@ -1139,10 +1185,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     // Shadow fade with sun intensity - stronger shadows during day
-    let shadow_fade = smoothstep(0.0, 0.2, sun_intensity);
-    // Make shadow contrast stronger (0 = dark shadow, 1 = fully lit)
-    let shadow_contrast = shadow * shadow;  // Square for more contrast
-    let final_shadow = mix(1.0, shadow_contrast, shadow_fade);
+    let shadow_fade = smoothstep(0.0, 0.3, sun_intensity);
+    // Smooth shadow curve (not too harsh, not too soft)
+    let shadow_smooth = smoothstep(0.0, 1.0, shadow);
+    let final_shadow = mix(1.0, shadow_smooth, shadow_fade);
 
     // Face-based brightness
     var face_brightness = 0.8;
@@ -1179,12 +1225,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Combined AO
     let combined_ao = vertex_ao * voxel_ao;
 
-    // Block light (torches)
-    let block_light_level = in.block_light;
-    let block_light_curve = pow(block_light_level, 1.4);
-    let torch_color = vec3<f32>(1.0, 0.85, 0.6);
+    // Block light (torches) - now using voxel-based sampling
+    // Sample emissive light from nearby voxels in the volume
+    let voxel_torch_light = sample_torch_light(in.world_position);
+
+    // Night boost: torch light is more prominent when sun is down
     let night_boost = 1.0 + (1.0 - sun_intensity) * 0.5;
-    let block_light_contribution = torch_color * block_light_curve * 0.9 * night_boost;
+    let block_light_contribution = voxel_torch_light * night_boost;
 
     // Combine all lighting
     // Apply shadow to reduce TOTAL natural light, not just sun contribution

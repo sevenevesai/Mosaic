@@ -18,7 +18,8 @@ use crate::world::{ChunkPos, Chunk, Block};
 use crate::constants::CHUNK_SIZE_I32;
 
 /// Size of the voxel volume texture (in voxels per dimension)
-/// 256³ = 16M voxels, covering 256 blocks centered on camera
+/// 256³ = 16M voxels, covering ±128 blocks from camera (256 total)
+/// Memory: 256³ × 4 bytes = ~64MB for voxel texture
 pub const VOXEL_VOLUME_SIZE: u32 = 256;
 
 /// Number of mip levels for cone tracing
@@ -401,10 +402,13 @@ impl VoxelGI {
         );
 
         // Only update voxel data if camera moved more than threshold OR first time
-        // Threshold of 16 blocks (1 chunk) balances quality vs performance
-        let move_threshold = 16.0;
+        // Reduced threshold (was 32) for quicker torch updates
+        let move_threshold = 8.0;
         let distance_moved = (snapped_center - self.last_update_center).length();
         let needs_refresh = !self.initialized || distance_moved >= move_threshold;
+
+        // Also refresh if we haven't updated in a while (ensures initial chunks load)
+        // This helps when chunks are still loading after spawn
 
         if !needs_refresh {
             // IMPORTANT: Use last_update_center (where data IS), not snapped_center (where camera IS)
@@ -464,7 +468,8 @@ impl VoxelGI {
             volume_center: [center.x, center.y, center.z, 0.0],
             volume_size: [VOXEL_VOLUME_SIZE as f32; 4],
             inv_volume_size: [1.0 / VOXEL_VOLUME_SIZE as f32; 4],
-            sun_direction: [sun_direction.x, sun_direction.y, sun_direction.z, 1.0],
+            // W component is sun intensity (0-1), calculated from sun height
+            sun_direction: [sun_direction.x, sun_direction.y, sun_direction.z, sun_direction.y.max(0.0).min(1.0)],
             sun_color: [sun_color.x, sun_color.y, sun_color.z, 1.0],
             ambient_color: [ambient_color.x, ambient_color.y, ambient_color.z, 1.0],
             time_of_day: [time_of_day, 0.0, 0.0, 0.0],
@@ -476,45 +481,139 @@ impl VoxelGI {
     fn fill_voxel_cache(&mut self, chunks: &Arc<RwLock<AHashMap<ChunkPos, Arc<Chunk>>>>) {
         let half_size = (VOXEL_VOLUME_SIZE / 2) as f32;
         let volume_min = self.volume_center - Vec3::splat(half_size);
+        let volume_max = self.volume_center + Vec3::splat(half_size);
 
-        // Clear cache
+        // Clear cache (all air)
         self.voxel_cache.fill(0);
+
+        // Collect light sources for propagation
+        let mut light_sources: Vec<(i32, i32, i32, u8)> = Vec::new();
 
         let chunks_read = chunks.read();
 
-        // Iterate over volume and sample from chunks
-        for vz in 0..VOXEL_VOLUME_SIZE {
-            for vy in 0..VOXEL_VOLUME_SIZE {
-                for vx in 0..VOXEL_VOLUME_SIZE {
-                    // World position of this voxel
-                    let world_x = (volume_min.x + vx as f32).floor() as i32;
-                    let world_y = (volume_min.y + vy as f32).floor() as i32;
-                    let world_z = (volume_min.z + vz as f32).floor() as i32;
+        // OPTIMIZED: Iterate over LOADED CHUNKS only, not all voxels
+        // This is O(loaded_chunks * 4096) instead of O(16 million)
+        for (chunk_pos, chunk) in chunks_read.iter() {
+            // Chunk world bounds
+            let chunk_world_min = Vec3::new(
+                (chunk_pos.x * CHUNK_SIZE_I32) as f32,
+                (chunk_pos.y * CHUNK_SIZE_I32) as f32,
+                (chunk_pos.z * CHUNK_SIZE_I32) as f32,
+            );
+            let chunk_world_max = chunk_world_min + Vec3::splat(16.0);
 
-                    // Get chunk and local coords
-                    let chunk_pos = ChunkPos {
-                        x: world_x.div_euclid(CHUNK_SIZE_I32),
-                        y: world_y.div_euclid(CHUNK_SIZE_I32),
-                        z: world_z.div_euclid(CHUNK_SIZE_I32),
-                    };
+            // Skip chunks completely outside the volume
+            if chunk_world_max.x < volume_min.x || chunk_world_min.x > volume_max.x ||
+               chunk_world_max.y < volume_min.y || chunk_world_min.y > volume_max.y ||
+               chunk_world_max.z < volume_min.z || chunk_world_min.z > volume_max.z {
+                continue;
+            }
 
-                    if let Some(chunk) = chunks_read.get(&chunk_pos) {
-                        let local_x = world_x.rem_euclid(CHUNK_SIZE_I32) as usize;
-                        let local_y = world_y.rem_euclid(CHUNK_SIZE_I32) as usize;
-                        let local_z = world_z.rem_euclid(CHUNK_SIZE_I32) as usize;
+            // Iterate over blocks in this chunk
+            for lz in 0..16 {
+                for ly in 0..16 {
+                    for lx in 0..16 {
+                        let block = chunk.get_block(lx, ly, lz);
 
-                        let block = chunk.get_block(local_x, local_y, local_z);
+                        // Skip air blocks (most common case)
+                        if !block.is_solid() && block.light_emission() == 0 {
+                            continue;
+                        }
+
+                        // World position of this block
+                        let world_x = chunk_pos.x * CHUNK_SIZE_I32 + lx as i32;
+                        let world_y = chunk_pos.y * CHUNK_SIZE_I32 + ly as i32;
+                        let world_z = chunk_pos.z * CHUNK_SIZE_I32 + lz as i32;
+
+                        // Convert to voxel coordinates
+                        let vx = (world_x as f32 - volume_min.x) as i32;
+                        let vy = (world_y as f32 - volume_min.y) as i32;
+                        let vz = (world_z as f32 - volume_min.z) as i32;
+
+                        // Skip if outside volume bounds
+                        if vx < 0 || vx >= VOXEL_VOLUME_SIZE as i32 ||
+                           vy < 0 || vy >= VOXEL_VOLUME_SIZE as i32 ||
+                           vz < 0 || vz >= VOXEL_VOLUME_SIZE as i32 {
+                            continue;
+                        }
+
                         let voxel = VoxelData::from_block(block);
 
                         // Calculate index in cache (RGBA8 format)
-                        let idx = ((vz * VOXEL_VOLUME_SIZE * VOXEL_VOLUME_SIZE
-                                  + vy * VOXEL_VOLUME_SIZE
-                                  + vx) * 4) as usize;
+                        let idx = ((vz as u32 * VOXEL_VOLUME_SIZE * VOXEL_VOLUME_SIZE
+                                  + vy as u32 * VOXEL_VOLUME_SIZE
+                                  + vx as u32) * 4) as usize;
 
                         self.voxel_cache[idx] = voxel.opacity;
                         self.voxel_cache[idx + 1] = voxel.emissive;
                         self.voxel_cache[idx + 2] = voxel.material;
                         self.voxel_cache[idx + 3] = voxel.flags;
+
+                        // Track light sources for propagation
+                        if voxel.emissive > 0 {
+                            light_sources.push((vx, vy, vz, voxel.emissive));
+                        }
+                    }
+                }
+            }
+        }
+
+        drop(chunks_read);
+
+        // Propagate light from sources to nearby voxels
+        // Store propagated light in the A channel (flags -> light)
+        self.propagate_light(&light_sources);
+    }
+
+    /// Propagate light from emissive sources through the volume
+    /// Stores result in the A channel (index + 3) as propagated light intensity
+    fn propagate_light(&mut self, light_sources: &[(i32, i32, i32, u8)]) {
+        let size = VOXEL_VOLUME_SIZE as i32;
+        let max_light_radius = 14i32;  // Torch light radius
+
+        for &(lx, ly, lz, emission) in light_sources {
+            let emission_f = emission as f32 / 255.0;
+
+            // Spread light in a sphere around the source
+            for dz in -max_light_radius..=max_light_radius {
+                for dy in -max_light_radius..=max_light_radius {
+                    for dx in -max_light_radius..=max_light_radius {
+                        let vx = lx + dx;
+                        let vy = ly + dy;
+                        let vz = lz + dz;
+
+                        // Bounds check
+                        if vx < 0 || vx >= size || vy < 0 || vy >= size || vz < 0 || vz >= size {
+                            continue;
+                        }
+
+                        // Calculate distance
+                        let dist_sq = (dx * dx + dy * dy + dz * dz) as f32;
+                        let dist = dist_sq.sqrt();
+
+                        if dist > max_light_radius as f32 {
+                            continue;
+                        }
+
+                        // Check if blocked by solid voxel (simple occlusion)
+                        // For performance, only check direct path for close voxels
+                        let idx = ((vz as u32 * VOXEL_VOLUME_SIZE * VOXEL_VOLUME_SIZE
+                                  + vy as u32 * VOXEL_VOLUME_SIZE
+                                  + vx as u32) * 4) as usize;
+
+                        let opacity = self.voxel_cache[idx];
+                        if opacity > 200 && dist > 1.0 {
+                            // This voxel is solid, don't light it (unless adjacent)
+                            continue;
+                        }
+
+                        // Smooth falloff: (1 - dist/max)^2 for softer edges
+                        let falloff = (1.0 - dist / max_light_radius as f32).max(0.0);
+                        let light_value = (emission_f * falloff * falloff * 255.0) as u8;
+
+                        // Add to existing light (max blend)
+                        let current = self.voxel_cache[idx + 3];
+                        self.voxel_cache[idx + 3] = current.max(light_value);
                     }
                 }
             }
