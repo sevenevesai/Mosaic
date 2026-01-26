@@ -184,19 +184,28 @@ impl Player {
     }
 
     /// Process block interactions (call from main loop with mutable world access)
-    pub fn process_block_interactions(&mut self, world: &mut WorldManager) {
+    /// Returns true if any block was modified (placed or broken)
+    pub fn process_block_interactions(&mut self, world: &mut WorldManager) -> bool {
+        let mut changed = false;
+
         if self.break_requested {
             self.break_requested = false;
-            self.try_break_block(world);
+            if self.try_break_block(world) {
+                changed = true;
+            }
         }
 
         if self.place_requested {
             self.place_requested = false;
-            self.try_place_block(world);
+            if self.try_place_block(world) {
+                changed = true;
+            }
         }
+
+        changed
     }
 
-    fn try_break_block(&self, world: &mut WorldManager) {
+    fn try_break_block(&self, world: &mut WorldManager) -> bool {
         let origin = self.camera.position;
         let direction = self.camera.forward();
 
@@ -207,12 +216,14 @@ impl Player {
                 if block != Block::Bedrock {
                     world.set_block(x, y, z, Block::Air);
                     tracing::debug!("Broke block at ({}, {}, {})", x, y, z);
+                    return true;
                 }
             }
         }
+        false
     }
 
-    fn try_place_block(&self, world: &mut WorldManager) {
+    fn try_place_block(&self, world: &mut WorldManager) -> bool {
         let origin = self.camera.position;
         let direction = self.camera.forward();
 
@@ -245,9 +256,11 @@ impl Player {
                 if let Some(Block::Air) = world.get_block(x, y, z) {
                     world.set_block(x, y, z, self.selected_block);
                     tracing::debug!("Placed {:?} at ({}, {}, {})", self.selected_block, x, y, z);
+                    return true;
                 }
             }
         }
+        false
     }
 
     pub fn update(&mut self, dt: Duration, world: Option<&WorldManager>) {

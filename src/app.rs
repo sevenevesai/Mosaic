@@ -206,7 +206,11 @@ impl App {
         if self.cursor_grabbed {
             self.player.update(dt, Some(&self.world));
             // Process block break/place interactions
-            self.player.process_block_interactions(&mut self.world);
+            let blocks_changed = self.player.process_block_interactions(&mut self.world);
+            if blocks_changed {
+                // Force voxel volume update for immediate torch lighting
+                self.renderer.mark_voxel_dirty();
+            }
 
             // Update footstep audio (only when not flying)
             if let Some(ref mut audio) = self.audio {

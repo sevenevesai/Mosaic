@@ -139,6 +139,8 @@ pub struct VoxelGI {
     last_update_center: Vec3,
     /// Whether we've done the initial voxel fill
     initialized: bool,
+    /// Force update on next frame (set when blocks change)
+    force_update: bool,
 
     /// Staging buffer for CPU -> GPU voxel data transfer
     staging_buffer: wgpu::Buffer,
@@ -317,9 +319,15 @@ impl VoxelGI {
             volume_center: Vec3::ZERO,
             last_update_center: Vec3::ZERO,
             initialized: false,
+            force_update: false,
             staging_buffer,
             voxel_cache: vec![0u8; staging_size],
         }
+    }
+
+    /// Mark the voxel volume as needing an update (call when blocks change)
+    pub fn mark_dirty(&mut self) {
+        self.force_update = true;
     }
 
     fn create_update_pipeline(device: &wgpu::Device, _bind_group_layout: &wgpu::BindGroupLayout) -> wgpu::ComputePipeline {
@@ -401,14 +409,10 @@ impl VoxelGI {
             camera_pos.z.floor(),
         );
 
-        // Only update voxel data if camera moved more than threshold OR first time
-        // Reduced threshold (was 32) for quicker torch updates
+        // Only update voxel data if camera moved more than threshold, first time, or forced
         let move_threshold = 8.0;
         let distance_moved = (snapped_center - self.last_update_center).length();
-        let needs_refresh = !self.initialized || distance_moved >= move_threshold;
-
-        // Also refresh if we haven't updated in a while (ensures initial chunks load)
-        // This helps when chunks are still loading after spawn
+        let needs_refresh = !self.initialized || distance_moved >= move_threshold || self.force_update;
 
         if !needs_refresh {
             // IMPORTANT: Use last_update_center (where data IS), not snapped_center (where camera IS)
@@ -416,6 +420,9 @@ impl VoxelGI {
             self.update_uniform(queue, self.last_update_center, sun_direction, sun_color, ambient_color, time_of_day);
             return;
         }
+
+        // Reset force flag
+        self.force_update = false;
 
         if !self.initialized {
             tracing::info!("Initial voxel volume fill at {:?}", snapped_center);

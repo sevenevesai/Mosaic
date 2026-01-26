@@ -655,6 +655,11 @@ impl Renderer {
         self.use_voxel_lighting
     }
 
+    /// Mark voxel volume as needing update (call when blocks change)
+    pub fn mark_voxel_dirty(&mut self) {
+        self.voxel_gi.mark_dirty();
+    }
+
     /// Update the day/night cycle time
     /// dt is delta time in seconds
     pub fn update_time(&mut self, dt: f32) {
