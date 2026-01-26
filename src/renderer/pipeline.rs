@@ -793,6 +793,523 @@ pub fn create_chunk_pipeline(
 /// Shadow map size (4096x4096 for sharp diagonal shadows)
 pub const SHADOW_MAP_SIZE: u32 = 4096;
 
+// ═══════════════════════════════════════════════════════════════════════════
+// VOXEL-LIT CHUNK SHADER
+// Uses DDA ray marching for shadows + Voxel Cone Tracing for GI
+// ═══════════════════════════════════════════════════════════════════════════
+const VOXEL_LIT_CHUNK_SHADER: &str = r#"
+// Camera uniform
+struct CameraUniform {
+    view_proj: mat4x4<f32>,
+    view_pos: vec4<f32>,
+    anim_data: vec4<f32>,
+};
+
+// Light uniform
+struct LightUniform {
+    view_proj: mat4x4<f32>,
+    sun_direction: vec4<f32>,
+    sun_color: vec4<f32>,
+    moon_direction: vec4<f32>,
+    moon_color: vec4<f32>,
+    ambient_color: vec4<f32>,
+};
+
+// Voxel volume uniform (128 bytes for proper WGSL alignment)
+struct VoxelVolumeUniform {
+    volume_center: vec4<f32>,
+    volume_size: vec4<f32>,
+    inv_volume_size: vec4<f32>,
+    sun_direction: vec4<f32>,
+    sun_color: vec4<f32>,
+    ambient_color: vec4<f32>,
+    time_of_day: vec4<f32>,  // x = time, yzw = padding
+    _padding: vec4<f32>,
+};
+
+@group(0) @binding(0)
+var<uniform> camera: CameraUniform;
+
+@group(1) @binding(0)
+var t_diffuse: texture_2d<f32>;
+@group(1) @binding(1)
+var s_diffuse: sampler;
+
+@group(2) @binding(0)
+var<uniform> light: LightUniform;
+
+// Voxel GI group
+@group(3) @binding(0)
+var<uniform> voxel_volume: VoxelVolumeUniform;
+@group(3) @binding(1)
+var t_voxel: texture_3d<f32>;
+@group(3) @binding(2)
+var t_radiance: texture_3d<f32>;
+@group(3) @binding(3)
+var s_voxel: sampler;
+
+struct VertexInput {
+    @location(0) position: vec3<f32>,
+    @location(1) normal_packed: vec4<i32>,
+    @location(2) uv: vec2<f32>,
+    @location(3) ao_tile_packed: vec4<f32>,
+};
+
+struct VertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) world_position: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) uv: vec2<f32>,
+    @location(3) ao: f32,
+    @location(4) tile_count: vec2<f32>,
+    @location(5) block_light: f32,
+    @location(6) fade_alpha: f32,
+};
+
+@vertex
+fn vs_main(in: VertexInput) -> VertexOutput {
+    var out: VertexOutput;
+
+    let normal = vec3<f32>(
+        f32(in.normal_packed.x) / 127.0,
+        f32(in.normal_packed.y) / 127.0,
+        f32(in.normal_packed.z) / 127.0
+    );
+
+    let current_time = camera.anim_data.x;
+    let spawn_time = camera.anim_data.y;
+    let wave_speed = camera.anim_data.z;
+
+    var pos = in.position;
+    let chunk_pos = floor(pos / 16.0) * 16.0;
+    let cam_pos = camera.view_pos.xyz;
+    let dist = length(chunk_pos.xz - cam_pos.xz);
+    let chunk_birth = spawn_time + dist / wave_speed;
+    let age = current_time - chunk_birth;
+    let fade_duration = 0.5;
+    var alpha = 1.0;
+    if (age >= 0.0 && age < fade_duration) {
+        alpha = age / fade_duration;
+    }
+
+    out.clip_position = camera.view_proj * vec4<f32>(pos, 1.0);
+    out.world_position = in.position;
+    out.normal = normal;
+    out.uv = in.uv;
+    out.ao = in.ao_tile_packed.x;
+    out.tile_count = vec2<f32>(
+        max(in.ao_tile_packed.y * 255.0, 1.0),
+        max(in.ao_tile_packed.z * 255.0, 1.0)
+    );
+    out.block_light = in.ao_tile_packed.w;
+    out.fade_alpha = alpha;
+    return out;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DDA RAY MARCHING FOR SHADOWS
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn world_to_voxel_uv(world_pos: vec3<f32>) -> vec3<f32> {
+    let half_size = voxel_volume.volume_size.x * 0.5;
+    let local_pos = world_pos - voxel_volume.volume_center.xyz + vec3<f32>(half_size);
+    return local_pos / voxel_volume.volume_size.x;
+}
+
+fn is_in_volume(uv: vec3<f32>) -> bool {
+    return all(uv >= vec3<f32>(0.0)) && all(uv <= vec3<f32>(1.0));
+}
+
+fn ray_march_shadow(world_pos: vec3<f32>, light_dir: vec3<f32>) -> f32 {
+    let max_steps = 64;
+    let step_size = 0.5;  // Smaller steps for more accuracy
+
+    var accumulated_opacity = 0.0;
+    // Start slightly above surface to avoid self-shadowing
+    var pos = world_pos + light_dir * 1.0;
+
+    let voxel_start = world_to_voxel_uv(pos);
+    if (!is_in_volume(voxel_start)) {
+        return 1.0;  // Outside volume = fully lit
+    }
+
+    for (var i = 0; i < max_steps; i++) {
+        pos += light_dir * step_size;
+        let uv = world_to_voxel_uv(pos);
+
+        if (!is_in_volume(uv)) {
+            break;  // Exited volume = no more occlusion possible
+        }
+
+        let voxel = textureSampleLevel(t_voxel, s_voxel, uv, 0.0);
+        let opacity = voxel.r;
+
+        // Hard shadow: any solid voxel blocks light completely
+        if (opacity > 0.5) {
+            return 0.0;  // Full shadow - DARK
+        }
+
+        // Soft accumulation for semi-transparent (leaves, etc)
+        accumulated_opacity += opacity * 0.5;
+
+        if (accumulated_opacity >= 0.5) {
+            return 0.0;  // Accumulated enough = full shadow
+        }
+    }
+
+    // Partial shadow based on accumulated opacity
+    return 1.0 - clamp(accumulated_opacity * 1.5, 0.0, 1.0);
+}
+
+// Soft shadow with penumbra - simplified for performance
+fn ray_march_shadow_soft(world_pos: vec3<f32>, light_dir: vec3<f32>, softness: f32) -> f32 {
+    // Just use single ray for now - multi-tap is too expensive
+    // TODO: Re-enable soft shadows once base shadows are working well
+    return ray_march_shadow(world_pos, light_dir);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// VOXEL CONE TRACING FOR GI
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn cone_trace(origin: vec3<f32>, direction: vec3<f32>, cone_ratio: f32, max_dist: f32) -> vec4<f32> {
+    var accumulated_color = vec3<f32>(0.0);
+    var accumulated_alpha = 0.0;
+
+    let start_dist = 1.5;
+    var dist = start_dist;
+
+    while (dist < max_dist && accumulated_alpha < 0.95) {
+        let diameter = max(1.0, 2.0 * cone_ratio * dist);
+        let sample_pos = origin + direction * dist;
+        let uv = world_to_voxel_uv(sample_pos);
+
+        if (!is_in_volume(uv)) {
+            break;
+        }
+
+        let mip = log2(diameter);
+        let sample = textureSampleLevel(t_radiance, s_voxel, uv, mip);
+
+        let alpha = 1.0 - accumulated_alpha;
+        accumulated_color += sample.rgb * sample.a * alpha;
+        accumulated_alpha += sample.a * alpha;
+
+        dist += diameter * 0.5;
+    }
+
+    return vec4<f32>(accumulated_color, accumulated_alpha);
+}
+
+fn trace_diffuse_gi(world_pos: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+    let cone_angle = 0.577;
+    let max_distance = 48.0;
+
+    var tangent: vec3<f32>;
+    if (abs(normal.y) > 0.9) {
+        tangent = normalize(cross(normal, vec3<f32>(1.0, 0.0, 0.0)));
+    } else {
+        tangent = normalize(cross(normal, vec3<f32>(0.0, 1.0, 0.0)));
+    }
+    let bitangent = cross(normal, tangent);
+
+    var gi = vec3<f32>(0.0);
+
+    let center = cone_trace(world_pos, normal, cone_angle, max_distance);
+    gi += center.rgb * 0.4;
+
+    let side_weight = 0.15;
+    let tilt = 0.707;
+
+    let dir1 = normalize(normal * tilt + tangent * tilt);
+    let dir2 = normalize(normal * tilt - tangent * tilt);
+    let dir3 = normalize(normal * tilt + bitangent * tilt);
+    let dir4 = normalize(normal * tilt - bitangent * tilt);
+
+    gi += cone_trace(world_pos, dir1, cone_angle, max_distance).rgb * side_weight;
+    gi += cone_trace(world_pos, dir2, cone_angle, max_distance).rgb * side_weight;
+    gi += cone_trace(world_pos, dir3, cone_angle, max_distance).rgb * side_weight;
+    gi += cone_trace(world_pos, dir4, cone_angle, max_distance).rgb * side_weight;
+
+    return gi;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// VOXEL AMBIENT OCCLUSION
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn trace_voxel_ao(world_pos: vec3<f32>, normal: vec3<f32>) -> f32 {
+    let max_distance = 6.0;
+    let step_size = 1.0;
+    var occlusion = 0.0;
+
+    var tangent: vec3<f32>;
+    if (abs(normal.y) > 0.9) {
+        tangent = normalize(cross(normal, vec3<f32>(1.0, 0.0, 0.0)));
+    } else {
+        tangent = normalize(cross(normal, vec3<f32>(0.0, 1.0, 0.0)));
+    }
+    let bitangent = cross(normal, tangent);
+
+    // Sample in a small cone around the normal
+    for (var i = 1; i <= 4; i++) {
+        let dist = f32(i) * step_size;
+        let falloff = 1.0 - dist / max_distance;
+
+        let sample_pos = world_pos + normal * dist;
+        let uv = world_to_voxel_uv(sample_pos);
+
+        if (is_in_volume(uv)) {
+            let voxel = textureSampleLevel(t_voxel, s_voxel, uv, 0.0);
+            occlusion += voxel.r * falloff * 0.25;
+        }
+    }
+
+    return 1.0 - clamp(occlusion, 0.0, 0.5);
+}
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    // Texture sampling (same as original)
+    let tiles_per_row = 4.0;
+    let tile_size = 1.0 / tiles_per_row;
+    let tile_pixels = 256.0;
+    let tile_base = floor(in.uv / tile_size) * tile_size;
+
+    var world_2d: vec2<f32>;
+    if (abs(in.normal.y) > 0.5) {
+        world_2d = vec2<f32>(in.world_position.x, in.world_position.z);
+    } else if (abs(in.normal.x) > 0.5) {
+        world_2d = vec2<f32>(in.world_position.z, in.world_position.y);
+    } else {
+        world_2d = vec2<f32>(in.world_position.x, in.world_position.y);
+    }
+
+    let world_dx = dpdx(world_2d) * tile_size;
+    let world_dy = dpdy(world_2d) * tile_size;
+    let tiled_local = fract(world_2d);
+    let uv_in_tile = tiled_local * tile_size;
+
+    let dx = world_dx;
+    let dy = world_dy;
+    let max_deriv = max(max(abs(dx.x), abs(dx.y)), max(abs(dy.x), abs(dy.y)));
+    let approx_mip = max(0.0, log2(max_deriv * 1024.0 + 1.0));
+    let mip_scale = pow(2.0, min(approx_mip, 6.0));
+    let margin = (mip_scale * 1.5) / (tile_pixels * tiles_per_row);
+
+    let clamped_uv = clamp(uv_in_tile, vec2<f32>(margin), vec2<f32>(tile_size - margin));
+    let tiled_uv = tile_base + clamped_uv;
+
+    let clamped_dx = clamp(dx, vec2<f32>(-tile_size * 0.5), vec2<f32>(tile_size * 0.5));
+    let clamped_dy = clamp(dy, vec2<f32>(-tile_size * 0.5), vec2<f32>(tile_size * 0.5));
+    let tex_color = textureSampleGrad(t_diffuse, s_diffuse, tiled_uv, clamped_dx, clamped_dy);
+
+    if (tex_color.a < 0.5) {
+        discard;
+    }
+
+    // === VOXEL-BASED LIGHTING ===
+    let sun_dir = normalize(voxel_volume.sun_direction.xyz);
+    let sun_intensity = voxel_volume.sun_direction.w;
+    let sun_color = voxel_volume.sun_color.rgb;
+    let ambient_base = voxel_volume.ambient_color.rgb;
+
+    let moon_dir = normalize(light.moon_direction.xyz);
+    let moon_intensity = light.moon_direction.w;
+    let moon_color = light.moon_color.rgb;
+
+    // DEBUG: Check if we're in the voxel volume
+    let debug_uv = world_to_voxel_uv(in.world_position);
+    let in_volume = is_in_volume(debug_uv);
+
+    // DDA Ray March Shadow (replaces shadow map)
+    let shadow = ray_march_shadow_soft(in.world_position + in.normal * 0.1, sun_dir, 0.3);
+
+    // DEBUG MODE: Visualize shadow values
+    // Red = outside volume, Green = in shadow, Blue = lit
+    let DEBUG_SHADOWS = false;
+    if (DEBUG_SHADOWS) {
+        if (!in_volume) {
+            return vec4<f32>(1.0, 0.0, 0.0, 1.0);  // RED = outside volume
+        } else if (shadow < 0.5) {
+            return vec4<f32>(0.0, shadow, 0.0, 1.0);  // GREEN = shadowed
+        } else {
+            return vec4<f32>(0.0, 0.0, shadow, 1.0);  // BLUE = lit
+        }
+    }
+
+    // Shadow fade with sun intensity - stronger shadows during day
+    let shadow_fade = smoothstep(0.0, 0.2, sun_intensity);
+    // Make shadow contrast stronger (0 = dark shadow, 1 = fully lit)
+    let shadow_contrast = shadow * shadow;  // Square for more contrast
+    let final_shadow = mix(1.0, shadow_contrast, shadow_fade);
+
+    // Face-based brightness
+    var face_brightness = 0.8;
+    if (in.normal.y > 0.5) {
+        face_brightness = 1.0;
+    } else if (in.normal.y < -0.5) {
+        face_brightness = 0.5;
+    } else if (abs(in.normal.x) > 0.5) {
+        face_brightness = 0.7;
+    } else {
+        face_brightness = 0.85;
+    }
+
+    // Direct lighting
+    let sun_ndotl = max(dot(in.normal, sun_dir), 0.0);
+    let sun_contribution = sun_color * sun_ndotl * 0.7 * sun_intensity * final_shadow;
+
+    let moon_ndotl = max(dot(in.normal, moon_dir), 0.0);
+    let moon_contribution = moon_color * moon_ndotl * 0.25 * moon_intensity;
+
+    // Voxel Cone Traced GI - disabled for now, too expensive
+    // TODO: Re-enable once shadows are stable
+    let gi = vec3<f32>(0.0);
+
+    // Voxel AO - disabled for now
+    let voxel_ao = 1.0;
+
+    // Per-vertex AO
+    let ao_raw = in.ao;
+    let ao_smooth = smoothstep(0.0, 1.0, ao_raw);
+    let ao_curved = smoothstep(0.0, 1.0, ao_smooth);
+    let vertex_ao = mix(0.65, 1.0, ao_curved);
+
+    // Combined AO
+    let combined_ao = vertex_ao * voxel_ao;
+
+    // Block light (torches)
+    let block_light_level = in.block_light;
+    let block_light_curve = pow(block_light_level, 1.4);
+    let torch_color = vec3<f32>(1.0, 0.85, 0.6);
+    let night_boost = 1.0 + (1.0 - sun_intensity) * 0.5;
+    let block_light_contribution = torch_color * block_light_curve * 0.9 * night_boost;
+
+    // Combine all lighting
+    // Apply shadow to reduce TOTAL natural light, not just sun contribution
+    let sky_contrib = ambient_base * 0.2 * (0.2 + sun_intensity * 0.8);
+    let natural_light_raw = ambient_base + sun_contribution + moon_contribution + sky_contrib + gi * 0.3;
+
+    // Shadow affects the whole natural light result (stronger effect)
+    let shadow_multiplier = mix(0.3, 1.0, final_shadow);  // Even in full shadow, get 30% light
+    let natural_light = natural_light_raw * shadow_multiplier;
+    let natural_lit = natural_light * face_brightness;
+
+    let total_light = (natural_lit + block_light_contribution) * combined_ao;
+    var final_color = tex_color.rgb * total_light;
+
+    // === FOG ===
+    let dist = length(camera.view_pos.xyz - in.world_position);
+    let is_underwater = camera.anim_data.w > 0.5;
+
+    var fog_factor: f32;
+    var fog_color: vec3<f32>;
+
+    if (is_underwater) {
+        let underwater_density = 0.08;
+        fog_factor = 1.0 - exp(-dist * underwater_density);
+        fog_factor = clamp(fog_factor, 0.0, 0.95);
+        fog_color = vec3<f32>(0.1, 0.3, 0.4);
+    } else {
+        let water_level = 32.0;
+        let fog_ceiling = 55.0;
+        let frag_height = in.world_position.y;
+
+        let height_factor = 1.0 - smoothstep(water_level, fog_ceiling, frag_height);
+        let height_influence = height_factor * height_factor * (3.0 - 2.0 * height_factor);
+
+        let base_fog_density = 0.00005;
+        let valley_fog_density = 0.0003;
+        let effective_density = mix(base_fog_density, valley_fog_density, height_influence);
+
+        let time_of_day = voxel_volume.time_of_day.x;
+        let is_night = smoothstep(0.25, 0.0, time_of_day) + smoothstep(0.75, 1.0, time_of_day);
+        let fog_start_dist = mix(80.0, 35.0, is_night);
+        let dist_factor = smoothstep(fog_start_dist, fog_start_dist + 150.0, dist);
+
+        fog_factor = (1.0 - exp(-dist * effective_density)) * dist_factor;
+        let max_fog = mix(0.03, 0.15, height_influence);
+        fog_factor = clamp(fog_factor, 0.0, max_fog);
+
+        let mist_color = vec3<f32>(0.78, 0.83, 0.90);
+        let haze_color = vec3<f32>(0.82, 0.85, 0.90);
+        fog_color = mix(haze_color, mist_color, height_influence);
+    }
+
+    final_color = mix(final_color, fog_color, fog_factor);
+
+    return vec4<f32>(final_color, tex_color.a * in.fade_alpha);
+}
+"#;
+
+/// Create voxel-lit chunk pipeline (uses DDA ray marching + VCT instead of shadow maps)
+pub fn create_voxel_lit_chunk_pipeline(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    camera_bind_group_layout: &wgpu::BindGroupLayout,
+    texture_bind_group_layout: &wgpu::BindGroupLayout,
+    light_bind_group_layout: &wgpu::BindGroupLayout,
+    voxel_bind_group_layout: &wgpu::BindGroupLayout,
+) -> wgpu::RenderPipeline {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("Voxel-Lit Chunk Shader"),
+        source: wgpu::ShaderSource::Wgsl(VOXEL_LIT_CHUNK_SHADER.into()),
+    });
+
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("Voxel-Lit Chunk Pipeline Layout"),
+        bind_group_layouts: &[
+            camera_bind_group_layout,
+            texture_bind_group_layout,
+            light_bind_group_layout,  // Reuse light uniform for moon/etc
+            voxel_bind_group_layout,  // Voxel GI system
+        ],
+        push_constant_ranges: &[],
+    });
+
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("Voxel-Lit Chunk Pipeline"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: "vs_main",
+            buffers: &[ChunkVertex::desc()],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: "fs_main",
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: Some(wgpu::Face::Back),
+            unclipped_depth: false,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            conservative: false,
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth32Float,
+            depth_write_enabled: true,
+            depth_compare: wgpu::CompareFunction::Less,
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState {
+            count: 1,
+            mask: !0,
+            alpha_to_coverage_enabled: false,
+        },
+        multiview: None,
+    })
+}
+
 /// Create shadow pass pipeline (depth-only, renders from light perspective)
 pub fn create_shadow_pipeline(
     device: &wgpu::Device,

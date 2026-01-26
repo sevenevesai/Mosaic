@@ -1,0 +1,253 @@
+This is a fantastic question for a Rust voxel engine. Let me break down what I'd consider the optimal modern stack for each system, balancing quality, performance, and practicality.
+
+## Core Rendering Stack
+
+**Graphics API:** `wgpu` — it's Rust-native, abstracts Vulkan/Metal/DX12/WebGPU, and gives you compute shaders which are essential for voxels. If you want maximum control, `ash` (raw Vulkan) is an option but adds complexity.
+
+**Shader Language:** WGSL (for wgpu) or GLSL compiled via `naga`. Consider `rust-gpu` if you want to write shaders in Rust itself.
+
+---
+
+## Data Structure (Foundation of Everything)
+
+For voxels specifically, your spatial structure determines everything:
+
+| Structure | Pros | Cons |
+|-----------|------|------|
+| **Sparse Voxel Octree (SVO)** | Memory efficient, natural LOD, good for ray tracing | Pointer chasing, cache unfriendly |
+| **Sparse Voxel DAG** | Extreme compression (10-100x) | Read-only, complex to update |
+| **Brick Maps** (8³ or 16³ bricks in a hash map) | Cache friendly, easy updates | Less compression |
+| **Flat chunks + RLE** | Simple, good for Minecraft-style | Less efficient for sparse data |
+
+**My recommendation:** **Brick Map with SVO indexing** — use small dense bricks (8³) organized in a sparse octree. This gives you cache coherency for traversal while maintaining sparsity. NVIDIA's GVDB and OpenVDB use similar approaches.
+
+---
+
+## Shadows
+
+For a voxel engine, you have unique advantages:
+
+### Primary Approach: **Voxel Ray Marching**
+- Trace rays directly through your voxel structure
+- Use DDA (Digital Differential Analyzer) algorithm — it's perfectly suited for regular grids
+- Extremely accurate, no shadow map artifacts
+- Can be done in compute shader
+
+```
+// Pseudo-code concept
+while (!hit && in_bounds) {
+    step along ray using DDA
+    sample voxel at current position
+    if (voxel.solid) hit = true;
+}
+```
+
+### For Soft Shadows:
+- **Cone tracing** through voxels (same structure you'll use for GI)
+- Or cast multiple jittered rays and temporally accumulate
+
+### For Distant/Sun Shadows:
+- **Cascaded Shadow Maps** as a fallback for distant terrain where ray marching would be expensive
+- Or use a **heightmap-based shadow** approach for the sun (very fast for outdoor voxel terrain)
+
+---
+
+## Global Illumination
+
+This is where voxel engines can truly shine. You have the voxelized scene *already* — most GI techniques have to voxelize first!
+
+### **My Top Pick: Voxel Cone Tracing (VCT)**
+
+Why it's perfect for voxels:
+- Your world IS the voxel structure
+- No separate voxelization pass needed
+- Gives you diffuse GI, specular reflections, and AO in one system
+- Naturally handles light bouncing in caves
+
+**How it works:**
+1. Build a mip-chain of your voxel data (radiance + opacity)
+2. From each surface point, trace cones in hemisphere directions
+3. Sample progressively coarser mip levels as cone expands
+4. Accumulate color/occlusion
+
+**Optimization:** Pre-filter your voxel radiance into an octree or 3D texture mip-chain. Only needs updating when geometry or lights change.
+
+### Alternative: **Light Propagation Volumes (LPV)**
+
+Good if you want something simpler:
+- Propagate light through a 3D grid using spherical harmonics
+- Iterative flood-fill (4-6 iterations usually enough)
+- Very cache-friendly on GPU
+- Less accurate but very fast
+
+### Novel/Hybrid Approach:
+
+**Surfel-based GI + Voxel Propagation:**
+- Place surfels (surface elements) on voxel faces
+- Trace rays between surfels for light transport
+- Use temporal accumulation across frames
+- Similar to Lumen's approach but simpler due to voxel regularity
+
+---
+
+## Light Propagation in Caves / Flood Fill Lighting
+
+This is where voxel engines can do something special:
+
+### **GPU Flood Fill with Attenuation**
+
+```rust
+// Concept: BFS/flood fill on GPU via compute shader
+// Each voxel stores: light_level, light_color
+
+for each iteration:
+    for each lit voxel:
+        propagate to 6 neighbors
+        attenuate by distance and material absorption
+        colored materials tint the light
+```
+
+**Key optimizations:**
+- Use a **wavefront approach** — only process voxels at the "frontier"
+- Store light as RGBE or R11G11B10 for HDR in compact form
+- Use **temporal spreading** — don't update all chunks every frame
+- **Dirty flagging** — only recalculate affected regions
+
+### For Sunlight:
+- Vertical flood-fill from sky downward (very fast)
+- Separate "skylight" channel that doesn't attenuate as quickly
+
+---
+
+## Ambient Occlusion
+
+### **Precomputed Per-Vertex AO** (cheapest, very effective)
+
+For each voxel face vertex, sample the 3-4 adjacent voxels:
+```rust
+// Corner AO calculation
+ao = (side1 + side2 + corner) / 3.0;
+// Interpolate across face for smooth gradients
+```
+
+This is essentially free at runtime — calculated during mesh generation.
+
+### **Screen-Space AO (SSAO/GTAO)** as a polish layer
+
+For additional detail:
+- **GTAO (Ground Truth AO)** — best quality-to-cost ratio
+- Runs on G-buffer (depth + normals)
+- Adds fine detail that per-vertex AO misses
+- ~0.5-1ms on modern GPUs
+
+### **Voxel-Based AO** (most accurate for voxels)
+
+- Cone trace or ray march short distances into voxel structure
+- Can be baked or computed per-frame
+- Naturally handles all geometry
+
+---
+
+## Light Through Translucent Materials
+
+### Colored Glass / Stained Glass:
+
+**Beer-Lambert absorption:**
+```rust
+transmitted_color = light_color * exp(-absorption_coefficient * thickness);
+```
+
+When ray marching, accumulate absorption through transparent voxels. Each material has an absorption color.
+
+### Subsurface Scattering (for wax, leaves, etc.):
+
+**Simplified approach:**
+- Trace thickness of object from light's perspective
+- Blur the shadow map / light samples
+- Tint by material's scatter color
+
+For voxels, you can pre-calculate "thickness" for each surface voxel during meshing.
+
+---
+
+## Reflections
+
+### For Rough/Diffuse: 
+Voxel cone tracing handles this naturally (wide cones = blurry reflections)
+
+### For Sharp/Mirror:
+- **Screen-Space Reflections (SSR)** for nearby geometry
+- Fall back to cone tracing or cube probes for off-screen
+
+### Hybrid Approach:
+```
+reflection = lerp(ssr_result, cone_trace_result, roughness);
+// With fallback chain: SSR → Cone Trace → Sky
+```
+
+---
+
+## Putting It All Together — My Recommended Stack
+
+```
+┌─────────────────────────────────────────────────┐
+│           RENDERING PIPELINE                     │
+├─────────────────────────────────────────────────┤
+│  DATA: Brick Map (8³) + SVO Index               │
+│        - Cache friendly                          │
+│        - Fast updates                            │
+│        - Good for tracing                        │
+├─────────────────────────────────────────────────┤
+│  DIRECT LIGHT:                                   │
+│    Sun → Voxel ray march (DDA) or heightmap     │
+│    Point/Spot → GPU flood fill propagation      │
+├─────────────────────────────────────────────────┤
+│  INDIRECT LIGHT (GI):                           │
+│    Voxel Cone Tracing (your world IS voxels)    │
+│    - Diffuse: 5-6 wide cones in hemisphere      │
+│    - Specular: 1 narrow cone in reflect dir     │
+├─────────────────────────────────────────────────┤
+│  AMBIENT OCCLUSION:                             │
+│    Per-vertex AO (free, baked in mesh)          │
+│    + GTAO screen-space pass (polish)            │
+├─────────────────────────────────────────────────┤
+│  SHADOWS:                                        │
+│    Primary: Ray march through voxel structure   │
+│    Soft: Temporal accumulation of jittered rays │
+├─────────────────────────────────────────────────┤
+│  TRANSLUCENCY:                                   │
+│    Beer-Lambert during ray march                │
+│    Accumulate color absorption                   │
+├─────────────────────────────────────────────────┤
+│  REFLECTIONS:                                    │
+│    SSR → VCT fallback → Sky                     │
+└─────────────────────────────────────────────────┘
+```
+
+---
+
+## Performance Budget Estimate (1080p, RTX 3070 class)
+
+| System | Cost | Notes |
+|--------|------|-------|
+| G-Buffer | 0.5ms | Voxel mesh rendering |
+| Direct shadows | 0.5-1ms | Ray march or heightmap |
+| Flood fill update | 0.2ms | Amortized, incremental |
+| VCT GI | 2-3ms | Can use half-res + upscale |
+| GTAO | 0.5ms | Optional polish |
+| SSR | 0.5ms | Half-res with upscale |
+| **Total** | **~5-6ms** | Leaves room for gameplay |
+
+---
+
+## Novel Ideas Worth Exploring
+
+1. **Radiance Cascades** — recent technique that's particularly well-suited to 2D/2.5D, could be adapted for voxel slices
+
+2. **Neural Radiance Caching** — train a tiny neural network to predict indirect lighting at runtime (experimental but promising)
+
+3. **Temporal Reservoir Resampling (ReSTIR)** — dramatically improves ray tracing quality with few rays, very applicable to voxel GI
+
+4. **SDF Hybrid** — generate signed distance fields from voxels for smoother cone tracing and soft shadows
+
+Would you like me to dive deeper into any of these systems? I can provide more detailed implementation approaches for whichever aspect interests you most.

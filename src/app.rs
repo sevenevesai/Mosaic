@@ -152,6 +152,10 @@ impl App {
                                 tracing::info!("Day/night cycle speed: {}x", speed);
                             }
                         }
+                        KeyCode::KeyV if pressed => {
+                            // Toggle voxel-based lighting (DDA shadows + VCT)
+                            self.renderer.toggle_voxel_lighting();
+                        }
                         _ => {
                             self.player.handle_key(key_code, pressed);
                         }

@@ -618,6 +618,12 @@ impl WorldManager {
         self.water_meshes.values().map(|m| m.vertices.len() as u64).sum()
     }
 
+    /// Get access to the chunk storage for voxel GI system
+    /// Returns a clone of the Arc to avoid holding the lock
+    pub fn chunks(&self) -> Arc<RwLock<AHashMap<ChunkPos, Arc<Chunk>>>> {
+        Arc::clone(&self.chunks)
+    }
+
     /// Get a block at world coordinates
     pub fn get_block(&self, x: i32, y: i32, z: i32) -> Option<Block> {
         let chunk_pos = ChunkPos {

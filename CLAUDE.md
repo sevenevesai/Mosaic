@@ -9,7 +9,7 @@ cargo build --release
 ./target/release/neolith.exe
 ```
 
-**Controls:** WASD move, Space jump/fly-up, Shift fly-down, Ctrl sprint, F fly mode, F3 debug, T day/night speed, 1-8 blocks (8=torch), LMB break, RMB place, P perf log, Esc release mouse.
+**Controls:** WASD move, Space jump/fly-up, Shift fly-down, Ctrl sprint, F fly mode, F3 debug, T day/night speed, V toggle voxel lighting, 1-8 blocks (8=torch), LMB break, RMB place, P perf log, Esc release mouse.
 
 ## Commands
 
@@ -28,7 +28,8 @@ src/
 ├── lib.rs           # Constants: RENDER_DISTANCE, LOD thresholds, physics
 ├── renderer/
 │   ├── mod.rs       # GPU state, render passes, day/night cycle
-│   ├── pipeline.rs  # WGSL shaders (chunk: 764 LOC, water: 301 LOC)
+│   ├── pipeline.rs  # WGSL shaders (chunk, voxel-lit, water)
+│   ├── voxel_gi.rs  # Voxel GI: 256³ volume, DDA shadows, VCT
 │   └── chunk_pool.rs # MDI mega-buffers
 ├── world/
 │   ├── mod.rs       # WorldManager, 8 worker threads, chunk lifecycle
@@ -68,25 +69,27 @@ WATER_SEA_LEVEL: 32      // Y level for water generation
 - **Region file corruption** - Always use zstd compression; raw writes can corrupt sector alignment
 - **Chunk fade-in** - Alpha-based; ensure blend state enabled in pipeline
 
-## Known Issues (2026-01-26)
+## Lighting Systems
 
-### Shadow System - Active Investigation
-See `.claude/rules/shadow-system-analysis.md` for full details.
+The engine supports two lighting modes (toggle with V key):
 
-**Symptoms:**
-- Shadows toggle/disappear when walking to certain positions
-- Tree shadows vanish when standing under them
-- Trees at screen edges lose shadows entirely
-- Cave shadows appear as "tube around FOV"
+### Voxel-Based Lighting (NEW - Default)
+Modern approach using `renderer/voxel_gi.rs`:
+- **DDA Ray Marching Shadows**: Traces rays through 256³ voxel volume
+- **Voxel Cone Tracing (VCT)**: 5-cone diffuse GI from radiance volume
+- **Voxel AO**: Short-range cone traces for ambient occlusion
+- No shadow map artifacts, infinite shadow range within volume
 
-**Root Cause:** Shadow map is player-centric with limited coverage (±150 blocks) vs render distance (384 blocks). Faces outside shadow map receive full lighting, appearing "glowing."
+**Key files:**
+- `renderer/voxel_gi.rs` - VoxelGI struct, 3D texture management
+- `renderer/voxel_lighting.wgsl` - DDA + VCT shader functions
+- `renderer/pipeline.rs:VOXEL_LIT_CHUNK_SHADER` - Integrated chunk shader
 
-**Key locations:**
-- `renderer/mod.rs:1314-1347` - Shadow matrix calculation
-- `renderer/mod.rs:729-739` - Shadow culling bounds
-- `renderer/pipeline.rs:430-435` - Edge softening (too aggressive)
-
-**Recommended fix:** View-frustum aligned shadow map + increased coverage. See analysis doc.
+### Legacy Shadow Maps (Fallback)
+Traditional shadow mapping for comparison:
+- Shadow map coverage: ±280 blocks from camera
+- PCF Vogel disk sampling (16 taps)
+- Known issues documented in `.claude/rules/shadow-system-analysis.md`
 
 ## Common Tasks
 

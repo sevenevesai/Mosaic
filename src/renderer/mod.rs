@@ -7,11 +7,13 @@ mod chunk_pool;
 mod debug_overlay;
 mod pipeline;
 mod texture;
+pub mod voxel_gi;
 
 pub use camera::{Camera, Frustum};
 pub use chunk_pool::ChunkPool;
 pub use debug_overlay::{DebugOverlay, DebugMetrics};
 pub use texture::TextureAtlas;
+pub use voxel_gi::VoxelGI;
 
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
@@ -21,7 +23,7 @@ use crate::utils::gpu_profiler::GpuProfiler;
 use crate::utils::profiler::FrameProfiler;
 use crate::world::WorldManager;
 
-use pipeline::{UiVertex, LineVertex, SHADOW_MAP_SIZE, WaterUniform, create_water_bind_group_layout, create_water_pipeline};
+use pipeline::{UiVertex, LineVertex, SHADOW_MAP_SIZE, WaterUniform, create_water_bind_group_layout, create_water_pipeline, create_voxel_lit_chunk_pipeline};
 use glam::{Vec3, Mat4};
 
 /// Render statistics for the current frame
@@ -48,6 +50,10 @@ pub struct Renderer {
 
     // Pipelines
     chunk_pipeline: wgpu::RenderPipeline,
+    /// Voxel-lit chunk pipeline (uses DDA ray marching + VCT)
+    voxel_lit_chunk_pipeline: wgpu::RenderPipeline,
+    /// Light-only bind group (for voxel shader which doesn't use shadow map)
+    light_only_bind_group: wgpu::BindGroup,
 
     // Bind groups
     #[allow(dead_code)]
@@ -106,6 +112,12 @@ pub struct Renderer {
     // Day/night cycle
     time_of_day: f32,      // 0.0 = midnight, 0.25 = dawn, 0.5 = noon, 0.75 = dusk
     cycle_speed: f32,      // Multiplier for cycle speed (1.0 = 10 min day, higher = faster)
+
+    // Voxel-based Global Illumination system
+    // Replaces shadow maps with DDA ray marching, adds VCT for indirect lighting
+    voxel_gi: VoxelGI,
+    /// Whether to use the new voxel-based lighting (true) or legacy shadow maps (false)
+    use_voxel_lighting: bool,
 }
 
 impl Renderer {
@@ -429,6 +441,45 @@ impl Renderer {
             &shadow_bind_group_layout,
         );
 
+        // === VOXEL GI SYSTEM SETUP ===
+        // Light-only bind group layout (for voxel shader - no shadow texture)
+        let light_only_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Light Only Bind Group Layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+
+        let light_only_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Light Only Bind Group"),
+            layout: &light_only_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: light_buffer.as_entire_binding(),
+            }],
+        });
+
+        // Create voxel GI system first (needed for bind group layout)
+        let voxel_gi = VoxelGI::new(&device);
+
+        // Create voxel-lit chunk pipeline
+        let voxel_lit_chunk_pipeline = create_voxel_lit_chunk_pipeline(
+            &device,
+            surface_format,
+            &camera_bind_group_layout,
+            &texture_bind_group_layout,
+            &light_only_bind_group_layout,
+            voxel_gi.bind_group_layout(),
+        );
+        tracing::info!("Voxel GI system initialized (256^3 volume, DDA shadows + VCT)");
+
         // Create UI pipeline for crosshair
         let ui_pipeline = pipeline::create_ui_pipeline(&device, surface_format);
 
@@ -536,6 +587,8 @@ impl Renderer {
             config,
             size,
             chunk_pipeline,
+            voxel_lit_chunk_pipeline,
+            light_only_bind_group,
             camera_bind_group_layout,
             camera_buffer,
             camera_bind_group,
@@ -565,6 +618,8 @@ impl Renderer {
             start_time: std::time::Instant::now(),
             time_of_day: 0.35,   // Start at mid-morning
             cycle_speed: 10.0,   // 10x speed for testing (1 min = 1 day cycle)
+            voxel_gi,
+            use_voxel_lighting: true,  // Enable new voxel-based lighting by default
         }
     }
 
@@ -585,6 +640,19 @@ impl Renderer {
 
     pub fn is_debug_overlay_enabled(&self) -> bool {
         self.debug_overlay.is_enabled()
+    }
+
+    /// Toggle between voxel-based lighting and legacy shadow maps
+    /// Returns true if voxel lighting is now enabled
+    pub fn toggle_voxel_lighting(&mut self) -> bool {
+        self.use_voxel_lighting = !self.use_voxel_lighting;
+        tracing::info!("Voxel lighting: {}", if self.use_voxel_lighting { "ENABLED (DDA shadows + VCT)" } else { "DISABLED (shadow maps)" });
+        self.use_voxel_lighting
+    }
+
+    /// Check if voxel lighting is enabled
+    pub fn is_voxel_lighting_enabled(&self) -> bool {
+        self.use_voxel_lighting
     }
 
     /// Update the day/night cycle time
@@ -685,6 +753,7 @@ impl Renderer {
 
         // Update light uniform with day/night cycle (center shadow map on camera)
         let light_uniform = LightUniform::from_camera_position_and_time(camera.position, self.time_of_day);
+        let cycle = DayNightCycle::from_time(self.time_of_day);
         self.queue
             .write_buffer(&self.light_buffer, 0, bytemuck::cast_slice(&[light_uniform]));
 
@@ -692,6 +761,21 @@ impl Renderer {
         let sky_uniform = SkyUniform::from_camera_and_time(camera, self.time_of_day);
         self.queue
             .write_buffer(&self.sky_buffer, 0, bytemuck::cast_slice(&[sky_uniform]));
+
+        // === VOXEL GI UPDATE ===
+        // Update the voxel volume texture from chunk data (replaces shadow mapping)
+        if self.use_voxel_lighting {
+            let chunks = world.chunks();
+            self.voxel_gi.update_from_chunks(
+                &self.queue,
+                camera.position,
+                &chunks,
+                cycle.sun_direction,
+                cycle.sun_color,
+                cycle.ambient,
+                self.time_of_day,
+            );
+        }
 
         // Build frustum for culling
         let frustum = Frustum::from_view_proj(camera.view_projection_matrix());
@@ -741,9 +825,9 @@ impl Renderer {
 
         let shadow_start = std::time::Instant::now();
 
-        // === SHADOW PASS ===
-        // Render scene from light's perspective to shadow map
-        {
+        // === SHADOW PASS (only when using legacy shadow maps) ===
+        // Skip when using voxel lighting - it uses DDA ray marching instead
+        if !self.use_voxel_lighting {
             let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Shadow Pass"),
                 color_attachments: &[],  // No color output
@@ -851,11 +935,21 @@ impl Renderer {
             render_pass.set_bind_group(0, &self.sky_bind_group, &[]);
             render_pass.draw(0..3, 0..1);  // Fullscreen triangle
 
-            // Switch to chunk pipeline
-            render_pass.set_pipeline(&self.chunk_pipeline);
-            render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
-            render_pass.set_bind_group(1, &self.texture_bind_group, &[]);
-            render_pass.set_bind_group(2, &self.shadow_bind_group, &[]);
+            // Switch to appropriate chunk pipeline based on lighting mode
+            if self.use_voxel_lighting {
+                // Voxel-lit pipeline: DDA ray marching shadows + VCT for GI
+                render_pass.set_pipeline(&self.voxel_lit_chunk_pipeline);
+                render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                render_pass.set_bind_group(1, &self.texture_bind_group, &[]);
+                render_pass.set_bind_group(2, &self.light_only_bind_group, &[]);
+                render_pass.set_bind_group(3, self.voxel_gi.bind_group(), &[]);
+            } else {
+                // Legacy pipeline: shadow maps
+                render_pass.set_pipeline(&self.chunk_pipeline);
+                render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                render_pass.set_bind_group(1, &self.texture_bind_group, &[]);
+                render_pass.set_bind_group(2, &self.shadow_bind_group, &[]);
+            }
 
             // Build list of visible chunk positions (frustum culled)
             // Separate chunks that are in the pool vs need individual draws
