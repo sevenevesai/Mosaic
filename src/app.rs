@@ -289,7 +289,8 @@ impl App {
 
         // Render
         self.profiler.begin_section("render");
-        match self.renderer.render(&self.player.camera, &self.world, &self.profiler, target_block, &debug_metrics) {
+        let held_light = self.player.selected_block().light_emission();
+        match self.renderer.render(&self.player.camera, &self.world, &self.profiler, target_block, &debug_metrics, held_light) {
             Ok(_) => {
                 // Update profiler with render stats
                 self.profiler.update_render_stats(self.renderer.stats.clone());

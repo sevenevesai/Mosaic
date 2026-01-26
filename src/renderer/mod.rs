@@ -723,6 +723,7 @@ impl Renderer {
         _profiler: &FrameProfiler,
         target_block: Option<[i32; 3]>,
         debug_metrics: &DebugMetrics,
+        held_light_emission: u8,  // Light emission of held item (0 = none, 14 = torch)
     ) -> Result<(), wgpu::SurfaceError> {
         // Sync meshes to chunk pool for MDI rendering
         if self.chunk_pool.mdi_available {
@@ -779,6 +780,7 @@ impl Renderer {
                 cycle.sun_color,
                 cycle.ambient,
                 self.time_of_day,
+                held_light_emission,  // Player's held torch light
             );
         }
 

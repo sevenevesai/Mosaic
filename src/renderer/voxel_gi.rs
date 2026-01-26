@@ -87,8 +87,8 @@ pub struct VoxelVolumeUniform {
     pub ambient_color: [f32; 4],
     /// Time of day for lighting calculations (vec4 for alignment)
     pub time_of_day: [f32; 4],  // x = time, yzw = padding
-    /// Additional padding to reach 128 bytes
-    pub _padding: [f32; 4],
+    /// Player held light: [x, y, z, intensity (0-15 normalized to 0-1)]
+    pub player_light: [f32; 4],
 }
 
 impl Default for VoxelVolumeUniform {
@@ -101,7 +101,7 @@ impl Default for VoxelVolumeUniform {
             sun_color: [1.0, 0.95, 0.85, 1.0],
             ambient_color: [0.3, 0.35, 0.4, 1.0],
             time_of_day: [0.5, 0.0, 0.0, 0.0],
-            _padding: [0.0; 4],
+            player_light: [0.0; 4],  // No held light by default
         }
     }
 }
@@ -403,6 +403,7 @@ impl VoxelGI {
         sun_color: Vec3,
         ambient_color: Vec3,
         time_of_day: f32,
+        held_light_emission: u8,  // Light emission of held item (0 = none, 14 = torch)
     ) {
         // Snap camera position to voxel grid to prevent jitter
         let snapped_center = Vec3::new(
@@ -421,7 +422,8 @@ impl VoxelGI {
         if !needs_refresh {
             // IMPORTANT: Use last_update_center (where data IS), not snapped_center (where camera IS)
             // Otherwise shader thinks volume is at wrong position
-            self.update_uniform(queue, self.last_update_center, sun_direction, sun_color, ambient_color, time_of_day);
+            // But always update player light position (camera_pos) for held torch
+            self.update_uniform(queue, self.last_update_center, sun_direction, sun_color, ambient_color, time_of_day, camera_pos, held_light_emission);
             return;
         }
 
@@ -438,8 +440,8 @@ impl VoxelGI {
         self.volume_center = snapped_center;
         self.last_update_center = snapped_center;
 
-        // Update uniform buffer
-        self.update_uniform(queue, snapped_center, sun_direction, sun_color, ambient_color, time_of_day);
+        // Update uniform buffer (includes player held light position)
+        self.update_uniform(queue, snapped_center, sun_direction, sun_color, ambient_color, time_of_day, camera_pos, held_light_emission);
 
         // Time the voxel cache fill (includes light propagation)
         let fill_start = std::time::Instant::now();
@@ -489,6 +491,8 @@ impl VoxelGI {
         sun_color: Vec3,
         ambient_color: Vec3,
         time_of_day: f32,
+        player_pos: Vec3,
+        held_light_emission: u8,
     ) {
         let uniform = VoxelVolumeUniform {
             volume_center: [center.x, center.y, center.z, 0.0],
@@ -499,7 +503,7 @@ impl VoxelGI {
             sun_color: [sun_color.x, sun_color.y, sun_color.z, 1.0],
             ambient_color: [ambient_color.x, ambient_color.y, ambient_color.z, 1.0],
             time_of_day: [time_of_day, 0.0, 0.0, 0.0],
-            _padding: [0.0; 4],
+            player_light: [player_pos.x, player_pos.y, player_pos.z, held_light_emission as f32 / 15.0],
         };
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniform]));
     }

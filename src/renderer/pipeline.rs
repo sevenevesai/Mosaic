@@ -824,7 +824,7 @@ struct VoxelVolumeUniform {
     sun_color: vec4<f32>,
     ambient_color: vec4<f32>,
     time_of_day: vec4<f32>,  // x = time, yzw = padding
-    _padding: vec4<f32>,
+    player_light: vec4<f32>, // xyz = position, w = intensity (0-1, where 1 = 15 emission)
 };
 
 @group(0) @binding(0)
@@ -1158,6 +1158,32 @@ fn trace_sky_occlusion(world_pos: vec3<f32>) -> f32 {
 // VOXEL-BASED TORCH/EMISSIVE LIGHTING
 // ═══════════════════════════════════════════════════════════════════════════
 
+// Calculate light from player's held torch
+fn calculate_held_light(world_pos: vec3<f32>) -> vec3<f32> {
+    let torch_color = vec3<f32>(1.0, 0.85, 0.6);
+    let player_pos = voxel_volume.player_light.xyz;
+    let intensity = voxel_volume.player_light.w;
+
+    if (intensity <= 0.0) {
+        return vec3<f32>(0.0);
+    }
+
+    // Distance-based falloff with extended range
+    let dist = distance(world_pos, player_pos);
+    let max_radius = intensity * 24.0;  // Extended range: ~24 blocks for full torch
+
+    if (dist >= max_radius) {
+        return vec3<f32>(0.0);
+    }
+
+    // Smoother cubic falloff for longer trail
+    let falloff = 1.0 - (dist / max_radius);
+    let light_strength = falloff * falloff * falloff * intensity;
+
+    // Brighter base intensity
+    return torch_color * light_strength * 2.5;
+}
+
 fn sample_torch_light(world_pos: vec3<f32>) -> vec3<f32> {
     // Sample pre-propagated light from the voxel volume
     // Light is propagated on CPU and stored in the A channel
@@ -1298,9 +1324,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Sample emissive light from nearby voxels in the volume
     let voxel_torch_light = sample_torch_light(in.world_position);
 
+    // Add player's held torch light (dynamic, follows player)
+    let held_torch_light = calculate_held_light(in.world_position);
+
     // Night boost: torch light is more prominent when sun is down
     let night_boost = 1.0 + (1.0 - sun_intensity) * 0.5;
-    let block_light_contribution = voxel_torch_light * night_boost;
+    let block_light_contribution = (voxel_torch_light + held_torch_light) * night_boost;
 
     // Combine all lighting
     // Sky access affects ambient - caves get much less ambient light

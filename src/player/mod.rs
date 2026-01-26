@@ -103,6 +103,11 @@ impl Player {
         self.camera.position
     }
 
+    /// Get the currently selected block (for placement and held light)
+    pub fn selected_block(&self) -> Block {
+        self.selected_block
+    }
+
     /// Get horizontal movement speed (for footstep audio)
     pub fn horizontal_speed(&self) -> f32 {
         (self.velocity.x * self.velocity.x + self.velocity.z * self.velocity.z).sqrt()
