@@ -725,8 +725,9 @@ impl Renderer {
         let mut shadow_chunks_culled = 0u32;
 
         // Calculate shadow frustum bounds for culling
-        // Shadow map covers ±150 units from camera in X/Z plane
-        let shadow_size = 150.0f32;
+        // Shadow map covers ±280 units from camera in X/Z plane
+        // This covers ~17 chunks which better matches typical view distance
+        let shadow_size = 280.0f32;
         let shadow_min = Vec3::new(
             camera.position.x - shadow_size,
             -100.0, // Include all terrain heights
@@ -1319,9 +1320,10 @@ impl LightUniform {
         let shadow_dir = cycle.sun_direction;
 
         // Create orthographic projection for shadow map
+        // Coverage of 280 units matches ~17 chunks for better shadow stability
         // Larger coverage reduces edge artifacts at cost of shadow resolution
-        let shadow_distance = 120.0;
-        let shadow_size = 150.0;
+        let shadow_distance = 200.0;  // Increased for larger coverage
+        let shadow_size = 280.0;
 
         // === SHADOW MAP STABILIZATION ===
         let texels_per_unit = SHADOW_MAP_SIZE as f32 / (shadow_size * 2.0);

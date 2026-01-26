@@ -426,9 +426,10 @@ fn calculate_shadow(shadow_pos: vec4<f32>, normal: vec3<f32>, light_dir: vec3<f3
     // ═══════════════════════════════════════════════════════════════════════
     // SOFT EDGE HANDLING
     // Prevents harsh shadow map boundary artifacts
+    // With larger shadow coverage (280 units), we can use tighter edge fading
     // ═══════════════════════════════════════════════════════════════════════
-    let edge_fade_start = 0.03;  // Start fading at 3% from edge
-    let edge_fade_end = 0.12;    // Fully faded at 12% from edge
+    let edge_fade_start = 0.005;  // Start fading at 0.5% from edge (was 3%)
+    let edge_fade_end = 0.025;    // Fully faded at 2.5% from edge (was 12%)
     let edge_x = min(shadow_uv.x, 1.0 - shadow_uv.x);
     let edge_y = min(shadow_uv.y, 1.0 - shadow_uv.y);
     let edge_dist = min(edge_x, edge_y);

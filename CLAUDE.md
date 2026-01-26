@@ -68,6 +68,26 @@ WATER_SEA_LEVEL: 32      // Y level for water generation
 - **Region file corruption** - Always use zstd compression; raw writes can corrupt sector alignment
 - **Chunk fade-in** - Alpha-based; ensure blend state enabled in pipeline
 
+## Known Issues (2026-01-26)
+
+### Shadow System - Active Investigation
+See `.claude/rules/shadow-system-analysis.md` for full details.
+
+**Symptoms:**
+- Shadows toggle/disappear when walking to certain positions
+- Tree shadows vanish when standing under them
+- Trees at screen edges lose shadows entirely
+- Cave shadows appear as "tube around FOV"
+
+**Root Cause:** Shadow map is player-centric with limited coverage (±150 blocks) vs render distance (384 blocks). Faces outside shadow map receive full lighting, appearing "glowing."
+
+**Key locations:**
+- `renderer/mod.rs:1314-1347` - Shadow matrix calculation
+- `renderer/mod.rs:729-739` - Shadow culling bounds
+- `renderer/pipeline.rs:430-435` - Edge softening (too aggressive)
+
+**Recommended fix:** View-frustum aligned shadow map + increased coverage. See analysis doc.
+
 ## Common Tasks
 
 **Add Block Type:**
