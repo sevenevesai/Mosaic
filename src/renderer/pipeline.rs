@@ -485,22 +485,26 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Get the base tile corner from UV (tells us WHICH texture to use)
     let tile_base = floor(in.uv / tile_size) * tile_size;
 
-    // Use world position for tiling (tells us WHERE in the texture)
-    // fract gives us 0-1 position within each block, aligned to world grid
-    let world_frac = fract(in.world_position);
-
-    // Select the right 2D coordinates based on face normal (triplanar-lite)
-    var tiled_local: vec2<f32>;
+    // Select the right 2D world coordinates based on face normal (triplanar-lite)
+    // Calculate derivatives BEFORE fract() to avoid discontinuity artifacts at block edges
+    var world_2d: vec2<f32>;
     if (abs(in.normal.y) > 0.5) {
         // Top/bottom face: use X and Z
-        tiled_local = vec2<f32>(world_frac.x, world_frac.z);
+        world_2d = vec2<f32>(in.world_position.x, in.world_position.z);
     } else if (abs(in.normal.x) > 0.5) {
         // Left/right face: use Z and Y
-        tiled_local = vec2<f32>(world_frac.z, world_frac.y);
+        world_2d = vec2<f32>(in.world_position.z, in.world_position.y);
     } else {
         // Front/back face: use X and Y
-        tiled_local = vec2<f32>(world_frac.x, world_frac.y);
+        world_2d = vec2<f32>(in.world_position.x, in.world_position.y);
     }
+
+    // Get derivatives from continuous world coords (no fract discontinuity)
+    let world_dx = dpdx(world_2d) * tile_size;
+    let world_dy = dpdy(world_2d) * tile_size;
+
+    // Now apply fract for the actual UV coordinate
+    let tiled_local = fract(world_2d);
 
     // Calculate UV within tile (0 to tile_size range)
     let uv_in_tile = tiled_local * tile_size;
@@ -510,10 +514,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Use screen-space derivatives to estimate mip level and scale margin
     // ═══════════════════════════════════════════════════════════════════════
 
-    // Calculate how fast UVs change across the screen (tells us effective texel size)
-    let uv_for_deriv = tile_base + uv_in_tile;
-    let dx = dpdx(uv_for_deriv);
-    let dy = dpdy(uv_for_deriv);
+    // Use pre-fract derivatives for correct mip calculation
+    let dx = world_dx;
+    let dy = world_dy;
 
     // Maximum rate of change determines the mip level being used
     let max_deriv = max(
@@ -1246,10 +1249,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Real water absorbs red first, then green - deeper = more blue
     let absorption_depth = clamp(optical_depth / 12.0, 0.0, 1.0);
 
-    // Base water colors - vibrant tropical palette
-    let surface_color = vec3<f32>(0.18, 0.52, 0.58);   // Bright turquoise at surface
-    let mid_color = vec3<f32>(0.10, 0.42, 0.54);       // Teal at mid depth
-    let deep_color = vec3<f32>(0.04, 0.22, 0.42);      // Deep ocean blue
+    // Natural water colors - shallow is nearly invisible, color builds with depth
+    // Real water: shallow = clear, deep = blue from light absorption
+    let surface_color = vec3<f32>(0.08, 0.12, 0.14);   // Very dark, nearly invisible
+    let mid_color = vec3<f32>(0.12, 0.20, 0.28);       // Subtle blue tint emerging
+    let deep_color = vec3<f32>(0.06, 0.12, 0.22);      // Deep water blue-gray
 
     // Smooth depth gradient using smoothstep for soft transitions
     let shallow_blend = smoothstep(0.0, 0.5, absorption_depth);
@@ -1258,21 +1262,23 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     water_color = mix(water_color, deep_color, deep_blend);
 
     // === SUBSURFACE SCATTERING ===
-    // Light penetrating through water creates a glow effect
+    // Light penetrating through water creates subtle glow
     let sun_through = max(dot(-view_dir, sun_dir), 0.0);
-    let scatter_amount = pow(sun_through, 3.0) * (1.0 - absorption_depth) * 0.5;
-    let scatter_color = vec3<f32>(0.10, 0.45, 0.35);  // Tropical green-blue
+    let scatter_amount = pow(sun_through, 4.0) * (1.0 - absorption_depth) * 0.25;
+    let scatter_color = vec3<f32>(0.25, 0.35, 0.32);  // Subtle warm-gray with hint of green
     water_color += scatter_color * scatter_amount * sun_intensity;
 
     // === CAUSTICS SHIMMER ===
     // Subtle animated light patterns on the water surface
     let caustic = caustic_noise(in.world_position.xz, time);
-    let caustic_strength = (1.0 - absorption_depth) * sun_intensity * 0.12;
-    water_color += vec3<f32>(0.15, 0.20, 0.18) * caustic * caustic_strength;
+    let caustic_strength = (1.0 - absorption_depth) * sun_intensity * 0.08;
+    water_color += vec3<f32>(0.20, 0.22, 0.20) * caustic * caustic_strength;
 
     // === COMBINE REFLECTION AND WATER COLOR ===
-    // Fresnel controls the blend - smooth transition
-    let reflection_strength = smoothstep(0.0, 1.0, fresnel) * 0.65 + 0.05;
+    // Fresnel controls the blend - water is highly reflective at grazing angles
+    // Shallow water reflects less (you see through it), deep water reflects more
+    let depth_reflection_boost = smoothstep(0.0, 0.4, absorption_depth) * 0.25;
+    let reflection_strength = smoothstep(0.0, 1.0, fresnel) * (0.55 + depth_reflection_boost) + 0.05;
     var final_color = mix(water_color, sky_reflection, reflection_strength);
 
     // === FOAM ===
@@ -1286,8 +1292,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let noise_pos = in.world_position.xz * 0.3 + vec2<f32>(time * 0.05, time * 0.04);
         let foam_noise = fract(sin(dot(noise_pos, vec2<f32>(12.9898, 78.233))) * 43758.5453);
 
-        // Foam tinted slightly by water color
-        let foam_color = mix(vec3<f32>(0.85, 0.92, 0.97), water_color * 1.5, 0.15);
+        // Foam - mostly white with subtle warm tint
+        let foam_color = mix(vec3<f32>(0.92, 0.94, 0.92), water_color * 1.2, 0.10);
         let foam_blend = foam_intensity * foam_intensity * (0.35 + foam_noise * 0.2);
         final_color = mix(final_color, foam_color, foam_blend * 0.55);
     }
@@ -1315,10 +1321,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     final_color = mix(final_color, fog_color, clamp(fog_factor, 0.0, 0.2));
 
     // === TRANSPARENCY ===
-    // More see-through water - only gets opaque in very deep areas
-    let depth_opacity = 1.0 - exp(-optical_depth * 0.08);  // Slower opacity buildup
-    let base_alpha = mix(0.35, 0.75, depth_opacity);       // Much more transparent
-    let alpha = mix(base_alpha, 0.88, fresnel * 0.5);      // Fresnel adds some opacity at angles
+    // Shallow water is very transparent, opacity builds with depth
+    let depth_opacity = 1.0 - exp(-optical_depth * 0.05);  // Gradual opacity buildup
+    let base_alpha = mix(0.15, 0.65, depth_opacity);       // Very clear shallow, solid deep
+    let alpha = mix(base_alpha, 0.80, fresnel * 0.5);      // Fresnel adds some opacity at edges
 
     return vec4<f32>(final_color, alpha);
 }
@@ -1347,10 +1353,10 @@ impl Default for WaterUniform {
             wave_speed: 0.45,           // Slightly faster for more life
             wave_scale: 8.0,
             wave_strength: 0.09,        // Balanced - visible but won't clip terrain
-            // Rich blue water palette - less washed out
-            shallow_color: [0.15, 0.50, 0.65, 0.85],  // Clear blue shallow
-            deep_color: [0.05, 0.25, 0.50, 0.92],     // Deep ocean blue
-            fresnel_power: 5.0,  // Higher = less reflection at normal angles
+            // Natural water palette - desaturated blue-gray
+            shallow_color: [0.38, 0.42, 0.44, 0.30],  // Near-neutral gray
+            deep_color: [0.08, 0.14, 0.22, 0.70],     // Deep muted blue-gray
+            fresnel_power: 4.0,  // Balanced reflection curve
             foam_threshold: 0.55, // Slightly lower - foam a bit more visible
             refraction_strength: 0.04,
             transparency: 0.80,
