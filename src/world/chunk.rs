@@ -282,7 +282,7 @@ impl Block {
             Block::DiamondOre => [13; 6],
             Block::RedstoneOre => [14; 6],
             Block::Bedrock => [15; 6],
-            Block::Torch => [12; 6], // Torch uses gold ore texture (yellow) temporarily
+            Block::Torch => [16; 6], // Torch has dedicated warm orange texture
         }
     }
 

@@ -478,8 +478,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Calculates proper margins based on which mip level is being sampled
     // ═══════════════════════════════════════════════════════════════════════
 
-    let tiles_per_row = 4.0;  // 4x4 grid of 256x256 tiles = 1024x1024 atlas
-    let tile_size = 1.0 / tiles_per_row;  // 0.25 in UV space
+    let tiles_per_row = 5.0;  // 5x5 grid of 256x256 tiles = 1280x1280 atlas
+    let tile_size = 1.0 / tiles_per_row;  // 0.2 in UV space
     let tile_pixels = 256.0;  // Pixels per tile in base mip
 
     // Get the base tile corner from UV (tells us WHICH texture to use)
@@ -982,11 +982,36 @@ fn ray_march_shadow(world_pos: vec3<f32>, light_dir: vec3<f32>) -> f32 {
     return shadow;
 }
 
-// Soft shadow with penumbra - simplified for performance
+// Soft shadow with multi-tap jittering for area light simulation
 fn ray_march_shadow_soft(world_pos: vec3<f32>, light_dir: vec3<f32>, softness: f32) -> f32 {
-    // Just use single ray for now - multi-tap is too expensive
-    // TODO: Re-enable soft shadows once base shadows are working well
-    return ray_march_shadow(world_pos, light_dir);
+    // Build perpendicular vectors to light direction for jittering
+    var tangent: vec3<f32>;
+    if (abs(light_dir.y) < 0.9) {
+        tangent = normalize(cross(light_dir, vec3<f32>(0.0, 1.0, 0.0)));
+    } else {
+        tangent = normalize(cross(light_dir, vec3<f32>(1.0, 0.0, 0.0)));
+    }
+    let bitangent = cross(light_dir, tangent);
+
+    // 4-tap Poisson disk pattern (unrolled - WGSL requires constant array indices)
+    let jitter_scale = softness * 1.5;
+
+    let o0 = vec2<f32>(-0.7, -0.3) * jitter_scale;
+    let o1 = vec2<f32>( 0.5, -0.6) * jitter_scale;
+    let o2 = vec2<f32>(-0.4,  0.7) * jitter_scale;
+    let o3 = vec2<f32>( 0.6,  0.4) * jitter_scale;
+
+    let d0 = normalize(light_dir + tangent * o0.x + bitangent * o0.y);
+    let d1 = normalize(light_dir + tangent * o1.x + bitangent * o1.y);
+    let d2 = normalize(light_dir + tangent * o2.x + bitangent * o2.y);
+    let d3 = normalize(light_dir + tangent * o3.x + bitangent * o3.y);
+
+    let shadow_sum = ray_march_shadow(world_pos, d0)
+                   + ray_march_shadow(world_pos, d1)
+                   + ray_march_shadow(world_pos, d2)
+                   + ray_march_shadow(world_pos, d3);
+
+    return shadow_sum * 0.25;  // Average of 4 samples
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1117,7 +1142,7 @@ fn sample_torch_light(world_pos: vec3<f32>) -> vec3<f32> {
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Texture sampling (same as original)
-    let tiles_per_row = 4.0;
+    let tiles_per_row = 5.0;
     let tile_size = 1.0 / tiles_per_row;
     let tile_pixels = 256.0;
     let tile_base = floor(in.uv / tile_size) * tile_size;
@@ -1213,8 +1238,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // TODO: Re-enable once shadows are stable
     let gi = vec3<f32>(0.0);
 
-    // Voxel AO - disabled for now
-    let voxel_ao = 1.0;
+    // Voxel AO - short range occlusion from nearby geometry
+    let voxel_ao_raw = trace_voxel_ao(in.world_position, in.normal);
+    let voxel_ao = mix(0.85, 1.0, voxel_ao_raw);  // Subtle effect (0.85-1.0 range)
 
     // Per-vertex AO
     let ao_raw = in.ao;

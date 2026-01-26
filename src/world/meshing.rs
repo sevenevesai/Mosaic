@@ -443,7 +443,7 @@ fn build_chunk_mesh_simple(
 
 #[allow(dead_code)]
 fn get_tile_uvs(tex_idx: u32) -> ([f32; 2], [f32; 2], [f32; 2], [f32; 2]) {
-    let tiles_per_row = 4u32; // 4x4 grid of 256x256 tiles
+    let tiles_per_row = 5u32; // 5x5 grid of 256x256 tiles
     let tile_size = 1.0 / tiles_per_row as f32;
     let u0 = (tex_idx % tiles_per_row) as f32 * tile_size;
     let v0 = (tex_idx / tiles_per_row) as f32 * tile_size;
@@ -1664,7 +1664,7 @@ fn emit_greedy_quad(
     let base_index = vertices.len() as u32;
 
     // Get UVs from texture atlas
-    let tiles_per_row = 4u32; // 4x4 grid of 256x256 tiles
+    let tiles_per_row = 5u32; // 5x5 grid of 256x256 tiles
     let tile_size = 1.0 / tiles_per_row as f32;
     let uv_u0 = (texture_idx % tiles_per_row) as f32 * tile_size;
     let uv_v0 = (texture_idx / tiles_per_row) as f32 * tile_size;

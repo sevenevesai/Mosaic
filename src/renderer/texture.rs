@@ -16,7 +16,8 @@ pub struct TextureAtlas {
 /// Order matches the procedural atlas for compatibility:
 /// 0: Dirt, 1: Grass top, 2: Grass side, 3: Stone, 4: Cobblestone,
 /// 5: Sand, 6: Water, 7: Wood bark, 8: Wood planks, 9: Leaves,
-/// 10: Coal ore, 11: Iron ore, 12: Gold ore, 13: Diamond ore, 14: Redstone ore, 15: Bedrock
+/// 10: Coal ore, 11: Iron ore, 12: Gold ore, 13: Diamond ore, 14: Redstone ore,
+/// 15: Bedrock, 16: Torch
 const TEXTURE_FILES: &[&str] = &[
     "256_Dirt Pebbles 01.png",      // 0: Dirt
     "256_Grass 01 Simple.png",      // 1: Grass top
@@ -34,6 +35,7 @@ const TEXTURE_FILES: &[&str] = &[
     "256_Marble 01.png",            // 13: Diamond ore (marble)
     "256_Tile Pattern 03 Red.png",  // 14: Redstone ore (red tiles)
     "256_Dirt Rocks 01.png",        // 15: Bedrock (dirt with rocks)
+    "",                             // 16: Torch (procedural only - orange glow)
 ];
 
 const TEXTURE_DIR: &str = "assets/textures/256x256 Pixel Textures";
@@ -42,8 +44,8 @@ impl TextureAtlas {
     /// Load texture atlas from PNG files with full mipmap chain and anisotropic filtering
     /// This provides smooth, high-quality textures at all distances
     pub fn load(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
-        let tiles_per_row = 4u32; // 4x4 grid = 16 tiles
-        let atlas_size = TEXTURE_TILE_SIZE * tiles_per_row; // 256 * 4 = 1024
+        let tiles_per_row = 5u32; // 5x5 grid = 25 tiles (using 17)
+        let atlas_size = TEXTURE_TILE_SIZE * tiles_per_row; // 256 * 5 = 1280
 
         // Calculate mip levels: log2(1024) = 10 levels (1024 -> 512 -> 256 -> ... -> 1)
         let mip_level_count = (atlas_size as f32).log2().floor() as u32 + 1;
@@ -272,11 +274,11 @@ impl TextureAtlas {
 
     /// Generate a procedural texture atlas for testing (fallback)
     fn generate_procedural_atlas() -> Vec<u8> {
-        let tiles_per_row = 4u32;
+        let tiles_per_row = 5u32;
         let atlas_size = (TEXTURE_TILE_SIZE * tiles_per_row) as usize;
         let mut data = vec![0u8; atlas_size * atlas_size * 4];
 
-        // Generate textures for each tile
+        // Generate textures for each tile (0-16 used, 17-24 unused)
         for tile_y in 0..tiles_per_row {
             for tile_x in 0..tiles_per_row {
                 let tile_index = tile_y * tiles_per_row + tile_x;
@@ -315,7 +317,8 @@ impl TextureAtlas {
             13 => (100, 180, 220), // Diamond ore
             14 => (200, 50, 50),   // Redstone ore
             15 => (60, 60, 80),    // Bedrock
-            _ => (255, 0, 255),    // Missing texture (magenta)
+            16 => (255, 180, 80),  // Torch (warm orange glow)
+            _ => (80, 80, 80),     // Unused slots (dark gray)
         };
 
         // Simple pseudo-random for texture variation

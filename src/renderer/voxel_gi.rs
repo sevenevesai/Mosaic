@@ -142,7 +142,8 @@ pub struct VoxelGI {
     /// Force update on next frame (set when blocks change)
     force_update: bool,
 
-    /// Staging buffer for CPU -> GPU voxel data transfer
+    /// Staging buffer for CPU -> GPU voxel data transfer (reserved for async uploads)
+    #[allow(dead_code)]
     staging_buffer: wgpu::Buffer,
     /// CPU-side voxel data cache
     voxel_cache: Vec<u8>,
@@ -410,7 +411,9 @@ impl VoxelGI {
         );
 
         // Only update voxel data if camera moved more than threshold, first time, or forced
-        let move_threshold = 8.0;
+        // Threshold of 24 blocks reduces update frequency while maintaining coverage
+        // (force_update still triggers immediately for block placement)
+        let move_threshold = 24.0;
         let distance_moved = (snapped_center - self.last_update_center).length();
         let needs_refresh = !self.initialized || distance_moved >= move_threshold || self.force_update;
 
@@ -437,10 +440,13 @@ impl VoxelGI {
         // Update uniform buffer
         self.update_uniform(queue, snapped_center, sun_direction, sun_color, ambient_color, time_of_day);
 
-        // Fill voxel cache from chunks
+        // Time the voxel cache fill (includes light propagation)
+        let fill_start = std::time::Instant::now();
         self.fill_voxel_cache(chunks);
+        let fill_time = fill_start.elapsed();
 
-        // Upload to GPU
+        // Time the GPU upload
+        let upload_start = std::time::Instant::now();
         queue.write_texture(
             wgpu::ImageCopyTexture {
                 texture: &self.voxel_texture,
@@ -460,6 +466,18 @@ impl VoxelGI {
                 depth_or_array_layers: VOXEL_VOLUME_SIZE,
             },
         );
+        let upload_time = upload_start.elapsed();
+
+        // Log timing if significant (> 1ms total)
+        let total_ms = fill_time.as_secs_f64() * 1000.0 + upload_time.as_secs_f64() * 1000.0;
+        if total_ms > 1.0 {
+            tracing::info!(
+                "Voxel update: fill={:.2}ms, upload={:.2}ms, total={:.2}ms",
+                fill_time.as_secs_f64() * 1000.0,
+                upload_time.as_secs_f64() * 1000.0,
+                total_ms
+            );
+        }
     }
 
     fn update_uniform(
@@ -490,12 +508,15 @@ impl VoxelGI {
         let volume_min = self.volume_center - Vec3::splat(half_size);
         let volume_max = self.volume_center + Vec3::splat(half_size);
 
-        // Clear cache (all air)
+        // Time: Clear cache
+        let clear_start = std::time::Instant::now();
         self.voxel_cache.fill(0);
+        let clear_time = clear_start.elapsed();
 
         // Collect light sources for propagation
         let mut light_sources: Vec<(i32, i32, i32, u8)> = Vec::new();
 
+        let chunk_start = std::time::Instant::now();
         let chunks_read = chunks.read();
 
         // OPTIMIZED: Iterate over LOADED CHUNKS only, not all voxels
@@ -566,56 +587,89 @@ impl VoxelGI {
         }
 
         drop(chunks_read);
+        let chunk_time = chunk_start.elapsed();
 
         // Propagate light from sources to nearby voxels
         // Store propagated light in the A channel (flags -> light)
+        let prop_start = std::time::Instant::now();
         self.propagate_light(&light_sources);
+        let prop_time = prop_start.elapsed();
+
+        // Detailed timing breakdown (info level so it shows)
+        tracing::info!(
+            "Fill breakdown: clear={:.1}ms, chunks={:.1}ms, propagate={:.1}ms ({} lights)",
+            clear_time.as_secs_f64() * 1000.0,
+            chunk_time.as_secs_f64() * 1000.0,
+            prop_time.as_secs_f64() * 1000.0,
+            light_sources.len()
+        );
     }
 
     /// Propagate light from emissive sources through the volume
     /// Stores result in the A channel (index + 3) as propagated light intensity
+    /// OPTIMIZED: Uses distance-squared checks, reduced radius, early bounds skipping
     fn propagate_light(&mut self, light_sources: &[(i32, i32, i32, u8)]) {
         let size = VOXEL_VOLUME_SIZE as i32;
-        let max_light_radius = 14i32;  // Torch light radius
+        let max_light_radius = 10i32;  // Reduced from 14 for performance (still good coverage)
+        let max_radius_sq = (max_light_radius * max_light_radius) as f32;
+        let max_radius_f = max_light_radius as f32;
 
         for &(lx, ly, lz, emission) in light_sources {
             let emission_f = emission as f32 / 255.0;
 
+            // Early bounds: compute actual iteration ranges
+            let z_min = (lz - max_light_radius).max(0);
+            let z_max = (lz + max_light_radius).min(size - 1);
+            let y_min = (ly - max_light_radius).max(0);
+            let y_max = (ly + max_light_radius).min(size - 1);
+            let x_min = (lx - max_light_radius).max(0);
+            let x_max = (lx + max_light_radius).min(size - 1);
+
             // Spread light in a sphere around the source
-            for dz in -max_light_radius..=max_light_radius {
-                for dy in -max_light_radius..=max_light_radius {
-                    for dx in -max_light_radius..=max_light_radius {
-                        let vx = lx + dx;
-                        let vy = ly + dy;
-                        let vz = lz + dz;
+            for vz in z_min..=z_max {
+                let dz = vz - lz;
+                let dz_sq = dz * dz;
 
-                        // Bounds check
-                        if vx < 0 || vx >= size || vy < 0 || vy >= size || vz < 0 || vz >= size {
+                // Early skip: if dz alone exceeds radius, skip this z-plane
+                if dz_sq as f32 > max_radius_sq {
+                    continue;
+                }
+
+                for vy in y_min..=y_max {
+                    let dy = vy - ly;
+                    let dy_sq = dy * dy;
+                    let dz_dy_sq = (dz_sq + dy_sq) as f32;
+
+                    // Early skip: if dz+dy exceeds radius, skip this row
+                    if dz_dy_sq > max_radius_sq {
+                        continue;
+                    }
+
+                    for vx in x_min..=x_max {
+                        let dx = vx - lx;
+                        let dist_sq = dz_dy_sq + (dx * dx) as f32;
+
+                        // Sphere check using distance squared (no sqrt!)
+                        if dist_sq > max_radius_sq {
                             continue;
                         }
 
-                        // Calculate distance
-                        let dist_sq = (dx * dx + dy * dy + dz * dz) as f32;
-                        let dist = dist_sq.sqrt();
-
-                        if dist > max_light_radius as f32 {
-                            continue;
-                        }
-
-                        // Check if blocked by solid voxel (simple occlusion)
-                        // For performance, only check direct path for close voxels
                         let idx = ((vz as u32 * VOXEL_VOLUME_SIZE * VOXEL_VOLUME_SIZE
                                   + vy as u32 * VOXEL_VOLUME_SIZE
                                   + vx as u32) * 4) as usize;
 
                         let opacity = self.voxel_cache[idx];
-                        if opacity > 200 && dist > 1.0 {
-                            // This voxel is solid, don't light it (unless adjacent)
+                        // Skip solid voxels (unless very close)
+                        if opacity > 200 && dist_sq > 2.0 {
                             continue;
                         }
 
+                        // Compute actual distance only for voxels that pass all filters
+                        // (much faster than computing sqrt for all voxels)
+                        let dist = dist_sq.sqrt();
+
                         // Smooth falloff: (1 - dist/max)^2 for softer edges
-                        let falloff = (1.0 - dist / max_light_radius as f32).max(0.0);
+                        let falloff = 1.0 - dist / max_radius_f;
                         let light_value = (emission_f * falloff * falloff * 255.0) as u8;
 
                         // Add to existing light (max blend)
