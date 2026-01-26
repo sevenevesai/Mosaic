@@ -13,6 +13,7 @@ use wgpu::util::DeviceExt;
 use std::sync::Arc;
 use parking_lot::RwLock;
 use ahash::AHashMap;
+use rayon::prelude::*;
 
 use crate::world::{ChunkPos, Chunk, Block};
 use crate::constants::CHUNK_SIZE_I32;
@@ -513,80 +514,101 @@ impl VoxelGI {
         self.voxel_cache.fill(0);
         let clear_time = clear_start.elapsed();
 
-        // Collect light sources for propagation
-        let mut light_sources: Vec<(i32, i32, i32, u8)> = Vec::new();
-
         let chunk_start = std::time::Instant::now();
-        let chunks_read = chunks.read();
 
-        // OPTIMIZED: Iterate over LOADED CHUNKS only, not all voxels
-        // This is O(loaded_chunks * 4096) instead of O(16 million)
-        for (chunk_pos, chunk) in chunks_read.iter() {
-            // Chunk world bounds
-            let chunk_world_min = Vec3::new(
-                (chunk_pos.x * CHUNK_SIZE_I32) as f32,
-                (chunk_pos.y * CHUNK_SIZE_I32) as f32,
-                (chunk_pos.z * CHUNK_SIZE_I32) as f32,
-            );
-            let chunk_world_max = chunk_world_min + Vec3::splat(16.0);
+        // Step 1: Collect overlapping chunks (fast, single-threaded)
+        let overlapping_chunks: Vec<(ChunkPos, Arc<Chunk>)> = {
+            let chunks_read = chunks.read();
+            chunks_read.iter()
+                .filter(|(chunk_pos, _)| {
+                    let chunk_world_min = Vec3::new(
+                        (chunk_pos.x * CHUNK_SIZE_I32) as f32,
+                        (chunk_pos.y * CHUNK_SIZE_I32) as f32,
+                        (chunk_pos.z * CHUNK_SIZE_I32) as f32,
+                    );
+                    let chunk_world_max = chunk_world_min + Vec3::splat(16.0);
+                    // Check overlap with volume
+                    !(chunk_world_max.x < volume_min.x || chunk_world_min.x > volume_max.x ||
+                      chunk_world_max.y < volume_min.y || chunk_world_min.y > volume_max.y ||
+                      chunk_world_max.z < volume_min.z || chunk_world_min.z > volume_max.z)
+                })
+                .map(|(pos, chunk)| (*pos, Arc::clone(chunk)))
+                .collect()
+        };
+        let num_chunks = overlapping_chunks.len();
 
-            // Skip chunks completely outside the volume
-            if chunk_world_max.x < volume_min.x || chunk_world_min.x > volume_max.x ||
-               chunk_world_max.y < volume_min.y || chunk_world_min.y > volume_max.y ||
-               chunk_world_max.z < volume_min.z || chunk_world_min.z > volume_max.z {
-                continue;
-            }
+        // Step 2: Process chunks in PARALLEL
+        // Use AtomicPtr wrapper for safe parallel writes to non-overlapping indices
+        use std::sync::atomic::{AtomicU8, Ordering};
 
-            // Iterate over blocks in this chunk
-            for lz in 0..16 {
-                for ly in 0..16 {
-                    for lx in 0..16 {
-                        let block = chunk.get_block(lx, ly, lz);
+        // Reinterpret cache as atomic bytes for safe parallel writes
+        // SAFETY: AtomicU8 has same size/alignment as u8
+        let atomic_cache: &[AtomicU8] = unsafe {
+            std::slice::from_raw_parts(
+                self.voxel_cache.as_ptr() as *const AtomicU8,
+                self.voxel_cache.len()
+            )
+        };
 
-                        // Skip air blocks (most common case)
-                        if !block.is_solid() && block.light_emission() == 0 {
-                            continue;
-                        }
+        // Collect only light sources (small data, needs synchronization anyway)
+        let light_sources: Vec<(i32, i32, i32, u8)> = overlapping_chunks
+            .par_iter()
+            .flat_map(|(chunk_pos, chunk)| {
+                let mut lights: Vec<(i32, i32, i32, u8)> = Vec::new();
 
-                        // World position of this block
-                        let world_x = chunk_pos.x * CHUNK_SIZE_I32 + lx as i32;
-                        let world_y = chunk_pos.y * CHUNK_SIZE_I32 + ly as i32;
-                        let world_z = chunk_pos.z * CHUNK_SIZE_I32 + lz as i32;
+                for lz in 0..16 {
+                    for ly in 0..16 {
+                        for lx in 0..16 {
+                            let block = chunk.get_block(lx, ly, lz);
 
-                        // Convert to voxel coordinates
-                        let vx = (world_x as f32 - volume_min.x) as i32;
-                        let vy = (world_y as f32 - volume_min.y) as i32;
-                        let vz = (world_z as f32 - volume_min.z) as i32;
+                            // Skip air blocks (most common case)
+                            if !block.is_solid() && block.light_emission() == 0 {
+                                continue;
+                            }
 
-                        // Skip if outside volume bounds
-                        if vx < 0 || vx >= VOXEL_VOLUME_SIZE as i32 ||
-                           vy < 0 || vy >= VOXEL_VOLUME_SIZE as i32 ||
-                           vz < 0 || vz >= VOXEL_VOLUME_SIZE as i32 {
-                            continue;
-                        }
+                            // World position of this block
+                            let world_x = chunk_pos.x * CHUNK_SIZE_I32 + lx as i32;
+                            let world_y = chunk_pos.y * CHUNK_SIZE_I32 + ly as i32;
+                            let world_z = chunk_pos.z * CHUNK_SIZE_I32 + lz as i32;
 
-                        let voxel = VoxelData::from_block(block);
+                            // Convert to voxel coordinates
+                            let vx = (world_x as f32 - volume_min.x) as i32;
+                            let vy = (world_y as f32 - volume_min.y) as i32;
+                            let vz = (world_z as f32 - volume_min.z) as i32;
 
-                        // Calculate index in cache (RGBA8 format)
-                        let idx = ((vz as u32 * VOXEL_VOLUME_SIZE * VOXEL_VOLUME_SIZE
-                                  + vy as u32 * VOXEL_VOLUME_SIZE
-                                  + vx as u32) * 4) as usize;
+                            // Skip if outside volume bounds
+                            if vx < 0 || vx >= VOXEL_VOLUME_SIZE as i32 ||
+                               vy < 0 || vy >= VOXEL_VOLUME_SIZE as i32 ||
+                               vz < 0 || vz >= VOXEL_VOLUME_SIZE as i32 {
+                                continue;
+                            }
 
-                        self.voxel_cache[idx] = voxel.opacity;
-                        self.voxel_cache[idx + 1] = voxel.emissive;
-                        self.voxel_cache[idx + 2] = voxel.material;
-                        self.voxel_cache[idx + 3] = voxel.flags;
+                            let voxel = VoxelData::from_block(block);
 
-                        // Track light sources for propagation
-                        if voxel.emissive > 0 {
-                            light_sources.push((vx, vy, vz, voxel.emissive));
+                            // Calculate index in cache (RGBA8 format)
+                            let idx = ((vz as u32 * VOXEL_VOLUME_SIZE * VOXEL_VOLUME_SIZE
+                                      + vy as u32 * VOXEL_VOLUME_SIZE
+                                      + vx as u32) * 4) as usize;
+
+                            // Write using atomic store (Relaxed is fine - no ordering needed)
+                            if idx + 3 < atomic_cache.len() {
+                                atomic_cache[idx].store(voxel.opacity, Ordering::Relaxed);
+                                atomic_cache[idx + 1].store(voxel.emissive, Ordering::Relaxed);
+                                atomic_cache[idx + 2].store(voxel.material, Ordering::Relaxed);
+                                atomic_cache[idx + 3].store(voxel.flags, Ordering::Relaxed);
+                            }
+
+                            // Track light sources for propagation
+                            if voxel.emissive > 0 {
+                                lights.push((vx, vy, vz, voxel.emissive));
+                            }
                         }
                     }
                 }
-            }
-        }
+                lights
+            })
+            .collect();
 
-        drop(chunks_read);
         let chunk_time = chunk_start.elapsed();
 
         // Propagate light from sources to nearby voxels
@@ -597,11 +619,12 @@ impl VoxelGI {
 
         // Detailed timing breakdown (info level so it shows)
         tracing::info!(
-            "Fill breakdown: clear={:.1}ms, chunks={:.1}ms, propagate={:.1}ms ({} lights)",
+            "Fill breakdown: clear={:.1}ms, chunks={:.1}ms, propagate={:.1}ms ({} lights, {} chunks)",
             clear_time.as_secs_f64() * 1000.0,
             chunk_time.as_secs_f64() * 1000.0,
             prop_time.as_secs_f64() * 1000.0,
-            light_sources.len()
+            light_sources.len(),
+            num_chunks
         );
     }
 
