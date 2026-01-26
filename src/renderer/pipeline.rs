@@ -1168,19 +1168,18 @@ fn calculate_held_light(world_pos: vec3<f32>) -> vec3<f32> {
         return vec3<f32>(0.0);
     }
 
-    // Distance-based falloff with extended range
+    // Distance-based falloff
     let dist = distance(world_pos, player_pos);
-    let max_radius = intensity * 24.0;  // Extended range: ~24 blocks for full torch
+    let max_radius = intensity * 24.0;  // ~24 blocks for full torch
 
     if (dist >= max_radius) {
         return vec3<f32>(0.0);
     }
 
-    // Smoother cubic falloff for longer trail
+    // Quartic falloff: smaller bright core, dims quickly, long subtle tail to edge
     let falloff = 1.0 - (dist / max_radius);
-    let light_strength = falloff * falloff * falloff * intensity;
+    let light_strength = pow(falloff, 4.0) * intensity;
 
-    // Brighter base intensity
     return torch_color * light_strength * 2.5;
 }
 
@@ -1199,10 +1198,11 @@ fn sample_torch_light(world_pos: vec3<f32>) -> vec3<f32> {
     let voxel = textureSampleLevel(t_voxel, s_voxel, uv, 0.0);
     let light_intensity = voxel.a;  // A channel = propagated light (0-1)
 
-    // Apply gamma curve for more natural falloff
-    let curved_light = pow(light_intensity, 1.5);
+    // Apply softer gamma curve for longer falloff trail
+    let curved_light = pow(light_intensity, 1.2);
 
-    return torch_color * curved_light * 1.2;
+    // Much brighter placed torches
+    return torch_color * curved_light * 3.0;
 }
 
 @fragment
