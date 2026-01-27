@@ -732,6 +732,15 @@ impl Renderer {
             let mut individual_chunks: Vec<&crate::world::ChunkMesh> = Vec::with_capacity(500);
 
             for chunk_mesh in world.visible_meshes() {
+                // Early skip: check if chunk is renderable before expensive frustum test
+                let in_pool = self.chunk_pool.mdi_available && self.chunk_pool.get_slot(&chunk_mesh.pos).is_some();
+                let has_gpu_mesh = chunk_mesh.gpu_mesh.is_some();
+
+                // Skip frustum test for non-renderable chunks
+                if !in_pool && !has_gpu_mesh {
+                    continue;
+                }
+
                 let chunk_min = chunk_mesh.pos.world_origin();
                 let chunk_max = chunk_min + glam::Vec3::splat(crate::constants::CHUNK_SIZE_F32);
 
@@ -740,16 +749,12 @@ impl Renderer {
                     continue;
                 }
 
-                // Check if chunk is in the pool
-                if self.chunk_pool.mdi_available {
-                    if let Some(slot) = self.chunk_pool.get_slot(&chunk_mesh.pos) {
-                        pool_chunks.push(chunk_mesh.pos);
-                        triangles += slot.index_count / 3;
-                    } else if chunk_mesh.gpu_mesh.is_some() {
-                        // Not in pool but has individual buffer - use fallback
-                        individual_chunks.push(chunk_mesh);
-                    }
-                } else if chunk_mesh.gpu_mesh.is_some() {
+                // Chunk is visible - add to appropriate list
+                if in_pool {
+                    let slot = self.chunk_pool.get_slot(&chunk_mesh.pos).unwrap();
+                    pool_chunks.push(chunk_mesh.pos);
+                    triangles += slot.index_count / 3;
+                } else if has_gpu_mesh {
                     individual_chunks.push(chunk_mesh);
                 }
             }
