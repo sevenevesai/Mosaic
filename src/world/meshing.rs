@@ -154,6 +154,18 @@ impl ChunkVertex {
         u32::from_le_bytes([nx, ny, nz, flags])
     }
 
+    /// Pack a normal vector with all flags
+    /// Flags byte layout: bit 0 = is_foliage (wind animation), bit 1 = is_emissive (always bright)
+    pub fn pack_normal_all_flags(normal: [f32; 3], is_foliage: bool, is_emissive: bool) -> u32 {
+        let nx = ((normal[0] * 127.0) as i8) as u8;
+        let ny = ((normal[1] * 127.0) as i8) as u8;
+        let nz = ((normal[2] * 127.0) as i8) as u8;
+        let mut flags = 0u8;
+        if is_foliage { flags |= 1; }
+        if is_emissive { flags |= 2; }
+        u32::from_le_bytes([nx, ny, nz, flags])
+    }
+
     /// Pack UV coordinates (0.0-1.0) into u16 pair
     pub fn pack_uv(uv: [f32; 2]) -> [u16; 2] {
         [(uv[0] * 65535.0) as u16, (uv[1] * 65535.0) as u16]
@@ -191,6 +203,16 @@ impl ChunkVertex {
         Self {
             position,
             normal_packed: Self::pack_normal_with_flags(normal, is_foliage),
+            uv: Self::pack_uv(uv),
+            ao_tile_packed: Self::pack_ao_tile_light(ao, tile_u, tile_v, light),
+        }
+    }
+
+    /// Create vertex with tiling, light, and emissive flag (for torches/glowing blocks visible at distance)
+    pub fn new_tiled_lit_emissive(position: [f32; 3], normal: [f32; 3], uv: [f32; 2], ao: f32, tile_u: u8, tile_v: u8, light: u8, is_emissive: bool) -> Self {
+        Self {
+            position,
+            normal_packed: Self::pack_normal_all_flags(normal, false, is_emissive),
             uv: Self::pack_uv(uv),
             ao_tile_packed: Self::pack_ao_tile_light(ao, tile_u, tile_v, light),
         }
@@ -621,6 +643,26 @@ fn add_quad_foliage(
     indices.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
 }
 
+/// Add a quad with emissive flag for light sources visible at any distance
+fn add_quad_emissive(
+    vertices: &mut Vec<ChunkVertex>,
+    indices: &mut Vec<u32>,
+    positions: [[f32; 3]; 4],
+    normal: [f32; 3],
+    uvs: [[f32; 2]; 4],
+    light: u8,
+) {
+    let base = vertices.len() as u32;
+    for idx in 0..4 {
+        vertices.push(ChunkVertex::new_tiled_lit_emissive(
+            positions[idx], normal, uvs[idx], 1.0, 1, 1, light, true
+        ));
+    }
+    // Vertices are in order: 0-1-2-3
+    // Two CCW triangles when viewed from outside: 0-2-1 and 0-3-2
+    indices.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
+}
+
 /// Generate cube faces for foliage blocks (leaves) with all 6 faces rendered
 /// No neighbor culling - ensures no gaps when foliage sways in the wind
 fn add_foliage_blocks(
@@ -757,6 +799,145 @@ fn add_foliage_blocks(
     }
 }
 
+/// Generate cube faces for emissive blocks (torches, uranium) with all 6 faces rendered
+/// Emissive blocks are visible at any distance regardless of lighting
+fn add_emissive_blocks(
+    chunk: &Chunk,
+    neighbors: &[Option<Arc<Chunk>>; 6],
+    world_origin: glam::Vec3,
+    vertices: &mut Vec<ChunkVertex>,
+    indices: &mut Vec<u32>,
+) {
+    let s = BLOCK_SCALE;
+
+    for z in 0..CHUNK_SIZE {
+        for y in 0..CHUNK_SIZE {
+            for x in 0..CHUNK_SIZE {
+                let block = chunk.get_block(x, y, z);
+                if !block.is_emissive() {
+                    continue;
+                }
+
+                let bx = world_origin.x + x as f32 * s;
+                let by = world_origin.y + y as f32 * s;
+                let bz = world_origin.z + z as f32 * s;
+
+                // Get texture UVs
+                let tex_idx = block.texture_indices()[0];
+                let tiles_per_row = 6u32;
+                let tile_size = 1.0 / tiles_per_row as f32;
+                let u0 = (tex_idx % tiles_per_row) as f32 * tile_size;
+                let v0 = (tex_idx / tiles_per_row) as f32 * tile_size;
+                let u1 = u0 + tile_size;
+                let v1 = v0 + tile_size;
+                let uv0 = [u0, v1]; // bottom-left
+                let uv1 = [u1, v1]; // bottom-right
+                let uv2 = [u1, v0]; // top-right
+                let uv3 = [u0, v0]; // top-left
+
+                // Get block light (emissive blocks are their own light source)
+                let emission = block.light_emission();
+
+                // Top face (+Y)
+                {
+                    let light = get_face_light(chunk, neighbors, x, y, z, Axis::Y, true).max(emission);
+                    add_quad_emissive(vertices, indices,
+                        [
+                            [bx,     by + s, bz],
+                            [bx + s, by + s, bz],
+                            [bx + s, by + s, bz + s],
+                            [bx,     by + s, bz + s],
+                        ],
+                        [0.0, 1.0, 0.0],
+                        [uv0, uv1, uv2, uv3],
+                        light,
+                    );
+                }
+
+                // Bottom face (-Y)
+                {
+                    let light = get_face_light(chunk, neighbors, x, y, z, Axis::Y, false).max(emission);
+                    add_quad_emissive(vertices, indices,
+                        [
+                            [bx,     by, bz + s],
+                            [bx + s, by, bz + s],
+                            [bx + s, by, bz],
+                            [bx,     by, bz],
+                        ],
+                        [0.0, -1.0, 0.0],
+                        [uv0, uv1, uv2, uv3],
+                        light,
+                    );
+                }
+
+                // Front face (+Z)
+                {
+                    let light = get_face_light(chunk, neighbors, x, y, z, Axis::Z, true).max(emission);
+                    add_quad_emissive(vertices, indices,
+                        [
+                            [bx + s, by,     bz + s],
+                            [bx,     by,     bz + s],
+                            [bx,     by + s, bz + s],
+                            [bx + s, by + s, bz + s],
+                        ],
+                        [0.0, 0.0, 1.0],
+                        [uv0, uv1, uv2, uv3],
+                        light,
+                    );
+                }
+
+                // Back face (-Z)
+                {
+                    let light = get_face_light(chunk, neighbors, x, y, z, Axis::Z, false).max(emission);
+                    add_quad_emissive(vertices, indices,
+                        [
+                            [bx,     by,     bz],
+                            [bx + s, by,     bz],
+                            [bx + s, by + s, bz],
+                            [bx,     by + s, bz],
+                        ],
+                        [0.0, 0.0, -1.0],
+                        [uv0, uv1, uv2, uv3],
+                        light,
+                    );
+                }
+
+                // Left face (-X)
+                {
+                    let light = get_face_light(chunk, neighbors, x, y, z, Axis::X, false).max(emission);
+                    add_quad_emissive(vertices, indices,
+                        [
+                            [bx, by,     bz],
+                            [bx, by + s, bz],
+                            [bx, by + s, bz + s],
+                            [bx, by,     bz + s],
+                        ],
+                        [-1.0, 0.0, 0.0],
+                        [uv0, uv3, uv2, uv1],  // Reordered for left face
+                        light,
+                    );
+                }
+
+                // Right face (+X)
+                {
+                    let light = get_face_light(chunk, neighbors, x, y, z, Axis::X, true).max(emission);
+                    add_quad_emissive(vertices, indices,
+                        [
+                            [bx + s, by,     bz + s],
+                            [bx + s, by + s, bz + s],
+                            [bx + s, by + s, bz],
+                            [bx + s, by,     bz],
+                        ],
+                        [1.0, 0.0, 0.0],
+                        [uv0, uv3, uv2, uv1],  // Reordered for right face
+                        light,
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// Build mesh for a chunk with specified LOD level
 pub fn build_chunk_mesh_lod(
     pos: ChunkPos,
@@ -808,6 +989,10 @@ pub fn build_chunk_mesh_lod(
     if step == 1 {
         add_foliage_blocks(chunk, neighbors, world_origin, &mut vertices, &mut indices);
     }
+
+    // Add emissive blocks (torches, uranium) separately - they need to be visible at any distance
+    // Added at ALL LOD levels so light sources are visible from far away
+    add_emissive_blocks(chunk, neighbors, world_origin, &mut vertices, &mut indices);
 
     // Record timing and statistics
     let elapsed_ns = start_time.elapsed().as_nanos() as u64;

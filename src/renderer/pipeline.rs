@@ -298,6 +298,7 @@ struct VertexOutput {
     @location(4) tile_count: vec2<f32>,
     @location(5) block_light: f32,
     @location(6) fade_alpha: f32,
+    @location(7) is_emissive: f32,  // 1.0 for emissive blocks (torches, etc.)
 };
 
 @vertex
@@ -310,8 +311,9 @@ fn vs_main(in: VertexInput) -> VertexOutput {
         f32(in.normal_packed.z) / 127.0
     );
 
-    // Foliage flag in 4th byte of normal_packed (bit 0 = is_foliage)
+    // Flags in 4th byte of normal_packed: bit 0 = is_foliage, bit 1 = is_emissive
     let is_foliage = (in.normal_packed.w & 1) != 0;
+    let is_emissive = (in.normal_packed.w & 2) != 0;
 
     let current_time = camera.anim_data.x;
     let spawn_time = camera.anim_data.y;
@@ -361,6 +363,7 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     );
     out.block_light = in.ao_tile_packed.w;
     out.fade_alpha = alpha;
+    out.is_emissive = select(0.0, 1.0, is_emissive);
     return out;
 }
 
@@ -703,6 +706,29 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     if (tex_color.a < 0.5) {
         discard;
+    }
+
+    // === EMISSIVE BLOCKS (torches, uranium, etc.) ===
+    // Render at full brightness regardless of lighting - visible at any distance
+    if (in.is_emissive > 0.5) {
+        // Warm emissive color that will be picked up by bloom
+        let emissive_tint = vec3<f32>(1.2, 1.0, 0.8);  // Slightly warm
+        let emissive_boost = 1.5;  // Boost brightness for bloom
+        var emissive_color = tex_color.rgb * emissive_tint * emissive_boost;
+
+        // Subtle face-based shading so it's not completely flat
+        var face_mult = 0.9;
+        if (in.normal.y > 0.5) { face_mult = 1.0; }
+        else if (in.normal.y < -0.5) { face_mult = 0.8; }
+        emissive_color *= face_mult;
+
+        // Apply distance fog but reduced (emissive cuts through fog)
+        let dist = length(camera.view_pos.xyz - in.world_position);
+        let fog_factor = 1.0 - exp(-dist * 0.00003);  // Very light fog
+        let fog_color = vec3<f32>(0.8, 0.82, 0.85);
+        emissive_color = mix(emissive_color, fog_color, fog_factor * 0.3);
+
+        return vec4<f32>(emissive_color, tex_color.a * in.fade_alpha);
     }
 
     // === VOXEL-BASED LIGHTING ===

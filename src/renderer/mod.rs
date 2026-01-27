@@ -2,6 +2,7 @@
 //!
 //! Handles GPU initialization, pipeline management, and frame rendering.
 
+mod bloom;
 mod camera;
 mod chunk_pool;
 mod debug_overlay;
@@ -9,6 +10,7 @@ mod pipeline;
 mod texture;
 pub mod voxel_gi;
 
+pub use bloom::Bloom;
 pub use camera::{Camera, Frustum};
 pub use chunk_pool::ChunkPool;
 pub use debug_overlay::{DebugOverlay, DebugMetrics};
@@ -113,6 +115,11 @@ pub struct Renderer {
     // Voxel-based Global Illumination system
     // Uses DDA ray marching for shadows, VCT for indirect lighting
     voxel_gi: VoxelGI,
+
+    // Bloom post-processing for emissive blocks
+    bloom: Bloom,
+    scene_texture: wgpu::Texture,
+    scene_texture_view: wgpu::TextureView,
 }
 
 impl Renderer {
@@ -432,6 +439,29 @@ impl Renderer {
             }],
         });
 
+        // === BLOOM POST-PROCESSING ===
+        // Scene texture for off-screen rendering (needed for bloom)
+        // Uses surface format for compatibility with existing pipelines
+        let scene_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("scene_texture"),
+            size: wgpu::Extent3d {
+                width: size.width,
+                height: size.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: surface_format, // Use surface format for pipeline compatibility
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let scene_texture_view = scene_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Create bloom system
+        let mut bloom = Bloom::new(&device, size.width, size.height, surface_format);
+        bloom.create_extract_bind_group(&device, &scene_texture_view);
+
         // Create water uniform bind group layout and buffer
         let water_bind_group_layout = create_water_bind_group_layout(&device);
         let water_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -490,6 +520,9 @@ impl Renderer {
             time_of_day: 0.35,   // Start at mid-morning
             cycle_speed: 10.0,   // 10x speed for testing (1 min = 1 day cycle)
             voxel_gi,
+            bloom,
+            scene_texture,
+            scene_texture_view,
         }
     }
 
@@ -501,6 +534,27 @@ impl Renderer {
             self.surface.configure(&self.device, &self.config);
             self.depth_texture = Self::create_depth_texture(&self.device, &self.config);
             self.debug_overlay.update_screen_size(new_size.width as f32, new_size.height as f32);
+
+            // Resize scene texture for bloom
+            self.scene_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("scene_texture"),
+                size: wgpu::Extent3d {
+                    width: new_size.width,
+                    height: new_size.height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: self.config.format, // Use surface format
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            self.scene_texture_view = self.scene_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+            // Resize bloom textures
+            self.bloom.resize(&self.device, new_size.width, new_size.height);
+            self.bloom.create_extract_bind_group(&self.device, &self.scene_texture_view);
         }
     }
 
@@ -690,12 +744,12 @@ impl Renderer {
         let mut cull_elapsed = std::time::Duration::ZERO;
         let mut mdi_prep_elapsed = std::time::Duration::ZERO;
 
-        // === MAIN RENDER PASS ===
+        // === MAIN RENDER PASS (render to scene texture for bloom) ===
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Main Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view: &self.scene_texture_view,  // Render to scene texture for bloom
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
@@ -878,6 +932,10 @@ impl Renderer {
             // Render debug overlay
             self.debug_overlay.render(&mut render_pass, &self.queue, debug_metrics);
         }
+
+        // === BLOOM POST-PROCESSING ===
+        // Apply bloom effect: extract bright pixels, blur, composite to output
+        self.bloom.render(&mut encoder, &view, &self.scene_texture_view, &self.device);
 
         let main_elapsed = main_start.elapsed();
 

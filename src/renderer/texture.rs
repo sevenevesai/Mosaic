@@ -239,6 +239,19 @@ impl TextureAtlas {
 
         let mut loaded_count = 0;
         for (index, filename) in TEXTURE_FILES.iter().enumerate() {
+            // Calculate position in atlas
+            let tile_x = (index as u32) % tiles_per_row;
+            let tile_y = (index as u32) / tiles_per_row;
+            let base_x = tile_x * tile_size;
+            let base_y = tile_y * tile_size;
+
+            // If filename is empty, generate procedural texture
+            if filename.is_empty() {
+                Self::generate_tile_to_atlas(&mut atlas, tile_x, tile_y, tiles_per_row, index as u32);
+                loaded_count += 1;
+                continue;
+            }
+
             let file_path = base_path.join(filename);
 
             match image::open(&file_path) {
@@ -252,12 +265,6 @@ impl TextureAtlas {
 
                     let rgba = img.to_rgba8();
 
-                    // Calculate position in atlas
-                    let tile_x = (index as u32) % tiles_per_row;
-                    let tile_y = (index as u32) / tiles_per_row;
-                    let base_x = tile_x * tile_size;
-                    let base_y = tile_y * tile_size;
-
                     // Copy pixels to atlas
                     for y in 0..tile_size {
                         for x in 0..tile_size {
@@ -269,7 +276,10 @@ impl TextureAtlas {
                     loaded_count += 1;
                 }
                 Err(e) => {
-                    log::warn!("Failed to load {}: {}", filename, e);
+                    log::warn!("Failed to load {}: {}, using procedural fallback", filename, e);
+                    // Generate procedural texture as fallback
+                    Self::generate_tile_to_atlas(&mut atlas, tile_x, tile_y, tiles_per_row, index as u32);
+                    loaded_count += 1;
                 }
             }
         }
@@ -364,6 +374,96 @@ impl TextureAtlas {
                 data[idx + 1] = g;
                 data[idx + 2] = b;
                 data[idx + 3] = 255; // Alpha
+            }
+        }
+    }
+
+    /// Generate a procedural tile directly into an ImageBuffer atlas
+    fn generate_tile_to_atlas(
+        atlas: &mut ImageBuffer<Rgba<u8>, Vec<u8>>,
+        tile_x: u32,
+        tile_y: u32,
+        tiles_per_row: u32,
+        tile_index: u32,
+    ) {
+        let tile_size = TEXTURE_TILE_SIZE as u32;
+
+        // Base colors for different block types
+        let (base_r, base_g, base_b) = match tile_index {
+            0 => (100, 80, 60),    // Dirt
+            1 => (80, 160, 60),    // Grass top
+            2 => (100, 80, 60),    // Grass side (dirt with grass edge)
+            3 => (128, 128, 128),  // Stone (rubble)
+            4 => (110, 100, 90),   // StoneDirt (dirty stone variant)
+            5 => (180, 140, 100),  // Brick (warm tan brick)
+            6 => (60, 100, 180),   // Water
+            7 => (80, 60, 40),     // Wood (bark)
+            8 => (180, 150, 100),  // Wood (cross-section)
+            9 => (60, 130, 50),    // Leaves
+            10 => (140, 140, 140), // StoneRubble2 (lighter stone variant)
+            11 => (180, 160, 100), // Iron ore
+            12 => (220, 200, 50),  // Gold ore
+            13 => (100, 180, 220), // Diamond ore
+            14 => (200, 50, 50),   // Redstone ore
+            15 => (60, 60, 80),    // Bedrock
+            16 => (255, 180, 80),  // Torch (warm orange glow)
+            17 => (194, 178, 128), // Sand (beach/desert)
+            _ => (80, 80, 80),     // Unused slots (dark gray)
+        };
+
+        // Simple pseudo-random for texture variation
+        let seed = tile_index.wrapping_mul(2654435761);
+        let base_x = tile_x * tile_size;
+        let base_y = tile_y * tile_size;
+
+        for py in 0..tile_size {
+            for px in 0..tile_size {
+                // Add noise/variation
+                let noise = ((px.wrapping_mul(7) ^ py.wrapping_mul(13) ^ seed) % 32) as i32 - 16;
+
+                let r = (base_r as i32 + noise).clamp(0, 255) as u8;
+                let g = (base_g as i32 + noise).clamp(0, 255) as u8;
+                let b = (base_b as i32 + noise).clamp(0, 255) as u8;
+
+                // Special case: grass side with dirt and grass top edge
+                let (r, g, b) = if tile_index == 2 && py < tile_size / 4 {
+                    let noise2 = ((px.wrapping_mul(3) ^ py.wrapping_mul(7)) % 20) as i32 - 10;
+                    (
+                        (80 + noise2).clamp(0, 255) as u8,
+                        (160 + noise2).clamp(0, 255) as u8,
+                        (60 + noise2).clamp(0, 255) as u8,
+                    )
+                } else if tile_index == 16 {
+                    // Torch texture: warm yellow lamp style with glowing center
+                    let cx = tile_size / 2;
+                    let cy = tile_size / 2;
+                    let dx = (px as i32 - cx as i32) as f32;
+                    let dy = (py as i32 - cy as i32) as f32;
+                    let dist = (dx * dx + dy * dy).sqrt() / (tile_size as f32 * 0.45);
+                    let glow = (1.0 - dist).max(0.0).powf(0.7);
+
+                    // Add subtle noise for texture
+                    let noise_val = ((px.wrapping_mul(17) ^ py.wrapping_mul(31)) % 16) as f32 / 64.0;
+
+                    // Warm yellow center (like tavern lamp) fading to amber/brown edges
+                    // Center: bright warm yellow (255, 220, 120)
+                    // Edge: darker amber (180, 100, 40)
+                    let center_r = 255.0;
+                    let center_g = 220.0;
+                    let center_b = 120.0;
+                    let edge_r = 160.0;
+                    let edge_g = 80.0;
+                    let edge_b = 30.0;
+
+                    let r = ((center_r * glow + edge_r * (1.0 - glow)) * (1.0 + noise_val)).min(255.0) as u8;
+                    let g = ((center_g * glow + edge_g * (1.0 - glow)) * (1.0 + noise_val * 0.5)).min(255.0) as u8;
+                    let b = ((center_b * glow + edge_b * (1.0 - glow)) * (1.0 + noise_val * 0.3)).min(255.0) as u8;
+                    (r, g, b)
+                } else {
+                    (r, g, b)
+                };
+
+                atlas.put_pixel(base_x + px, base_y + py, Rgba([r, g, b, 255]));
             }
         }
     }

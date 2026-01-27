@@ -291,6 +291,12 @@ impl Block {
         matches!(self, Block::Leaves)
     }
 
+    /// Returns true if this block is emissive (light source visible at any distance)
+    /// Emissive blocks render at full brightness regardless of lighting calculations
+    pub fn is_emissive(&self) -> bool {
+        matches!(self, Block::Torch | Block::UraniumOre)
+    }
+
     /// Get texture indices for each face: [top, bottom, front, back, left, right]
     pub fn texture_indices(&self) -> [u32; 6] {
         match self {
