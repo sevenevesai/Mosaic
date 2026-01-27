@@ -9,7 +9,7 @@ cargo build --release
 ./target/release/neolith.exe
 ```
 
-**Controls:** WASD move, Space jump/fly-up, Shift fly-down, Ctrl sprint, F fly mode, F3 debug, T day/night speed, 1-8 blocks (8=torch), LMB break, RMB place, P perf log, Esc release mouse.
+**Controls:** WASD move, Space jump/fly-up, Shift fly-down, Ctrl sprint, F fly mode, F3 debug, T day/night speed, 1-8 blocks (1=Stone, 2=Dirt, 3=Grass, 4=StoneDirt, 5=Brick, 6=Wood, 7=Leaves, 8=Torch), LMB break, RMB place, P perf log, Esc release mouse.
 
 ## Commands
 

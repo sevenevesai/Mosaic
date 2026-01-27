@@ -169,8 +169,8 @@ impl Player {
             KeyCode::Digit1 => if pressed { self.selected_block = Block::Stone; }
             KeyCode::Digit2 => if pressed { self.selected_block = Block::Dirt; }
             KeyCode::Digit3 => if pressed { self.selected_block = Block::Grass; }
-            KeyCode::Digit4 => if pressed { self.selected_block = Block::Cobblestone; }
-            KeyCode::Digit5 => if pressed { self.selected_block = Block::Sand; }
+            KeyCode::Digit4 => if pressed { self.selected_block = Block::StoneDirt; }
+            KeyCode::Digit5 => if pressed { self.selected_block = Block::Brick; }
             KeyCode::Digit6 => if pressed { self.selected_block = Block::Wood; }
             KeyCode::Digit7 => if pressed { self.selected_block = Block::Leaves; }
             KeyCode::Digit8 => if pressed { self.selected_block = Block::Torch; }

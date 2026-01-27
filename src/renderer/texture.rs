@@ -14,28 +14,29 @@ pub struct TextureAtlas {
 
 /// Maps tile indices to texture file names
 /// Order matches the procedural atlas for compatibility:
-/// 0: Dirt, 1: Grass top, 2: Grass side, 3: Stone, 4: Cobblestone,
-/// 5: Sand, 6: Water, 7: Wood bark, 8: Wood planks, 9: Leaves,
-/// 10: Coal ore, 11: Iron ore, 12: Gold ore, 13: Diamond ore, 14: Redstone ore,
-/// 15: Bedrock, 16: Torch
+/// 0: Dirt, 1: Grass top, 2: Grass side, 3: Stone, 4: StoneDirt,
+/// 5: Brick, 6: Water, 7: Wood bark, 8: Wood planks, 9: Leaves,
+/// 10: StoneRubble2, 11: Iron ore, 12: Gold ore, 13: Diamond ore, 14: Redstone ore,
+/// 15: Bedrock, 16: Torch, 17: Sand
 const TEXTURE_FILES: &[&str] = &[
     "256_Dirt Pebbles 01.png",      // 0: Dirt
     "256_Grass 01 Simple.png",      // 1: Grass top
     "256_Grass 03 Mud.png",         // 2: Grass side (grass with mud/dirt)
-    "256_Stone Rubble 01.png",      // 3: Stone
-    "256_Brick 02.png",             // 4: Cobblestone (using brick as substitute)
-    "256_Sand 01.png",              // 5: Sand
+    "256_Stone Rubble 01.png",      // 3: Stone (main underground stone)
+    "256_Stone Dirt 01.png",        // 4: StoneDirt (dirty stone variant for variation)
+    "256_Brick 06.png",             // 5: Brick (placeable building material)
     "256_Water Shallow 01.png",     // 6: Water
     "256_Wood Planks 01.png",       // 7: Wood bark (log sides)
     "256_Wood Planks 02.png",       // 8: Wood planks (log top/bottom)
     "256_Grass 01 Simple.png",      // 9: Leaves (using simple grass as leaf color)
-    "256_Stone Dirt 01.png",        // 10: Coal ore (dark stone)
+    "256_Stone Rubble 02.png",      // 10: StoneRubble2 (stone variant)
     "256_Cement 01.png",            // 11: Iron ore (gray cement)
     "256_Marble 02.png",            // 12: Gold ore (light marble)
     "256_Marble 01.png",            // 13: Diamond ore (marble)
     "256_Tile Pattern 03 Red.png",  // 14: Redstone ore (red tiles)
     "256_Dirt Rocks 01.png",        // 15: Bedrock (dirt with rocks)
     "",                             // 16: Torch (procedural only - orange glow)
+    "256_Sand 01.png",              // 17: Sand (beach/desert)
 ];
 
 const TEXTURE_DIR: &str = "assets/textures/256x256 Pixel Textures";
@@ -304,20 +305,21 @@ impl TextureAtlas {
             0 => (100, 80, 60),    // Dirt
             1 => (80, 160, 60),    // Grass top
             2 => (100, 80, 60),    // Grass side (dirt with grass edge)
-            3 => (128, 128, 128),  // Stone
-            4 => (180, 180, 180),  // Cobblestone
-            5 => (160, 130, 80),   // Sand
+            3 => (128, 128, 128),  // Stone (rubble)
+            4 => (110, 100, 90),   // StoneDirt (dirty stone variant)
+            5 => (180, 140, 100),  // Brick (warm tan brick)
             6 => (60, 100, 180),   // Water
             7 => (80, 60, 40),     // Wood (bark)
             8 => (180, 150, 100),  // Wood (cross-section)
             9 => (60, 130, 50),    // Leaves
-            10 => (50, 50, 50),    // Coal ore
+            10 => (140, 140, 140), // StoneRubble2 (lighter stone variant)
             11 => (180, 160, 100), // Iron ore
             12 => (220, 200, 50),  // Gold ore
             13 => (100, 180, 220), // Diamond ore
             14 => (200, 50, 50),   // Redstone ore
             15 => (60, 60, 80),    // Bedrock
             16 => (255, 180, 80),  // Torch (warm orange glow)
+            17 => (194, 178, 128), // Sand (beach/desert)
             _ => (80, 80, 80),     // Unused slots (dark gray)
         };
 

@@ -241,18 +241,19 @@ pub enum Block {
     Dirt = 1,
     Grass = 2,
     Stone = 3,
-    Cobblestone = 4,
-    Sand = 5,
+    StoneDirt = 4,      // Dirty stone variant
+    Brick = 5,          // Placeable brick block
     Water = 6,
     Wood = 7,
     Leaves = 8,
-    CoalOre = 9,
+    StoneRubble2 = 9,   // Stone rubble variant
     IronOre = 10,
     GoldOre = 11,
     DiamondOre = 12,
     RedstoneOre = 13,
     Bedrock = 14,
     Torch = 15,
+    Sand = 16,          // Beach/desert sand
 }
 
 impl Block {
@@ -271,18 +272,19 @@ impl Block {
             Block::Dirt => [0; 6],
             Block::Grass => [1, 0, 2, 2, 2, 2], // Top=grass, Bottom=dirt, Sides=grass_side
             Block::Stone => [3; 6],
-            Block::Cobblestone => [4; 6],
-            Block::Sand => [5; 6],
+            Block::StoneDirt => [4; 6],         // Dirty stone variant
+            Block::Brick => [5; 6],             // Brick building material
             Block::Water => [6; 6],
             Block::Wood => [8, 8, 7, 7, 7, 7], // Top/Bottom=cross-section, Sides=bark
             Block::Leaves => [9; 6],
-            Block::CoalOre => [10; 6],
+            Block::StoneRubble2 => [10; 6],    // Stone rubble variant
             Block::IronOre => [11; 6],
             Block::GoldOre => [12; 6],
             Block::DiamondOre => [13; 6],
             Block::RedstoneOre => [14; 6],
             Block::Bedrock => [15; 6],
-            Block::Torch => [16; 6], // Torch has dedicated warm orange texture
+            Block::Torch => [16; 6],           // Torch has dedicated warm orange texture
+            Block::Sand => [17; 6],            // Beach sand
         }
     }
 
@@ -317,18 +319,19 @@ impl From<u8> for Block {
             1 => Block::Dirt,
             2 => Block::Grass,
             3 => Block::Stone,
-            4 => Block::Cobblestone,
-            5 => Block::Sand,
+            4 => Block::StoneDirt,
+            5 => Block::Brick,
             6 => Block::Water,
             7 => Block::Wood,
             8 => Block::Leaves,
-            9 => Block::CoalOre,
+            9 => Block::StoneRubble2,
             10 => Block::IronOre,
             11 => Block::GoldOre,
             12 => Block::DiamondOre,
             13 => Block::RedstoneOre,
             14 => Block::Bedrock,
             15 => Block::Torch,
+            16 => Block::Sand,
             _ => Block::Air,
         }
     }

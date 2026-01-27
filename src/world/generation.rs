@@ -37,7 +37,17 @@ struct ColumnCache {
     is_mountain: bool,
     cliff_factor: f64,
     is_rocky_outcrop: bool,
+    biome: Biome,
     is_beach: bool,
+}
+
+/// Biome types for terrain variety
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Biome {
+    /// Default grasslands - rolling hills, caves lead underground, no surface openings
+    Grasslands,
+    /// Cavernous highlands - hilly green terrain with many surface caverns
+    CavernousHighlands,
 }
 
 /// Tree types for variety in forests
@@ -69,6 +79,7 @@ pub fn generate_chunk_with_seed(pos: ChunkPos, seed: u64) -> Chunk {
         is_mountain: false,
         cliff_factor: 0.0,
         is_rocky_outcrop: false,
+        biome: Biome::Grasslands,
         is_beach: false,
     }; CHUNK_SIZE]; CHUNK_SIZE];
 
@@ -120,10 +131,12 @@ struct TerrainGenerator {
     mountain_noise: RidgedMulti<Perlin>,  // Ridged for sharp peaks
     ridge_noise: Perlin,                   // Ridge direction/placement
 
-    // Cave system (optimized - 2 noise + 1 chamber)
+    // Cave system (expanded for better caves)
     cave_worm_noise: Perlin,       // Worm-like tunnel caves
     cave_worm_noise2: Perlin,      // Second layer for 3D worms
     cave_chamber_noise: Perlin,    // Large chambers
+    cave_cavern_noise: Perlin,     // Large open caverns
+    cave_width_noise: Perlin,      // Varies tunnel width
 
     // Ores
     ore_noise: Perlin,
@@ -135,6 +148,9 @@ struct TerrainGenerator {
     // Structures
     overhang_noise: Perlin,        // Overhangs and cliff shelves
     outcrop_noise: Perlin,         // Rocky outcrops
+
+    // Biomes
+    biome_noise: Perlin,           // Large-scale biome regions
 }
 
 impl TerrainGenerator {
@@ -155,10 +171,12 @@ impl TerrainGenerator {
                 .set_lacunarity(2.2),
             ridge_noise: Perlin::new(seed.wrapping_add(11)),
 
-            // Cave system (optimized)
+            // Cave system (expanded for better caves)
             cave_worm_noise: Perlin::new(seed.wrapping_add(20)),
             cave_worm_noise2: Perlin::new(seed.wrapping_add(21)),
             cave_chamber_noise: Perlin::new(seed.wrapping_add(22)),
+            cave_cavern_noise: Perlin::new(seed.wrapping_add(23)),
+            cave_width_noise: Perlin::new(seed.wrapping_add(24)),
 
             // Ores
             ore_noise: Perlin::new(seed.wrapping_add(30)),
@@ -170,6 +188,9 @@ impl TerrainGenerator {
             // Structures
             overhang_noise: Perlin::new(seed.wrapping_add(50)),
             outcrop_noise: Perlin::new(seed.wrapping_add(52)),
+
+            // Biomes
+            biome_noise: Perlin::new(seed.wrapping_add(60)),
         }
     }
 
@@ -184,14 +205,41 @@ impl TerrainGenerator {
         let cliff_factor = ((h_ns.max(h_ew)) as f64 / 8.0).min(1.0);
 
         let is_rocky_outcrop = self.is_rocky_outcrop(x, z);
-        let is_beach = height < 33;
+
+        // Determine biome based on large-scale noise
+        let biome = self.get_biome(x, z);
+
+        // Beach near water level
+        let is_beach = height < WATER_SEA_LEVEL + 2 && height >= WATER_SEA_LEVEL - 3;
 
         ColumnCache {
             height,
             is_mountain,
             cliff_factor,
             is_rocky_outcrop,
+            biome,
             is_beach,
+        }
+    }
+
+    /// Determine which biome this position belongs to
+    fn get_biome(&self, x: i32, z: i32) -> Biome {
+        let xf = x as f64;
+        let zf = z as f64;
+
+        // Very low frequency noise for large biome regions
+        let biome_value = self.biome_noise.get([xf * 0.002, zf * 0.002]);
+
+        // Secondary noise for biome edge variation
+        let detail = self.biome_noise.get([xf * 0.008 + 100.0, zf * 0.008 + 100.0]) * 0.15;
+
+        let combined = biome_value + detail;
+
+        // Cavernous Highlands in ~25% of the world (where biome noise is high)
+        if combined > 0.35 {
+            Biome::CavernousHighlands
+        } else {
+            Biome::Grasslands
         }
     }
 
@@ -210,8 +258,8 @@ impl TerrainGenerator {
             return Block::Air;
         }
 
-        // Check for caves (optimized)
-        if y > 5 && self.is_cave_fast(x, y, z) {
+        // Check for caves - biome determines cave style
+        if y > 5 && self.is_cave_biome_aware(x, y, z, col.height, col.biome) {
             // Underwater caves fill with water
             if y < WATER_SEA_LEVEL && col.height < WATER_SEA_LEVEL + 4 {
                 return Block::Water;
@@ -228,15 +276,13 @@ impl TerrainGenerator {
                 return Block::Sand;
             }
             if col.is_mountain && col.height > 85 {
-                return Block::Stone;
+                return self.get_stone_variant(x, y, z);
             }
             if col.cliff_factor > 0.6 {
-                // Use fast hash instead of noise for variety
-                let hash = fast_hash(x, z);
-                return if hash & 1 == 0 { Block::Stone } else { Block::Cobblestone };
+                return self.get_stone_variant(x, y, z);
             }
             if col.is_rocky_outcrop {
-                return Block::Stone;
+                return self.get_stone_variant(x, y, z);
             }
             return Block::Grass;
         }
@@ -247,7 +293,7 @@ impl TerrainGenerator {
                 return Block::Sand;
             }
             if col.cliff_factor > 0.5 || (col.is_mountain && col.height > 75) {
-                return Block::Stone;
+                return self.get_stone_variant(x, y, z);
             }
             return Block::Dirt;
         }
@@ -373,39 +419,56 @@ impl TerrainGenerator {
         }
     }
 
-    /// Fast cave detection - single noise sample with worm-like threshold
+    /// Biome-aware cave detection
+    /// - Grasslands: caves stay underground, tunnel-based, rarely open to surface
+    /// - CavernousHighlands: many surface caverns, large open spaces
     #[inline]
-    fn is_cave_fast(&self, x: i32, y: i32, z: i32) -> bool {
+    fn is_cave_biome_aware(&self, x: i32, y: i32, z: i32, surface_height: i32, biome: Biome) -> bool {
         let xf = x as f64;
         let yf = y as f64;
         let zf = z as f64;
 
-        // Single worm cave pass - most impactful visual
-        let worm_scale = 0.04;
-        let worm1 = self.cave_worm_noise.get([
-            xf * worm_scale,
-            yf * worm_scale * 0.7,
-            zf * worm_scale,
-        ]);
-        let worm2 = self.cave_worm_noise2.get([
-            xf * worm_scale + 100.0,
-            yf * worm_scale * 0.7,
-            zf * worm_scale + 100.0,
-        ]);
+        // Depth below surface - used to prevent surface openings in Grasslands
+        let depth_below_surface = surface_height - y;
 
-        // Worm cave threshold - slightly larger for better caves
-        if worm1.abs() < 0.09 && worm2.abs() < 0.09 {
+        match biome {
+            Biome::Grasslands => self.is_cave_grasslands(xf, yf, zf, y, depth_below_surface),
+            Biome::CavernousHighlands => self.is_cave_cavernous(xf, yf, zf, y, depth_below_surface),
+        }
+    }
+
+    /// Grasslands caves: stay underground, tunnel entrances, no surface openings
+    #[inline]
+    fn is_cave_grasslands(&self, xf: f64, yf: f64, zf: f64, y: i32, depth: i32) -> bool {
+        // No caves within 5 blocks of surface (prevents surface openings)
+        if depth < 5 {
+            return false;
+        }
+
+        // Primary worm cave system - narrower tunnels
+        let worm_scale = 0.04;
+        let worm1 = self.cave_worm_noise.get([xf * worm_scale, yf * worm_scale * 0.7, zf * worm_scale]);
+        let worm2 = self.cave_worm_noise2.get([xf * worm_scale + 100.0, yf * worm_scale * 0.7, zf * worm_scale + 100.0]);
+
+        // Narrower threshold for Grasslands (0.07 vs 0.09)
+        if worm1.abs() < 0.07 && worm2.abs() < 0.07 {
             return true;
         }
 
-        // Chambers only at mid-depths (skip expensive check near surface/bedrock)
-        if y > 10 && y < 45 {
-            let chamber = self.cave_chamber_noise.get([
-                xf * 0.025,
-                yf * 0.025,
-                zf * 0.025,
-            ]);
-            if chamber > 0.72 {
+        // Small chambers deep underground only
+        if y > 8 && y < 35 && depth > 10 {
+            let chamber = self.cave_chamber_noise.get([xf * 0.03, yf * 0.025, zf * 0.03]);
+            // Higher threshold = rarer chambers (0.68)
+            if chamber > 0.68 {
+                return true;
+            }
+        }
+
+        // Rare large caverns - only very deep underground
+        if y > 5 && y < 25 && depth > 20 {
+            let cavern = self.cave_cavern_noise.get([xf * 0.015, yf * 0.01, zf * 0.015]);
+            // Very high threshold = rare (0.72)
+            if cavern > 0.72 {
                 return true;
             }
         }
@@ -413,10 +476,58 @@ impl TerrainGenerator {
         false
     }
 
-    /// Enhanced cave generation with worm tunnels and chambers (full version for trees etc)
-    #[allow(dead_code)]
-    fn is_cave(&self, x: i32, y: i32, z: i32) -> bool {
-        self.is_cave_fast(x, y, z)
+    /// Cavernous Highlands caves: many surface openings, large caverns
+    #[inline]
+    fn is_cave_cavernous(&self, xf: f64, yf: f64, zf: f64, y: i32, _depth: i32) -> bool {
+        // Variable tunnel width
+        let width_mod = self.cave_width_noise.get([xf * 0.02, yf * 0.015, zf * 0.02]);
+        let threshold = 0.08 + width_mod.abs() * 0.06;
+
+        // Primary worm caves with variable width
+        let worm_scale = 0.04;
+        let worm1 = self.cave_worm_noise.get([xf * worm_scale, yf * worm_scale * 0.7, zf * worm_scale]);
+        let worm2 = self.cave_worm_noise2.get([xf * worm_scale + 100.0, yf * worm_scale * 0.7, zf * worm_scale + 100.0]);
+
+        if worm1.abs() < threshold && worm2.abs() < threshold {
+            return true;
+        }
+
+        // Secondary larger tunnel network
+        let worm_scale2 = 0.025;
+        let worm3 = self.cave_worm_noise.get([xf * worm_scale2 + 500.0, yf * worm_scale2 * 0.6, zf * worm_scale2 + 500.0]);
+        let worm4 = self.cave_worm_noise2.get([xf * worm_scale2 + 600.0, yf * worm_scale2 * 0.6, zf * worm_scale2 + 600.0]);
+        if worm3.abs() < 0.07 && worm4.abs() < 0.07 {
+            return true;
+        }
+
+        // Large surface caverns (the signature feature)
+        if y > 8 && y < 55 {
+            let cavern = self.cave_cavern_noise.get([xf * 0.012, yf * 0.008, zf * 0.012]);
+            if cavern > 0.5 {
+                let detail = self.cave_chamber_noise.get([xf * 0.06, yf * 0.04, zf * 0.06]);
+                if cavern + detail * 0.15 > 0.55 {
+                    return true;
+                }
+            }
+        }
+
+        // Medium chambers throughout
+        if y > 10 && y < 45 {
+            let chamber = self.cave_chamber_noise.get([xf * 0.025, yf * 0.02, zf * 0.025]);
+            if chamber > 0.55 {
+                return true;
+            }
+        }
+
+        // Deep caverns
+        if y > 5 && y < 30 {
+            let deep = self.cave_cavern_noise.get([xf * 0.018 + 200.0, yf * 0.01, zf * 0.018 + 200.0]);
+            if deep > 0.48 {
+                return true;
+            }
+        }
+
+        false
     }
 
     /// Check if position is a rocky outcrop
@@ -436,15 +547,60 @@ impl TerrainGenerator {
         }
     }
 
+    /// Get a stone variant based on position for natural-looking variation
+    /// Uses larger-scale noise for realistic patches of different stone types
+    #[inline]
+    fn get_stone_variant(&self, x: i32, y: i32, z: i32) -> Block {
+        // Large-scale noise for patch placement (low frequency = large patches)
+        let patch_noise = self.ore_noise.get([
+            x as f64 * 0.03,
+            y as f64 * 0.03,
+            z as f64 * 0.03,
+        ]);
+
+        // Medium-scale noise for variation within patches
+        let detail_hash = fast_hash_3d(x, y, z);
+        let detail = (detail_hash % 100) as f64 / 100.0;
+
+        // Distribute stone types:
+        // - Stone (rubble): ~60% - main stone type
+        // - StoneDirt: ~25% - in patches, more common at surface/caves
+        // - StoneRubble2: ~15% - scattered for additional variety
+        if patch_noise > 0.3 {
+            // StoneDirt patches - dirty stone in certain areas
+            if detail < 0.7 {
+                Block::StoneDirt
+            } else {
+                Block::Stone
+            }
+        } else if patch_noise < -0.4 {
+            // StoneRubble2 patches - rougher stone
+            if detail < 0.6 {
+                Block::StoneRubble2
+            } else {
+                Block::Stone
+            }
+        } else {
+            // Default stone with occasional variation
+            if detail > 0.92 {
+                Block::StoneDirt
+            } else if detail > 0.85 {
+                Block::StoneRubble2
+            } else {
+                Block::Stone
+            }
+        }
+    }
+
     /// Fast ore generation using hash + single noise sample
     #[inline]
     fn get_ore_or_stone_fast(&self, x: i32, y: i32, z: i32) -> Block {
         // Use fast hash for initial ore check - most blocks are stone
         let hash = fast_hash_3d(x, y, z);
 
-        // 95% of blocks are stone - skip noise entirely
+        // 95% of blocks are stone variants - skip noise entirely for ore check
         if hash % 100 > 5 {
-            return Block::Stone;
+            return self.get_stone_variant(x, y, z);
         }
 
         // Only do noise lookup for potential ore positions
@@ -465,16 +621,18 @@ impl TerrainGenerator {
             if y < 50 {
                 Block::IronOre
             } else {
-                Block::CoalOre
+                // Was CoalOre, now just stone since we removed it
+                self.get_stone_variant(x, y, z)
             }
         } else if ore_value > 0.0 {
-            Block::CoalOre
+            // Was CoalOre, now just stone
+            self.get_stone_variant(x, y, z)
         } else if y < 20 {
             Block::RedstoneOre
         } else if y < 16 && ore_value < -0.5 {
             Block::DiamondOre
         } else {
-            Block::Stone
+            self.get_stone_variant(x, y, z)
         }
     }
 
@@ -539,6 +697,45 @@ impl TerrainGenerator {
         tree_value > 0.0 && hash_value > density_threshold
     }
 
+    /// Check if ground is solid at and around a position (no caves)
+    /// Returns true if the surface is stable for tree placement
+    fn is_ground_stable_for_tree(&self, x: i32, surface_y: i32, z: i32) -> bool {
+        let biome = self.get_biome(x, z);
+
+        // Check the tree base position and immediate surroundings
+        // Need solid ground at surface and a few blocks below
+        for dy in 0..3 {
+            let check_y = surface_y - dy;
+            if check_y <= 0 {
+                continue;
+            }
+            // Check if this would be a cave
+            if self.is_cave_biome_aware(x, check_y, z, surface_y, biome) {
+                return false; // Cave at or near surface
+            }
+        }
+
+        // Also check the 4 cardinal neighbors at surface level
+        for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+            let nx = x + dx;
+            let nz = z + dz;
+            let neighbor_height = self.get_terrain_height(nx, nz);
+            let neighbor_biome = self.get_biome(nx, nz);
+
+            // Check if neighbor surface is a cave
+            if self.is_cave_biome_aware(nx, neighbor_height, nz, neighbor_height, neighbor_biome) {
+                return false; // Adjacent ground is hollow
+            }
+
+            // Check for large height differences (cliff edges)
+            if (neighbor_height - surface_y).abs() > 2 {
+                return false; // Too steep for tree
+            }
+        }
+
+        true
+    }
+
     /// Get tree height based on type and position
     fn get_tree_height(&self, x: i32, z: i32, tree_type: TreeType) -> i32 {
         let variation = self.tree_noise.get([x as f64 * 0.5 + 100.0, z as f64 * 0.5 + 100.0]);
@@ -573,11 +770,17 @@ impl TerrainGenerator {
 
                 // Only place trees on suitable terrain
                 if surface_y < 35 || surface_y > 90 {
-                    continue; // Skip beaches, underwater, and extreme peaks
+                    continue; // Skip underwater and extreme peaks
                 }
 
                 // Skip steep cliffs
                 if self.get_cliff_factor(wx, wz) > 0.5 {
+                    continue;
+                }
+
+                // IMPORTANT: Check that ground is solid (no caves beneath)
+                // This prevents floating trees over caverns
+                if !self.is_ground_stable_for_tree(wx, surface_y, wz) {
                     continue;
                 }
 

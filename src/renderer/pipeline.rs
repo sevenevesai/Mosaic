@@ -573,12 +573,14 @@ fn trace_sky_occlusion(world_pos: vec3<f32>) -> f32 {
 
         // If outside volume horizontally, assume some sky access
         if (!is_in_volume(uv)) {
-            accumulated_opacity += 0.3;
+            accumulated_opacity += 0.2;
             break;
         }
 
         let voxel = textureSampleLevel(t_voxel, s_voxel, uv, 0.0);
-        accumulated_opacity += voxel.r * 0.15;
+        // Gradual occlusion - 0.08 per solid voxel means ~12 blocks for full darkness
+        // This allows light to penetrate further into cave openings
+        accumulated_opacity += voxel.r * 0.08;
 
         if (accumulated_opacity >= 1.0) {
             break;
@@ -767,14 +769,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Combine all lighting
     // Sky access affects ambient - caves get much less ambient light
-    let cave_ambient_factor = mix(0.05, 1.0, sky_access);  // 5% ambient in full cave, 100% with sky
+    let cave_ambient_factor = mix(0.10, 1.0, sky_access);  // 10% ambient in full cave, 100% with sky
     let sky_contrib = ambient_base * 0.2 * (0.2 + sun_intensity * 0.8) * cave_ambient_factor;
     let ambient_with_sky = ambient_base * cave_ambient_factor;
     let natural_light_raw = ambient_with_sky + sun_contribution + moon_contribution + sky_contrib + gi * 0.3;
 
     // Shadow affects the whole natural light result
     // In caves (no sky access), shadow multiplier is lower
-    let min_shadow_light = mix(0.02, 0.3, sky_access);  // 2% minimum in caves, 30% with sky
+    let min_shadow_light = mix(0.07, 0.3, sky_access);  // 7% minimum in caves, 30% with sky
     let shadow_multiplier = mix(min_shadow_light, 1.0, final_shadow);
     let natural_light = natural_light_raw * shadow_multiplier;
     let natural_lit = natural_light * face_brightness;

@@ -299,7 +299,7 @@ const fn face_index(axis: Axis, positive: bool) -> usize {
 }
 
 /// Maximum number of texture indices (4x4 atlas = 16 textures)
-const MAX_TEXTURES: usize = 16;
+const MAX_TEXTURES: usize = 32; // Support up to 32 texture types
 
 /// Sample the combined light level at a block position
 /// Checks neighbor chunks if position is outside current chunk bounds
@@ -789,7 +789,7 @@ fn binary_greedy_mesh_axis(
 
         // Per-texture visibility masks: texture_masks[tex_idx][row] = bitmask
         let mut texture_masks = [[0u16; CHUNK_SIZE]; MAX_TEXTURES];
-        let mut textures_present: u16 = 0; // Tracks which textures have faces
+        let mut textures_present: u32 = 0; // Tracks which textures have faces (up to 32)
 
         for v in 0..CHUNK_SIZE {
             let mut row_bits = visible_mask[v];
