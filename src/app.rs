@@ -12,7 +12,7 @@ use winit::{
 };
 
 use crate::audio::AudioManager;
-use crate::player::Player;
+use crate::player::{Player, BlockInteraction};
 use crate::renderer::{Renderer, DebugMetrics};
 use crate::utils::profiler::FrameProfiler;
 use crate::world::{WorldManager, ChunkPos, MESH_STATS};
@@ -206,10 +206,23 @@ impl App {
         if self.cursor_grabbed {
             self.player.update(dt, Some(&self.world));
             // Process block break/place interactions
-            let blocks_changed = self.player.process_block_interactions(&mut self.world);
-            if blocks_changed {
-                // Force voxel volume update for immediate torch lighting
-                self.renderer.mark_voxel_dirty();
+            let interaction = self.player.process_block_interactions(&mut self.world);
+            match interaction {
+                BlockInteraction::Break { x, y, z } => {
+                    // Mark only the affected block for voxel GI update (incremental)
+                    self.renderer.mark_voxel_dirty_at(x, y, z);
+                    if let Some(ref mut audio) = self.audio {
+                        audio.play_block_break();
+                    }
+                }
+                BlockInteraction::Place { x, y, z } => {
+                    // Mark only the affected block for voxel GI update (incremental)
+                    self.renderer.mark_voxel_dirty_at(x, y, z);
+                    if let Some(ref mut audio) = self.audio {
+                        audio.play_block_place();
+                    }
+                }
+                BlockInteraction::None => {}
             }
 
             // Update footstep audio (only when not flying)
@@ -292,7 +305,7 @@ impl App {
         // Render
         self.profiler.begin_section("render");
         let held_light = self.player.selected_block().light_emission();
-        match self.renderer.render(&self.player.camera, &self.world, &self.profiler, target_block, &debug_metrics, held_light) {
+        match self.renderer.render(&self.player.camera, &mut self.world, &self.profiler, target_block, &debug_metrics, held_light) {
             Ok(_) => {
                 // Update profiler with render stats
                 self.profiler.update_render_stats(self.renderer.stats.clone());

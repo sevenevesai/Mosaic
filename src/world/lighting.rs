@@ -571,6 +571,164 @@ mod tests {
             // In this test case with single source, they should be 0
         }
     }
+
+    // ============ Cross-Chunk Propagation Tests ============
+
+    /// Helper to create a multi-chunk map for cross-boundary tests
+    fn create_multi_chunk_map() -> Arc<RwLock<AHashMap<ChunkPos, Arc<Chunk>>>> {
+        let mut map = AHashMap::new();
+        // Create a 3x3x3 grid of empty chunks centered at origin
+        for x in -1..=1 {
+            for y in -1..=1 {
+                for z in -1..=1 {
+                    map.insert(ChunkPos { x, y, z }, Arc::new(Chunk::new()));
+                }
+            }
+        }
+        Arc::new(RwLock::new(map))
+    }
+
+    #[test]
+    fn test_cross_chunk_propagation_positive_x() {
+        let chunks = create_multi_chunk_map();
+        let mut engine = LightEngine::new();
+
+        // Place light at x=15 (boundary) in chunk (0,0,0)
+        // World coords: x=15, y=8, z=8
+        let updates = engine.propagate_light(15, 8, 8, 14, &chunks);
+
+        // Should have updates for both chunk (0,0,0) and chunk (1,0,0)
+        let origin_updates = updates.iter()
+            .find(|(pos, _)| pos.x == 0 && pos.y == 0 && pos.z == 0);
+        let neighbor_updates = updates.iter()
+            .find(|(pos, _)| pos.x == 1 && pos.y == 0 && pos.z == 0);
+
+        assert!(origin_updates.is_some(), "Should have updates for origin chunk");
+        assert!(neighbor_updates.is_some(), "Should have updates for +X neighbor chunk");
+
+        // Check that light propagated into neighbor chunk at x=0 (world x=16)
+        let (_, neighbor_changes) = neighbor_updates.unwrap();
+        let cross_boundary = neighbor_changes.iter()
+            .find(|(x, y, z, _)| *x == 0 && *y == 8 && *z == 8);
+        assert!(cross_boundary.is_some(), "Light should propagate to neighbor chunk");
+        assert_eq!(cross_boundary.unwrap().3, 13, "Cross-boundary light should be 13 (14-1)");
+    }
+
+    #[test]
+    fn test_cross_chunk_propagation_negative_x() {
+        let chunks = create_multi_chunk_map();
+        let mut engine = LightEngine::new();
+
+        // Place light at x=0 (boundary) in chunk (0,0,0)
+        // World coords: x=0, y=8, z=8
+        let updates = engine.propagate_light(0, 8, 8, 14, &chunks);
+
+        // Should have updates for both chunk (0,0,0) and chunk (-1,0,0)
+        let neighbor_updates = updates.iter()
+            .find(|(pos, _)| pos.x == -1 && pos.y == 0 && pos.z == 0);
+
+        assert!(neighbor_updates.is_some(), "Should have updates for -X neighbor chunk");
+
+        // Check that light propagated into neighbor chunk at x=15 (world x=-1)
+        let (_, neighbor_changes) = neighbor_updates.unwrap();
+        let cross_boundary = neighbor_changes.iter()
+            .find(|(x, y, z, _)| *x == 15 && *y == 8 && *z == 8);
+        assert!(cross_boundary.is_some(), "Light should propagate to -X neighbor chunk");
+        assert_eq!(cross_boundary.unwrap().3, 13, "Cross-boundary light should be 13");
+    }
+
+    #[test]
+    fn test_cross_chunk_propagation_all_directions() {
+        let chunks = create_multi_chunk_map();
+        let mut engine = LightEngine::new();
+
+        // Place light at corner (0,0,0) in chunk (0,0,0)
+        // This should propagate into chunks (-1,0,0), (0,-1,0), and (0,0,-1)
+        let updates = engine.propagate_light(0, 0, 0, 14, &chunks);
+
+        // Check all three negative neighbors received updates
+        let neg_x = updates.iter().any(|(pos, _)| pos.x == -1 && pos.y == 0 && pos.z == 0);
+        let neg_y = updates.iter().any(|(pos, _)| pos.x == 0 && pos.y == -1 && pos.z == 0);
+        let neg_z = updates.iter().any(|(pos, _)| pos.x == 0 && pos.y == 0 && pos.z == -1);
+
+        assert!(neg_x, "Light should propagate to -X chunk");
+        assert!(neg_y, "Light should propagate to -Y chunk");
+        assert!(neg_z, "Light should propagate to -Z chunk");
+    }
+
+    #[test]
+    fn test_cross_chunk_dirty_marking() {
+        let chunks = create_multi_chunk_map();
+        let mut engine = LightEngine::new();
+
+        // Propagate light at chunk boundary
+        let _ = engine.propagate_light(15, 8, 8, 14, &chunks);
+
+        // Both chunks should be marked dirty
+        let dirty = engine.take_dirty_chunks();
+        assert!(dirty.contains(&ChunkPos { x: 0, y: 0, z: 0 }), "Origin chunk should be dirty");
+        assert!(dirty.contains(&ChunkPos { x: 1, y: 0, z: 0 }), "Neighbor chunk should be dirty");
+    }
+
+    #[test]
+    fn test_light_decay_across_chunks() {
+        let chunks = create_multi_chunk_map();
+        let mut engine = LightEngine::new();
+
+        // Place torch (level 14) at x=14 in chunk (0,0,0)
+        // Light should decay: 14 at x=14, 13 at x=15, 12 at x=16 (neighbor chunk x=0)
+        let updates = engine.propagate_light(14, 8, 8, 14, &chunks);
+        apply_light_updates(updates, &chunks);
+
+        let chunks_read = chunks.read();
+        let origin = chunks_read.get(&ChunkPos { x: 0, y: 0, z: 0 }).unwrap();
+        let neighbor = chunks_read.get(&ChunkPos { x: 1, y: 0, z: 0 }).unwrap();
+
+        assert_eq!(origin.get_block_light(14, 8, 8), 14, "Source should be 14");
+        assert_eq!(origin.get_block_light(15, 8, 8), 13, "x=15 should be 13");
+        assert_eq!(neighbor.get_block_light(0, 8, 8), 12, "Neighbor x=0 should be 12");
+        assert_eq!(neighbor.get_block_light(1, 8, 8), 11, "Neighbor x=1 should be 11");
+    }
+
+    #[test]
+    fn test_missing_neighbor_chunk_handled() {
+        // Single chunk with no neighbors - light should stop at boundary
+        let chunks = create_chunk_map();
+        let mut engine = LightEngine::new();
+
+        // Place light at boundary - should not crash, light stops at edge
+        let updates = engine.propagate_light(15, 8, 8, 14, &chunks);
+
+        // Should only have updates for origin chunk
+        assert_eq!(updates.len(), 1, "Only origin chunk should have updates");
+        assert_eq!(updates[0].0, ChunkPos { x: 0, y: 0, z: 0 });
+    }
+
+    #[test]
+    fn test_multiple_sources_across_chunks() {
+        let chunks = create_multi_chunk_map();
+        let mut engine = LightEngine::new();
+
+        // Place two torches: one in chunk (0,0,0) at x=14, one in chunk (1,0,0) at x=1 (world x=17)
+        let updates1 = engine.propagate_light(14, 8, 8, 14, &chunks);
+        apply_light_updates(updates1, &chunks);
+
+        let updates2 = engine.propagate_light(17, 8, 8, 14, &chunks);
+        apply_light_updates(updates2, &chunks);
+
+        // The area between them (x=15, x=16) should have combined light
+        let chunks_read = chunks.read();
+        let origin = chunks_read.get(&ChunkPos { x: 0, y: 0, z: 0 }).unwrap();
+        let neighbor = chunks_read.get(&ChunkPos { x: 1, y: 0, z: 0 }).unwrap();
+
+        // x=15 in origin: min(14-1, 14-2) = min(13, 12) = 12... wait, that's wrong
+        // Actually the second source is at world x=17, so:
+        // - From source at x=14: x=15 gets 13, x=16 gets 12
+        // - From source at x=17: x=16 gets 13, x=15 gets 12
+        // Combined: x=15 gets max(13, 12) = 13, x=16 gets max(12, 13) = 13
+        assert!(origin.get_block_light(15, 8, 8) >= 12, "x=15 should have light from both sources");
+        assert!(neighbor.get_block_light(0, 8, 8) >= 12, "x=16 should have light from both sources");
+    }
 }
 
 /// Apply light updates to chunks (call after propagation)

@@ -512,9 +512,15 @@ impl Renderer {
         self.debug_overlay.is_enabled()
     }
 
-    /// Mark voxel volume as needing update (call when blocks change)
+    /// Mark voxel volume as needing full update (use mark_voxel_dirty_at for single blocks)
     pub fn mark_voxel_dirty(&mut self) {
         self.voxel_gi.mark_dirty();
+    }
+
+    /// Mark a specific block position as dirty for incremental voxel update
+    /// Much faster than full update - only updates the affected voxel and light radius
+    pub fn mark_voxel_dirty_at(&mut self, x: i32, y: i32, z: i32) {
+        self.voxel_gi.mark_dirty_at(x, y, z);
     }
 
     /// Update the day/night cycle time
@@ -576,7 +582,7 @@ impl Renderer {
     pub fn render(
         &mut self,
         camera: &Camera,
-        world: &WorldManager,
+        world: &mut WorldManager,
         _profiler: &FrameProfiler,
         target_block: Option<[i32; 3]>,
         debug_metrics: &DebugMetrics,
@@ -949,8 +955,17 @@ impl Renderer {
 
     /// Sync all visible meshes to the chunk pool for MDI rendering
     /// Only uploads meshes that aren't already in the pool (or have changed size)
-    pub fn sync_meshes_to_pool(&mut self, world: &crate::world::WorldManager) {
-        // Throttle uploads to prevent frame spikes when many chunks arrive at once
+    pub fn sync_meshes_to_pool(&mut self, world: &mut crate::world::WorldManager) {
+        // FIRST: Upload urgent meshes (player block changes) WITHOUT throttling
+        // These need to appear immediately for responsive gameplay
+        let urgent = world.take_urgent_uploads();
+        for pos in &urgent {
+            if let Some(mesh) = world.visible_meshes().find(|m| &m.pos == pos) {
+                self.chunk_pool.upload_chunk(&self.queue, mesh);
+            }
+        }
+
+        // Throttle regular uploads to prevent frame spikes when many chunks arrive at once
         // 16 uploads/frame at 60fps = 960 chunks/sec, plenty fast for smooth loading
         const MAX_UPLOADS_PER_FRAME: usize = 16;
         let mut uploads_this_frame = 0;
@@ -958,6 +973,11 @@ impl Renderer {
         // Only upload meshes not already in pool (or with different size indicating regeneration)
         for mesh in world.visible_meshes() {
             if mesh.vertices.is_empty() {
+                continue;
+            }
+
+            // Skip urgent meshes we already uploaded
+            if urgent.contains(&mesh.pos) {
                 continue;
             }
 

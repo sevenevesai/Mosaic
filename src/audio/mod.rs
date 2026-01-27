@@ -1,14 +1,25 @@
 //! Audio system
 //!
 //! Handles sound effects and music playback.
+//!
+//! ## Sound Assets
+//!
+//! Place WAV files in `assets/sfx/`:
+//! - `footstep-grass-1.wav`, `footstep-grass-2.wav` - Walking sounds
+//! - `block-break-1.wav`, `block-break-2.wav` - Block breaking sounds
+//! - `block-place-1.wav`, `block-place-2.wav` - Block placing sounds
+//!
+//! Missing sounds are gracefully handled (no crash, just silent).
 
 use std::time::Duration;
 
 use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink, Source};
 
 /// Volume level for footsteps (0.0 - 1.0)
-/// Keep it subtle - just slightly present
 const FOOTSTEP_VOLUME: f32 = 0.15;
+
+/// Volume level for block interactions (slightly louder for feedback)
+const BLOCK_SOUND_VOLUME: f32 = 0.25;
 
 /// Time between footstep sounds when walking (seconds)
 const FOOTSTEP_INTERVAL_SECS: f32 = 0.40;
@@ -24,8 +35,16 @@ pub struct AudioManager {
     stream_handle: OutputStreamHandle,
     /// Footstep sound buffers (pre-loaded)
     footstep_buffers: Vec<Vec<u8>>,
+    /// Block break sound buffers
+    break_buffers: Vec<Vec<u8>>,
+    /// Block place sound buffers
+    place_buffers: Vec<Vec<u8>>,
     /// Which footstep sound to play next (alternates 0, 1, 0, 1...)
     footstep_index: usize,
+    /// Which break sound to play next
+    break_index: usize,
+    /// Which place sound to play next
+    place_index: usize,
     /// Accumulated time since last footstep (for even timing)
     footstep_timer: f32,
 }
@@ -42,37 +61,73 @@ impl AudioManager {
             }
         };
 
-        // Load footstep sounds
-        let footstep_paths = [
-            "assets/sfx/footstep-grass-1.wav",
-            "assets/sfx/footstep-grass-2.wav",
-        ];
-
-        let mut footstep_buffers = Vec::new();
-        for path in &footstep_paths {
-            match std::fs::read(path) {
-                Ok(data) => {
-                    footstep_buffers.push(data);
-                    tracing::debug!("Loaded footstep sound: {}", path);
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to load {}: {}", path, e);
+        // Helper to load sounds from paths
+        fn load_sounds(paths: &[&str], name: &str) -> Vec<Vec<u8>> {
+            let mut buffers = Vec::new();
+            for path in paths {
+                match std::fs::read(path) {
+                    Ok(data) => {
+                        buffers.push(data);
+                        tracing::debug!("Loaded {} sound: {}", name, path);
+                    }
+                    Err(e) => {
+                        tracing::debug!("Optional {} sound not found: {} ({})", name, path, e);
+                    }
                 }
             }
+            buffers
         }
 
-        if footstep_buffers.is_empty() {
-            tracing::warn!("No footstep sounds loaded");
+        // Load footstep sounds
+        let footstep_buffers = load_sounds(
+            &[
+                "assets/sfx/footstep-grass-1.wav",
+                "assets/sfx/footstep-grass-2.wav",
+            ],
+            "footstep",
+        );
+
+        // Load block break sounds
+        let break_buffers = load_sounds(
+            &[
+                "assets/sfx/block-break-1.wav",
+                "assets/sfx/block-break-2.wav",
+            ],
+            "block-break",
+        );
+
+        // Load block place sounds
+        let place_buffers = load_sounds(
+            &[
+                "assets/sfx/block-place-1.wav",
+                "assets/sfx/block-place-2.wav",
+            ],
+            "block-place",
+        );
+
+        // Count total sounds loaded
+        let total = footstep_buffers.len() + break_buffers.len() + place_buffers.len();
+        if total == 0 {
+            tracing::warn!("No audio files loaded - audio disabled");
             return None;
         }
 
-        tracing::info!("Audio initialized with {} footstep sounds", footstep_buffers.len());
+        tracing::info!(
+            "Audio initialized: {} footstep, {} break, {} place sounds",
+            footstep_buffers.len(),
+            break_buffers.len(),
+            place_buffers.len()
+        );
 
         Some(Self {
             _stream: stream,
             stream_handle,
             footstep_buffers,
+            break_buffers,
+            place_buffers,
             footstep_index: 0,
+            break_index: 0,
+            place_index: 0,
             footstep_timer: 0.0,
         })
     }
@@ -138,6 +193,53 @@ impl AudioManager {
         if let Ok(sink) = Sink::try_new(&self.stream_handle) {
             sink.append(source);
             sink.detach(); // Let it play and clean up automatically
+        }
+    }
+
+    /// Play a block break sound
+    ///
+    /// Call this when a block is successfully broken.
+    /// Alternates between available break sounds for variety.
+    pub fn play_block_break(&mut self) {
+        if self.break_buffers.is_empty() {
+            return;
+        }
+
+        let buffer = self.break_buffers[self.break_index].clone();
+        self.break_index = (self.break_index + 1) % self.break_buffers.len();
+        self.play_buffer(&buffer, BLOCK_SOUND_VOLUME);
+    }
+
+    /// Play a block place sound
+    ///
+    /// Call this when a block is successfully placed.
+    /// Alternates between available place sounds for variety.
+    pub fn play_block_place(&mut self) {
+        if self.place_buffers.is_empty() {
+            return;
+        }
+
+        let buffer = self.place_buffers[self.place_index].clone();
+        self.place_index = (self.place_index + 1) % self.place_buffers.len();
+        self.play_buffer(&buffer, BLOCK_SOUND_VOLUME);
+    }
+
+    /// Play a sound from a buffer at the specified volume
+    fn play_buffer(&self, buffer: &[u8], volume: f32) {
+        let cursor = std::io::Cursor::new(buffer.to_vec());
+        let source = match Decoder::new(cursor) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("Failed to decode sound: {}", e);
+                return;
+            }
+        };
+
+        let source = source.amplify(volume);
+
+        if let Ok(sink) = Sink::try_new(&self.stream_handle) {
+            sink.append(source);
+            sink.detach();
         }
     }
 }

@@ -174,8 +174,12 @@ pub struct WorldManager {
     /// Chunks pending water meshing
     pending_water_meshing: AHashMap<ChunkPos, ()>,
 
-    /// Channel to send tasks to workers
+    /// Channel to send tasks to workers (regular priority - generation, LOD updates)
     task_sender: Sender<ChunkTask>,
+
+    /// Channel to send HIGH PRIORITY tasks (player block changes)
+    /// Workers check this channel first before the regular channel
+    priority_task_sender: Sender<ChunkTask>,
 
     /// Channel to receive results from workers
     result_receiver: Receiver<ChunkResult>,
@@ -194,6 +198,14 @@ pub struct WorldManager {
 
     /// World generation seed
     seed: u64,
+
+    /// Meshes that need IMMEDIATE upload to chunk pool (player block changes)
+    /// These bypass the normal throttled upload and get uploaded the same frame
+    urgent_mesh_uploads: Vec<ChunkPos>,
+
+    /// Chunks that should be marked urgent when their mesh result arrives
+    /// (neighbors of player-modified chunks)
+    pending_urgent: ahash::AHashSet<ChunkPos>,
 }
 
 impl WorldManager {
@@ -211,7 +223,10 @@ impl WorldManager {
     }
 
     fn new_internal(storage: Option<storage::SharedStorage>, seed: u64) -> Self {
+        // Regular priority channel for generation and LOD updates
         let (task_sender, task_receiver) = crossbeam_channel::unbounded::<ChunkTask>();
+        // HIGH priority channel for player block changes - workers check this first
+        let (priority_task_sender, priority_task_receiver) = crossbeam_channel::unbounded::<ChunkTask>();
         let (result_sender, result_receiver) = crossbeam_channel::unbounded::<ChunkResult>();
 
         let chunks: Arc<RwLock<AHashMap<ChunkPos, Arc<Chunk>>>> =
@@ -228,6 +243,7 @@ impl WorldManager {
 
         for i in 0..num_workers {
             let task_rx = task_receiver.clone();
+            let priority_rx = priority_task_receiver.clone();
             let result_tx = result_sender.clone();
             let chunks_ref = chunks.clone();
             let storage_ref = worker_storage.clone();
@@ -236,7 +252,7 @@ impl WorldManager {
             let handle = std::thread::Builder::new()
                 .name(format!("chunk-worker-{}", i))
                 .spawn(move || {
-                    Self::worker_loop(task_rx, result_tx, chunks_ref, storage_ref, worker_seed);
+                    Self::worker_loop(priority_rx, task_rx, result_tx, chunks_ref, storage_ref, worker_seed);
                 })
                 .expect("Failed to spawn worker thread");
 
@@ -252,71 +268,81 @@ impl WorldManager {
             pending_water_meshing: AHashMap::new(),
             mesh_generation: AHashMap::new(),
             task_sender,
+            priority_task_sender,
             result_receiver,
             _workers: workers,
             last_player_chunk: None,
             light_engine: LightEngine::new(),
             storage,
             seed,
+            urgent_mesh_uploads: Vec::new(),
+            pending_urgent: ahash::AHashSet::new(),
         }
     }
 
     fn worker_loop(
+        priority_rx: Receiver<ChunkTask>,
         task_rx: Receiver<ChunkTask>,
         result_tx: Sender<ChunkResult>,
         chunks: Arc<RwLock<AHashMap<ChunkPos, Arc<Chunk>>>>,
         storage: Option<storage::SharedStorage>,
         seed: u64,
     ) {
-        while let Ok(task) = task_rx.recv() {
-            match task {
-                ChunkTask::Generate(pos) => {
-                    // Try loading from disk first if storage is available
-                    let chunk = if let Some(ref storage) = storage {
-                        match storage.lock().load_chunk(pos) {
-                            Ok(Some(loaded)) => {
-                                tracing::trace!("Loaded chunk {:?} from disk", pos);
-                                loaded
-                            }
-                            Ok(None) => {
-                                // Not on disk, generate it
-                                generation::generate_chunk_with_seed(pos, seed)
-                            }
-                            Err(e) => {
-                                tracing::warn!("Failed to load chunk {:?}: {}, regenerating", pos, e);
-                                generation::generate_chunk_with_seed(pos, seed)
-                            }
-                        }
-                    } else {
-                        generation::generate_chunk_with_seed(pos, seed)
-                    };
-                    let _ = result_tx.send(ChunkResult::Generated(pos, Box::new(chunk)));
-                }
-                ChunkTask::Mesh(pos, lod, generation) => {
-                    let chunks_read = chunks.read();
-                    if let Some(chunk) = chunks_read.get(&pos).cloned() {
-                        // Get neighbor chunks for proper face culling
-                        let neighbors = [
-                            chunks_read.get(&pos.offset(-1, 0, 0)).cloned(),
-                            chunks_read.get(&pos.offset(1, 0, 0)).cloned(),
-                            chunks_read.get(&pos.offset(0, -1, 0)).cloned(),
-                            chunks_read.get(&pos.offset(0, 1, 0)).cloned(),
-                            chunks_read.get(&pos.offset(0, 0, -1)).cloned(),
-                            chunks_read.get(&pos.offset(0, 0, 1)).cloned(),
-                        ];
-                        drop(chunks_read);
+        use crossbeam_channel::select;
 
-                        // Build mesh with specified LOD level
-                        let mesh = meshing::build_chunk_mesh_lod(pos, &chunk, &neighbors, lod);
-                        // Pass through generation so we can discard stale results
-                        let _ = result_tx.send(ChunkResult::Meshed(pos, mesh, generation));
+        loop {
+            // Use select! to prioritize the priority channel
+            // Priority tasks (player block changes) always get processed first
+            let task = select! {
+                recv(priority_rx) -> msg => {
+                    match msg {
+                        Ok(task) => task,
+                        Err(_) => break, // Channel closed
                     }
                 }
-                ChunkTask::MeshWater(pos) => {
-                    let chunks_read = chunks.read();
-                    if let Some(chunk) = chunks_read.get(&pos).cloned() {
-                        // Only build water mesh if chunk has water
-                        if chunk.has_water() {
+                recv(task_rx) -> msg => {
+                    match msg {
+                        Ok(task) => task,
+                        Err(_) => break, // Channel closed
+                    }
+                }
+            };
+
+            // Drain any remaining priority tasks before processing this one
+            // This ensures ALL priority tasks are handled before regular tasks
+            let mut priority_tasks = vec![task];
+            while let Ok(t) = priority_rx.try_recv() {
+                priority_tasks.push(t);
+            }
+
+            for task in priority_tasks {
+                match task {
+                    ChunkTask::Generate(pos) => {
+                        // Try loading from disk first if storage is available
+                        let chunk = if let Some(ref storage) = storage {
+                            match storage.lock().load_chunk(pos) {
+                                Ok(Some(loaded)) => {
+                                    tracing::trace!("Loaded chunk {:?} from disk", pos);
+                                    loaded
+                                }
+                                Ok(None) => {
+                                    // Not on disk, generate it
+                                    generation::generate_chunk_with_seed(pos, seed)
+                                }
+                                Err(e) => {
+                                    tracing::warn!("Failed to load chunk {:?}: {}, regenerating", pos, e);
+                                    generation::generate_chunk_with_seed(pos, seed)
+                                }
+                            }
+                        } else {
+                            generation::generate_chunk_with_seed(pos, seed)
+                        };
+                        let _ = result_tx.send(ChunkResult::Generated(pos, Box::new(chunk)));
+                    }
+                    ChunkTask::Mesh(pos, lod, generation) => {
+                        let chunks_read = chunks.read();
+                        if let Some(chunk) = chunks_read.get(&pos).cloned() {
+                            // Get neighbor chunks for proper face culling
                             let neighbors = [
                                 chunks_read.get(&pos.offset(-1, 0, 0)).cloned(),
                                 chunks_read.get(&pos.offset(1, 0, 0)).cloned(),
@@ -327,12 +353,34 @@ impl WorldManager {
                             ];
                             drop(chunks_read);
 
-                            let water_mesh = water_meshing::build_water_mesh(pos, &chunk, &neighbors);
-                            let _ = result_tx.send(ChunkResult::WaterMeshed(pos, water_mesh));
+                            // Build mesh with specified LOD level
+                            let mesh = meshing::build_chunk_mesh_lod(pos, &chunk, &neighbors, lod);
+                            // Pass through generation so we can discard stale results
+                            let _ = result_tx.send(ChunkResult::Meshed(pos, mesh, generation));
                         }
                     }
+                    ChunkTask::MeshWater(pos) => {
+                        let chunks_read = chunks.read();
+                        if let Some(chunk) = chunks_read.get(&pos).cloned() {
+                            // Only build water mesh if chunk has water
+                            if chunk.has_water() {
+                                let neighbors = [
+                                    chunks_read.get(&pos.offset(-1, 0, 0)).cloned(),
+                                    chunks_read.get(&pos.offset(1, 0, 0)).cloned(),
+                                    chunks_read.get(&pos.offset(0, -1, 0)).cloned(),
+                                    chunks_read.get(&pos.offset(0, 1, 0)).cloned(),
+                                    chunks_read.get(&pos.offset(0, 0, -1)).cloned(),
+                                    chunks_read.get(&pos.offset(0, 0, 1)).cloned(),
+                                ];
+                                drop(chunks_read);
+
+                                let water_mesh = water_meshing::build_water_mesh(pos, &chunk, &neighbors);
+                                let _ = result_tx.send(ChunkResult::WaterMeshed(pos, water_mesh));
+                            }
+                        }
+                    }
+                    ChunkTask::Shutdown => return, // Exit the entire function
                 }
-                ChunkTask::Shutdown => break,
             }
         }
     }
@@ -352,9 +400,10 @@ impl WorldManager {
         let player_chunk = ChunkPos::from_world_pos(*player_pos);
 
         // Process results from workers - batch process for faster throughput
-        // Process up to 100 results per frame to avoid blocking the main loop too long
+        // Increased to 200 for faster mesh updates, especially after block changes
+        // At ~3ms per mesh result processing, 200 results = ~6ms worst case
         let mut results_processed = 0;
-        const MAX_RESULTS_PER_FRAME: usize = 100;
+        const MAX_RESULTS_PER_FRAME: usize = 200;
 
         while results_processed < MAX_RESULTS_PER_FRAME {
             let result = match self.result_receiver.try_recv() {
@@ -413,6 +462,10 @@ impl WorldManager {
                     let current_gen = self.mesh_generation.get(&pos).copied().unwrap_or(0);
                     if generation >= current_gen {
                         self.meshes.insert(pos, mesh);
+                        // Check if this was a priority neighbor mesh - mark for urgent upload
+                        if self.pending_urgent.remove(&pos) {
+                            self.urgent_mesh_uploads.push(pos);
+                        }
                     }
                     // else: discard stale mesh, a newer one is coming
                 }
@@ -618,6 +671,12 @@ impl WorldManager {
         self.water_meshes.values().map(|m| m.vertices.len() as u64).sum()
     }
 
+    /// Take the list of meshes that need urgent upload to chunk pool
+    /// Called by renderer to prioritize player-modified meshes
+    pub fn take_urgent_uploads(&mut self) -> Vec<ChunkPos> {
+        std::mem::take(&mut self.urgent_mesh_uploads)
+    }
+
     /// Get access to the chunk storage for voxel GI system
     /// Returns a clone of the Arc to avoid holding the lock
     pub fn chunks(&self) -> Arc<RwLock<AHashMap<ChunkPos, Arc<Chunk>>>> {
@@ -743,34 +802,68 @@ impl WorldManager {
             light_dirty_chunks.extend(self.light_engine.take_dirty_chunks());
         }
 
-        // Force remesh main chunk
-        self.pending_meshing.remove(&chunk_pos);
-        self.force_remesh(chunk_pos);
+        // SYNCHRONOUS mesh for the main chunk - instant feedback (~2-3ms)
+        // This ensures the player sees their block change immediately
+        tracing::info!("set_block: ({}, {}, {}) = {:?} in chunk {:?}, local ({}, {}, {})",
+            x, y, z, block, chunk_pos, local_x, local_y, local_z);
+        self.mesh_chunk_sync(chunk_pos);
 
-        // Remesh neighbors if block is on chunk boundary
-        if local_x == 0 {
-            self.remesh_if_exists(chunk_pos.offset(-1, 0, 0));
-        }
-        if local_x == 15 {
-            self.remesh_if_exists(chunk_pos.offset(1, 0, 0));
-        }
-        if local_y == 0 {
-            self.remesh_if_exists(chunk_pos.offset(0, -1, 0));
-        }
-        if local_y == 15 {
-            self.remesh_if_exists(chunk_pos.offset(0, 1, 0));
-        }
-        if local_z == 0 {
-            self.remesh_if_exists(chunk_pos.offset(0, 0, -1));
-        }
-        if local_z == 15 {
-            self.remesh_if_exists(chunk_pos.offset(0, 0, 1));
+        // Determine which neighbor chunks need remeshing based on block position
+        // On edges/corners, we need to remesh diagonal neighbors too (for AO and face culling)
+        let on_x_min = local_x == 0;
+        let on_x_max = local_x == 15;
+        let on_y_min = local_y == 0;
+        let on_y_max = local_y == 15;
+        let on_z_min = local_z == 0;
+        let on_z_max = local_z == 15;
+
+        // Collect neighbors that need remeshing
+        let mut neighbors_to_remesh: Vec<ChunkPos> = Vec::new();
+
+        // Check all 26 neighbors, but only include those that matter based on position
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                for dz in -1..=1 {
+                    if dx == 0 && dy == 0 && dz == 0 {
+                        continue; // Skip self
+                    }
+
+                    // Only remesh neighbor if block is on the boundary facing that neighbor
+                    let need_x = (dx == -1 && on_x_min) || (dx == 1 && on_x_max) || dx == 0;
+                    let need_y = (dy == -1 && on_y_min) || (dy == 1 && on_y_max) || dy == 0;
+                    let need_z = (dz == -1 && on_z_min) || (dz == 1 && on_z_max) || dz == 0;
+
+                    // For face neighbors (one axis non-zero), always remesh if on that boundary
+                    // For edge/corner neighbors, only remesh if on ALL relevant boundaries
+                    let is_face = (dx != 0) as u8 + (dy != 0) as u8 + (dz != 0) as u8 == 1;
+
+                    if is_face {
+                        // Face neighbor: remesh if on that boundary
+                        if (dx == -1 && on_x_min) || (dx == 1 && on_x_max) ||
+                           (dy == -1 && on_y_min) || (dy == 1 && on_y_max) ||
+                           (dz == -1 && on_z_min) || (dz == 1 && on_z_max) {
+                            neighbors_to_remesh.push(chunk_pos.offset(dx, dy, dz));
+                        }
+                    } else {
+                        // Edge or corner neighbor: need to be on all relevant boundaries
+                        // This fixes invisible blocks at chunk corners/edges
+                        if need_x && need_y && need_z {
+                            neighbors_to_remesh.push(chunk_pos.offset(dx, dy, dz));
+                        }
+                    }
+                }
+            }
         }
 
-        // Remesh any additional chunks affected by light changes
+        // Use priority queue for neighbor remeshes - skip ahead of generation queue
+        for neighbor in neighbors_to_remesh {
+            self.remesh_neighbor_priority(neighbor);
+        }
+
+        // Remesh any additional chunks affected by light changes (also with priority)
         for dirty_pos in light_dirty_chunks {
             if dirty_pos != chunk_pos {
-                self.remesh_if_exists(dirty_pos);
+                self.remesh_neighbor_priority(dirty_pos);
             }
         }
 
@@ -787,6 +880,73 @@ impl WorldManager {
             // Keep old mesh until new one is ready to avoid flicker
             self.pending_meshing.remove(&pos);
             self.force_remesh(pos);
+        }
+    }
+
+    /// Force a remesh using the HIGH PRIORITY channel (for player block changes)
+    /// This skips ahead of the regular generation queue for immediate feedback
+    fn force_remesh_priority(&mut self, pos: ChunkPos) {
+        // Increment generation - this invalidates any in-flight mesh tasks for this chunk
+        let gen = self.mesh_generation.entry(pos).or_insert(0);
+        *gen += 1;
+        let current_gen = *gen;
+
+        self.pending_meshing.insert(pos, ());
+        let _ = self.priority_task_sender.send(ChunkTask::Mesh(pos, LodLevel::Full, current_gen));
+    }
+
+    /// Perform SYNCHRONOUS mesh generation on the main thread for instant feedback
+    /// This is used for the chunk the player directly modified - ~2-3ms for instant visual update
+    fn mesh_chunk_sync(&mut self, pos: ChunkPos) {
+        let chunks_read = self.chunks.read();
+        let Some(chunk) = chunks_read.get(&pos).cloned() else {
+            tracing::error!("mesh_chunk_sync: chunk {:?} not found!", pos);
+            return;
+        };
+
+        // Get neighbor chunks for proper face culling
+        let neighbors = [
+            chunks_read.get(&pos.offset(-1, 0, 0)).cloned(),
+            chunks_read.get(&pos.offset(1, 0, 0)).cloned(),
+            chunks_read.get(&pos.offset(0, -1, 0)).cloned(),
+            chunks_read.get(&pos.offset(0, 1, 0)).cloned(),
+            chunks_read.get(&pos.offset(0, 0, -1)).cloned(),
+            chunks_read.get(&pos.offset(0, 0, 1)).cloned(),
+        ];
+        drop(chunks_read);
+
+        // Build mesh synchronously on main thread
+        let start = std::time::Instant::now();
+        let mesh = meshing::build_chunk_mesh_lod(pos, &chunk, &neighbors, LodLevel::Full);
+        let elapsed = start.elapsed();
+
+        tracing::info!(
+            "mesh_chunk_sync: {:?} built {} vertices in {:.2}ms (gpu_mesh: {:?})",
+            pos,
+            mesh.vertices.len(),
+            elapsed.as_secs_f64() * 1000.0,
+            mesh.gpu_mesh.is_some()
+        );
+
+        // Update generation counter
+        let gen = self.mesh_generation.entry(pos).or_insert(0);
+        *gen += 1;
+
+        // Insert mesh immediately - no waiting for worker
+        self.pending_meshing.remove(&pos);
+        self.meshes.insert(pos, mesh);
+
+        // Mark for urgent upload to chunk pool (bypass throttling)
+        self.urgent_mesh_uploads.push(pos);
+    }
+
+    /// Remesh a neighbor chunk using priority queue if it exists
+    fn remesh_neighbor_priority(&mut self, pos: ChunkPos) {
+        if self.chunks.read().contains_key(&pos) {
+            self.pending_meshing.remove(&pos);
+            self.force_remesh_priority(pos);
+            // Mark as urgent so when the mesh result arrives, it gets priority upload
+            self.pending_urgent.insert(pos);
         }
     }
 

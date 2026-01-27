@@ -1791,3 +1791,425 @@ fn emit_greedy_quad(
         base_index, base_index + 3, base_index + 2,
     ]);
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// UNIT TESTS
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use glam::Vec3;
+
+    /// Create a chunk with a single block at the given position
+    fn single_block_chunk(x: usize, y: usize, z: usize, block: Block) -> Arc<Chunk> {
+        let mut chunk = Chunk::new();
+        chunk.set_block(x, y, z, block);
+        Arc::new(chunk)
+    }
+
+    /// Create a chunk filled with a single block type
+    fn solid_chunk(block: Block) -> Arc<Chunk> {
+        Arc::new(Chunk::new_solid(block))
+    }
+
+    /// Empty neighbor array (all air)
+    fn no_neighbors() -> [Option<Arc<Chunk>>; 6] {
+        [None, None, None, None, None, None]
+    }
+
+    // ============ Single Block Meshing ============
+
+    #[test]
+    fn test_single_block_generates_six_faces() {
+        let chunk = single_block_chunk(8, 8, 8, Block::Stone);
+        let pos = ChunkPos { x: 0, y: 0, z: 0 };
+        let neighbors = no_neighbors();
+
+        let mesh = build_chunk_mesh(pos, &chunk, &neighbors);
+
+        // Single exposed block should have 6 faces = 6 quads = 24 vertices, 36 indices
+        assert_eq!(mesh.vertices.len(), 24, "Single block should have 24 vertices (6 faces × 4 verts)");
+        assert_eq!(mesh.indices.len(), 36, "Single block should have 36 indices (6 faces × 6 indices)");
+    }
+
+    #[test]
+    fn test_single_block_vertex_positions() {
+        let chunk = single_block_chunk(0, 0, 0, Block::Stone);
+        let pos = ChunkPos { x: 0, y: 0, z: 0 };
+        let neighbors = no_neighbors();
+
+        let mesh = build_chunk_mesh(pos, &chunk, &neighbors);
+
+        // Collect all unique vertex positions
+        let positions: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.position).collect();
+
+        // A 1x1x1 block at origin should have vertices within [0,0,0] to [BLOCK_SCALE, BLOCK_SCALE, BLOCK_SCALE]
+        for pos in &positions {
+            assert!(pos[0] >= -0.01 && pos[0] <= BLOCK_SCALE + 0.01, "X position out of range: {}", pos[0]);
+            assert!(pos[1] >= -0.01 && pos[1] <= BLOCK_SCALE + 0.01, "Y position out of range: {}", pos[1]);
+            assert!(pos[2] >= -0.01 && pos[2] <= BLOCK_SCALE + 0.01, "Z position out of range: {}", pos[2]);
+        }
+    }
+
+    #[test]
+    fn test_single_block_normals_are_unit_length() {
+        let chunk = single_block_chunk(8, 8, 8, Block::Stone);
+        let pos = ChunkPos { x: 0, y: 0, z: 0 };
+        let neighbors = no_neighbors();
+
+        let mesh = build_chunk_mesh(pos, &chunk, &neighbors);
+
+        for vertex in &mesh.vertices {
+            // Unpack normal
+            let bytes = vertex.normal_packed.to_le_bytes();
+            let nx = (bytes[0] as i8) as f32 / 127.0;
+            let ny = (bytes[1] as i8) as f32 / 127.0;
+            let nz = (bytes[2] as i8) as f32 / 127.0;
+
+            // Normal should be axis-aligned (exactly one component is ±1)
+            let sum = nx.abs() + ny.abs() + nz.abs();
+            assert!((sum - 1.0).abs() < 0.1, "Normal should be unit axis-aligned, got ({}, {}, {})", nx, ny, nz);
+        }
+    }
+
+    // ============ Face Culling ============
+
+    #[test]
+    fn test_internal_faces_culled() {
+        // Two adjacent blocks should share a face that gets culled
+        // With greedy meshing, the visible faces will be merged:
+        // - Top (2 blocks → 1 merged quad)
+        // - Bottom (2 blocks → 1 merged quad)
+        // - Front (2 blocks → 1 merged quad)
+        // - Back (2 blocks → 1 merged quad)
+        // - Left (1 block → 1 quad)
+        // - Right (1 block → 1 quad)
+        // = 6 quads total (greedy merging reduces from 10 theoretical faces)
+        let mut chunk = Chunk::new();
+        chunk.set_block(8, 8, 8, Block::Stone);
+        chunk.set_block(9, 8, 8, Block::Stone); // Adjacent in +X
+        let chunk = Arc::new(chunk);
+
+        let pos = ChunkPos { x: 0, y: 0, z: 0 };
+        let neighbors = no_neighbors();
+
+        let mesh = build_chunk_mesh(pos, &chunk, &neighbors);
+
+        // Greedy meshing merges the 4 shared-edge faces, plus 2 end faces = 6 quads
+        assert_eq!(mesh.vertices.len(), 24, "Two adjacent blocks should have 24 vertices (6 merged quads)");
+
+        // Verify the shared internal faces are actually culled by checking no +X or -X faces at boundary
+        // The +X face of block at (8,8,8) should NOT exist
+        // The -X face of block at (9,8,8) should NOT exist
+        let world_x_boundary = 9.0 * BLOCK_SCALE; // Position between the two blocks
+
+        for vertex in &mesh.vertices {
+            let bytes = vertex.normal_packed.to_le_bytes();
+            let nx = (bytes[0] as i8) as f32;
+
+            // If facing +X, position should be at x=10 (right side of right block)
+            if nx > 0.0 {
+                assert!(
+                    vertex.position[0] > world_x_boundary,
+                    "+X face should only be at right edge, got x={}",
+                    vertex.position[0]
+                );
+            }
+            // If facing -X, position should be at x=8 (left side of left block)
+            if nx < 0.0 {
+                assert!(
+                    vertex.position[0] < world_x_boundary,
+                    "-X face should only be at left edge, got x={}",
+                    vertex.position[0]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_solid_chunk_only_surfaces() {
+        let chunk = solid_chunk(Block::Stone);
+        let pos = ChunkPos { x: 0, y: 0, z: 0 };
+        let neighbors = no_neighbors();
+
+        let mesh = build_chunk_mesh(pos, &chunk, &neighbors);
+
+        // Solid chunk: only the 6 outer surfaces should be meshed
+        // Each surface is 16×16 blocks, but greedy meshing merges them
+        // Without neighbors, all 6 faces are visible
+        // Should generate exactly 6 quads (one per face, fully merged)
+        let num_quads = mesh.indices.len() / 6;
+        assert_eq!(num_quads, 6, "Solid chunk should have exactly 6 quads (greedy merged surfaces)");
+    }
+
+    #[test]
+    fn test_neighbor_chunk_culls_boundary_faces() {
+        let chunk = solid_chunk(Block::Stone);
+        let pos = ChunkPos { x: 0, y: 0, z: 0 };
+
+        // Add a solid neighbor in +X direction
+        let mut neighbors = no_neighbors();
+        neighbors[1] = Some(solid_chunk(Block::Stone)); // +X neighbor
+
+        let mesh = build_chunk_mesh(pos, &chunk, &neighbors);
+
+        // With +X neighbor, the +X face should be culled
+        // Should have 5 quads instead of 6
+        let num_quads = mesh.indices.len() / 6;
+        assert_eq!(num_quads, 5, "Solid chunk with +X neighbor should have 5 quads");
+    }
+
+    // ============ Greedy Meshing ============
+
+    #[test]
+    fn test_greedy_merges_same_texture() {
+        // Create a 2×2 floor of same block type
+        let mut chunk = Chunk::new();
+        chunk.set_block(0, 0, 0, Block::Stone);
+        chunk.set_block(1, 0, 0, Block::Stone);
+        chunk.set_block(0, 0, 1, Block::Stone);
+        chunk.set_block(1, 0, 1, Block::Stone);
+        let chunk = Arc::new(chunk);
+
+        let pos = ChunkPos { x: 0, y: 0, z: 0 };
+        let neighbors = no_neighbors();
+
+        let mesh = build_chunk_mesh(pos, &chunk, &neighbors);
+
+        // The top face (4 blocks) should merge into 1 quad
+        // Count quads with +Y normal
+        let mut top_face_count = 0;
+        for i in (0..mesh.indices.len()).step_by(6) {
+            let v0 = &mesh.vertices[mesh.indices[i] as usize];
+            let bytes = v0.normal_packed.to_le_bytes();
+            let ny = (bytes[1] as i8) as f32;
+            if ny > 0.0 {
+                top_face_count += 1;
+            }
+        }
+
+        assert_eq!(top_face_count, 1, "2×2 floor top face should merge into 1 quad");
+    }
+
+    #[test]
+    fn test_greedy_separates_different_textures() {
+        // Create adjacent blocks with different textures
+        let mut chunk = Chunk::new();
+        chunk.set_block(0, 0, 0, Block::Stone);
+        chunk.set_block(1, 0, 0, Block::Dirt); // Different texture
+        let chunk = Arc::new(chunk);
+
+        let pos = ChunkPos { x: 0, y: 0, z: 0 };
+        let neighbors = no_neighbors();
+
+        let mesh = build_chunk_mesh(pos, &chunk, &neighbors);
+
+        // Two different block types can't merge - should be separate quads
+        // Count top face quads
+        let mut top_face_count = 0;
+        for i in (0..mesh.indices.len()).step_by(6) {
+            let v0 = &mesh.vertices[mesh.indices[i] as usize];
+            let bytes = v0.normal_packed.to_le_bytes();
+            let ny = (bytes[1] as i8) as f32;
+            if ny > 0.0 {
+                top_face_count += 1;
+            }
+        }
+
+        assert_eq!(top_face_count, 2, "Different textures should produce separate quads");
+    }
+
+    // ============ Winding Order ============
+
+    #[test]
+    fn test_winding_order_ccw() {
+        let chunk = single_block_chunk(8, 8, 8, Block::Stone);
+        let pos = ChunkPos { x: 0, y: 0, z: 0 };
+        let neighbors = no_neighbors();
+
+        let mesh = build_chunk_mesh(pos, &chunk, &neighbors);
+
+        // For each triangle, compute (v1-v0) × (v2-v0) and verify it points in same direction as normal
+        for i in (0..mesh.indices.len()).step_by(3) {
+            let i0 = mesh.indices[i] as usize;
+            let i1 = mesh.indices[i + 1] as usize;
+            let i2 = mesh.indices[i + 2] as usize;
+
+            let v0 = Vec3::from(mesh.vertices[i0].position);
+            let v1 = Vec3::from(mesh.vertices[i1].position);
+            let v2 = Vec3::from(mesh.vertices[i2].position);
+
+            // Cross product gives normal direction
+            let edge1 = v1 - v0;
+            let edge2 = v2 - v0;
+            let computed_normal = edge1.cross(edge2);
+
+            // Get stored normal
+            let bytes = mesh.vertices[i0].normal_packed.to_le_bytes();
+            let stored_normal = Vec3::new(
+                (bytes[0] as i8) as f32 / 127.0,
+                (bytes[1] as i8) as f32 / 127.0,
+                (bytes[2] as i8) as f32 / 127.0,
+            );
+
+            // Dot product should be positive (same direction)
+            let dot = computed_normal.dot(stored_normal);
+            assert!(dot > 0.0, "Triangle winding should produce CCW normal, got dot={}", dot);
+        }
+    }
+
+    // ============ LOD Tests ============
+
+    #[test]
+    fn test_lod_half_reduces_detail() {
+        let chunk = solid_chunk(Block::Stone);
+        let pos = ChunkPos { x: 0, y: 0, z: 0 };
+        let neighbors = no_neighbors();
+
+        let mesh_full = build_chunk_mesh_lod(pos, &chunk, &neighbors, LodLevel::Full);
+        let mesh_half = build_chunk_mesh_lod(pos, &chunk, &neighbors, LodLevel::Half);
+
+        // LOD Half should produce same or fewer quads (merged into larger blocks)
+        let quads_full = mesh_full.indices.len() / 6;
+        let quads_half = mesh_half.indices.len() / 6;
+
+        assert!(quads_half <= quads_full, "LOD Half should have ≤ quads than Full");
+        assert_eq!(mesh_half.lod, LodLevel::Half);
+    }
+
+    #[test]
+    fn test_lod_quarter_reduces_detail_more() {
+        let chunk = solid_chunk(Block::Stone);
+        let pos = ChunkPos { x: 0, y: 0, z: 0 };
+        let neighbors = no_neighbors();
+
+        let mesh_full = build_chunk_mesh_lod(pos, &chunk, &neighbors, LodLevel::Full);
+        let mesh_quarter = build_chunk_mesh_lod(pos, &chunk, &neighbors, LodLevel::Quarter);
+
+        let quads_full = mesh_full.indices.len() / 6;
+        let quads_quarter = mesh_quarter.indices.len() / 6;
+
+        assert!(quads_quarter <= quads_full, "LOD Quarter should have ≤ quads than Full");
+        assert_eq!(mesh_quarter.lod, LodLevel::Quarter);
+    }
+
+    // ============ Light Sampling ============
+
+    #[test]
+    fn test_light_value_in_vertices() {
+        let mut chunk = Chunk::new();
+        chunk.set_block(8, 8, 8, Block::Stone);
+        chunk.set_block_light(9, 8, 8, 14); // Light adjacent to +X face
+        let chunk = Arc::new(chunk);
+
+        let pos = ChunkPos { x: 0, y: 0, z: 0 };
+        let neighbors = no_neighbors();
+
+        let mesh = build_chunk_mesh(pos, &chunk, &neighbors);
+
+        // Find vertices with +X normal (facing the lit area)
+        let mut found_lit_face = false;
+        for vertex in &mesh.vertices {
+            let bytes = vertex.normal_packed.to_le_bytes();
+            let nx = (bytes[0] as i8) as f32;
+
+            if nx > 0.0 {
+                // This is the +X face, should have light value 14
+                // Light is packed in ao_tile_packed byte 3
+                let ao_bytes = vertex.ao_tile_packed.to_le_bytes();
+                let light = ao_bytes[3];
+                // Light 14 scaled to 0-255 range = 14/15 * 255 ≈ 238
+                assert!(light > 200, "Light value should be high on lit face, got {}", light);
+                found_lit_face = true;
+            }
+        }
+
+        assert!(found_lit_face, "Should find vertices with +X normal");
+    }
+
+    // ============ Edge Cases ============
+
+    #[test]
+    fn test_empty_chunk_produces_no_mesh() {
+        let chunk = Arc::new(Chunk::new());
+        let pos = ChunkPos { x: 0, y: 0, z: 0 };
+        let neighbors = no_neighbors();
+
+        let mesh = build_chunk_mesh(pos, &chunk, &neighbors);
+
+        assert!(mesh.vertices.is_empty(), "Empty chunk should have no vertices");
+        assert!(mesh.indices.is_empty(), "Empty chunk should have no indices");
+    }
+
+    #[test]
+    fn test_transparent_blocks_not_meshed() {
+        let chunk = single_block_chunk(8, 8, 8, Block::Air);
+        let pos = ChunkPos { x: 0, y: 0, z: 0 };
+        let neighbors = no_neighbors();
+
+        let mesh = build_chunk_mesh(pos, &chunk, &neighbors);
+
+        assert!(mesh.vertices.is_empty(), "Air block should produce no mesh");
+    }
+
+    #[test]
+    fn test_boundary_block_meshed_correctly() {
+        // Block at chunk boundary (0,0,0)
+        let chunk = single_block_chunk(0, 0, 0, Block::Stone);
+        let pos = ChunkPos { x: 0, y: 0, z: 0 };
+        let neighbors = no_neighbors();
+
+        let mesh = build_chunk_mesh(pos, &chunk, &neighbors);
+
+        // Should still have 6 faces
+        assert_eq!(mesh.vertices.len(), 24, "Boundary block should have 24 vertices");
+    }
+
+    #[test]
+    fn test_corner_block_meshed_correctly() {
+        // Block at chunk corner (15,15,15)
+        let chunk = single_block_chunk(15, 15, 15, Block::Stone);
+        let pos = ChunkPos { x: 0, y: 0, z: 0 };
+        let neighbors = no_neighbors();
+
+        let mesh = build_chunk_mesh(pos, &chunk, &neighbors);
+
+        // Should still have 6 faces
+        assert_eq!(mesh.vertices.len(), 24, "Corner block should have 24 vertices");
+    }
+
+    // ============ Vertex Format ============
+
+    #[test]
+    fn test_vertex_size_is_24_bytes() {
+        assert_eq!(std::mem::size_of::<ChunkVertex>(), 24, "ChunkVertex should be 24 bytes");
+    }
+
+    #[test]
+    fn test_vertex_packing_roundtrip() {
+        let normal = [0.0, 1.0, 0.0];
+        let packed = ChunkVertex::pack_normal(normal);
+        let bytes = packed.to_le_bytes();
+
+        let nx = (bytes[0] as i8) as f32 / 127.0;
+        let ny = (bytes[1] as i8) as f32 / 127.0;
+        let nz = (bytes[2] as i8) as f32 / 127.0;
+
+        assert!((nx - normal[0]).abs() < 0.01);
+        assert!((ny - normal[1]).abs() < 0.01);
+        assert!((nz - normal[2]).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_uv_packing() {
+        let uv = [0.5, 0.75];
+        let packed = ChunkVertex::pack_uv(uv);
+
+        let u = packed[0] as f32 / 65535.0;
+        let v = packed[1] as f32 / 65535.0;
+
+        assert!((u - uv[0]).abs() < 0.001);
+        assert!((v - uv[1]).abs() < 0.001);
+    }
+}

@@ -106,6 +106,19 @@ impl Default for VoxelVolumeUniform {
     }
 }
 
+/// A dirty block that needs incremental update
+#[derive(Clone, Copy)]
+struct DirtyBlock {
+    /// World position of the changed block
+    x: i32,
+    y: i32,
+    z: i32,
+}
+
+/// Maximum number of dirty blocks before triggering a full refresh
+/// With incremental updates, each block only affects a small region
+const MAX_DIRTY_BLOCKS: usize = 64;
+
 /// Manages the 3D voxel volume for GI calculations
 pub struct VoxelGI {
     /// 3D texture storing voxel opacity/emissive data
@@ -140,8 +153,10 @@ pub struct VoxelGI {
     last_update_center: Vec3,
     /// Whether we've done the initial voxel fill
     initialized: bool,
-    /// Force update on next frame (set when blocks change)
-    force_update: bool,
+    /// Force full update on next frame
+    force_full_update: bool,
+    /// Dirty blocks needing incremental update (world positions)
+    dirty_blocks: Vec<DirtyBlock>,
 
     /// Staging buffer for CPU -> GPU voxel data transfer (reserved for async uploads)
     #[allow(dead_code)]
@@ -321,15 +336,29 @@ impl VoxelGI {
             volume_center: Vec3::ZERO,
             last_update_center: Vec3::ZERO,
             initialized: false,
-            force_update: false,
+            force_full_update: false,
+            dirty_blocks: Vec::with_capacity(MAX_DIRTY_BLOCKS),
             staging_buffer,
             voxel_cache: vec![0u8; staging_size],
         }
     }
 
-    /// Mark the voxel volume as needing an update (call when blocks change)
+    /// Mark the voxel volume as needing a full update
+    /// Use mark_dirty_at() for single block changes (much faster)
     pub fn mark_dirty(&mut self) {
-        self.force_update = true;
+        self.force_full_update = true;
+    }
+
+    /// Mark a specific block as dirty for incremental update
+    /// This is much faster than full update - only updates one voxel + light radius
+    pub fn mark_dirty_at(&mut self, x: i32, y: i32, z: i32) {
+        // If we have too many dirty blocks, switch to full update
+        if self.dirty_blocks.len() >= MAX_DIRTY_BLOCKS {
+            self.force_full_update = true;
+            self.dirty_blocks.clear();
+            return;
+        }
+        self.dirty_blocks.push(DirtyBlock { x, y, z });
     }
 
     fn create_update_pipeline(device: &wgpu::Device, _bind_group_layout: &wgpu::BindGroupLayout) -> wgpu::ComputePipeline {
@@ -393,7 +422,9 @@ impl VoxelGI {
     }
 
     /// Update the voxel volume from chunk data
-    /// Called each frame when camera moves significantly
+    /// Supports two modes:
+    /// - Full update: When camera moves significantly or on initialization
+    /// - Incremental update: When individual blocks change (much faster)
     pub fn update_from_chunks(
         &mut self,
         queue: &wgpu::Queue,
@@ -403,7 +434,7 @@ impl VoxelGI {
         sun_color: Vec3,
         ambient_color: Vec3,
         time_of_day: f32,
-        held_light_emission: u8,  // Light emission of held item (0 = none, 14 = torch)
+        held_light_emission: u8,
     ) {
         // Snap camera position to voxel grid to prevent jitter
         let snapped_center = Vec3::new(
@@ -412,23 +443,44 @@ impl VoxelGI {
             camera_pos.z.floor(),
         );
 
-        // Only update voxel data if camera moved more than threshold, first time, or forced
-        // Threshold of 24 blocks reduces update frequency while maintaining coverage
-        // (force_update still triggers immediately for block placement)
+        // Check if we need a full refresh (camera moved or first time)
         let move_threshold = 24.0;
         let distance_moved = (snapped_center - self.last_update_center).length();
-        let needs_refresh = !self.initialized || distance_moved >= move_threshold || self.force_update;
+        let needs_full_refresh = !self.initialized || distance_moved >= move_threshold || self.force_full_update;
 
-        if !needs_refresh {
-            // IMPORTANT: Use last_update_center (where data IS), not snapped_center (where camera IS)
-            // Otherwise shader thinks volume is at wrong position
-            // But always update player light position (camera_pos) for held torch
+        // Check for incremental updates (dirty blocks)
+        let has_dirty_blocks = !self.dirty_blocks.is_empty();
+
+        // If no updates needed, just update uniforms
+        if !needs_full_refresh && !has_dirty_blocks {
             self.update_uniform(queue, self.last_update_center, sun_direction, sun_color, ambient_color, time_of_day, camera_pos, held_light_emission);
             return;
         }
 
-        // Reset force flag
-        self.force_update = false;
+        // Handle INCREMENTAL updates (dirty blocks) - much faster path
+        if has_dirty_blocks && !needs_full_refresh {
+            let dirty_blocks: Vec<DirtyBlock> = self.dirty_blocks.drain(..).collect();
+            let update_start = std::time::Instant::now();
+
+            self.update_dirty_blocks(queue, &dirty_blocks, chunks);
+
+            let update_time = update_start.elapsed();
+            if update_time.as_secs_f64() * 1000.0 > 0.5 {
+                tracing::debug!(
+                    "Voxel incremental update: {:.2}ms for {} blocks",
+                    update_time.as_secs_f64() * 1000.0,
+                    dirty_blocks.len()
+                );
+            }
+
+            // Update uniforms with current volume center
+            self.update_uniform(queue, self.last_update_center, sun_direction, sun_color, ambient_color, time_of_day, camera_pos, held_light_emission);
+            return;
+        }
+
+        // Handle FULL refresh (camera moved or initialization)
+        self.force_full_update = false;
+        self.dirty_blocks.clear(); // Clear any pending dirty blocks
 
         if !self.initialized {
             tracing::info!("Initial voxel volume fill at {:?}", snapped_center);
@@ -440,10 +492,10 @@ impl VoxelGI {
         self.volume_center = snapped_center;
         self.last_update_center = snapped_center;
 
-        // Update uniform buffer (includes player held light position)
+        // Update uniform buffer
         self.update_uniform(queue, snapped_center, sun_direction, sun_color, ambient_color, time_of_day, camera_pos, held_light_emission);
 
-        // Time the voxel cache fill (includes light propagation)
+        // Time the voxel cache fill
         let fill_start = std::time::Instant::now();
         self.fill_voxel_cache(chunks, time_of_day, snapped_center);
         let fill_time = fill_start.elapsed();
@@ -748,6 +800,264 @@ impl VoxelGI {
     /// Get the bind group for binding in render passes
     pub fn bind_group(&self) -> &wgpu::BindGroup {
         &self.bind_group
+    }
+
+    /// Incrementally update only the dirty blocks (FAST PATH)
+    /// Instead of refilling entire 256³ volume, only updates affected voxels
+    /// and re-propagates light in a small radius around each changed block.
+    fn update_dirty_blocks(
+        &mut self,
+        queue: &wgpu::Queue,
+        dirty_blocks: &[DirtyBlock],
+        chunks: &Arc<RwLock<AHashMap<ChunkPos, Arc<Chunk>>>>,
+    ) {
+        let half_size = (VOXEL_VOLUME_SIZE / 2) as f32;
+        let volume_min = self.last_update_center - Vec3::splat(half_size);
+        let vol_min_x = volume_min.x as i32;
+        let vol_min_y = volume_min.y as i32;
+        let vol_min_z = volume_min.z as i32;
+        let vol_size = VOXEL_VOLUME_SIZE as i32;
+
+        let light_radius = 12i32; // Radius for light re-propagation around changed blocks
+
+        // Collect regions that need GPU upload (bounding box of all changes)
+        let mut min_vx = vol_size;
+        let mut min_vy = vol_size;
+        let mut min_vz = vol_size;
+        let mut max_vx = 0i32;
+        let mut max_vy = 0i32;
+        let mut max_vz = 0i32;
+
+        let chunks_read = chunks.read();
+
+        for dirty in dirty_blocks {
+            // Convert world position to voxel coordinates
+            let vx = dirty.x - vol_min_x;
+            let vy = dirty.y - vol_min_y;
+            let vz = dirty.z - vol_min_z;
+
+            // Skip if outside volume
+            if vx < 0 || vx >= vol_size || vy < 0 || vy >= vol_size || vz < 0 || vz >= vol_size {
+                continue;
+            }
+
+            // Look up the current block state from chunks
+            let chunk_x = dirty.x.div_euclid(CHUNK_SIZE_I32);
+            let chunk_y = dirty.y.div_euclid(CHUNK_SIZE_I32);
+            let chunk_z = dirty.z.div_euclid(CHUNK_SIZE_I32);
+            let local_x = dirty.x.rem_euclid(CHUNK_SIZE_I32) as usize;
+            let local_y = dirty.y.rem_euclid(CHUNK_SIZE_I32) as usize;
+            let local_z = dirty.z.rem_euclid(CHUNK_SIZE_I32) as usize;
+
+            let chunk_pos = ChunkPos { x: chunk_x, y: chunk_y, z: chunk_z };
+            let block = chunks_read
+                .get(&chunk_pos)
+                .map(|c| c.get_block(local_x, local_y, local_z))
+                .unwrap_or(Block::Air);
+
+            let voxel = VoxelData::from_block(block);
+
+            // Update the voxel in cache
+            let idx = ((vz as u32 * VOXEL_VOLUME_SIZE * VOXEL_VOLUME_SIZE
+                      + vy as u32 * VOXEL_VOLUME_SIZE
+                      + vx as u32) * 4) as usize;
+
+            self.voxel_cache[idx] = voxel.opacity;
+            self.voxel_cache[idx + 1] = voxel.emissive;
+            self.voxel_cache[idx + 2] = voxel.material;
+            // Note: idx + 3 (light) will be updated in re-propagation below
+
+            // Clear light in the affected radius (so we can re-propagate)
+            let clear_min_x = (vx - light_radius).max(0);
+            let clear_max_x = (vx + light_radius).min(vol_size - 1);
+            let clear_min_y = (vy - light_radius).max(0);
+            let clear_max_y = (vy + light_radius).min(vol_size - 1);
+            let clear_min_z = (vz - light_radius).max(0);
+            let clear_max_z = (vz + light_radius).min(vol_size - 1);
+
+            for cz in clear_min_z..=clear_max_z {
+                for cy in clear_min_y..=clear_max_y {
+                    for cx in clear_min_x..=clear_max_x {
+                        let cidx = ((cz as u32 * VOXEL_VOLUME_SIZE * VOXEL_VOLUME_SIZE
+                                   + cy as u32 * VOXEL_VOLUME_SIZE
+                                   + cx as u32) * 4 + 3) as usize;
+                        self.voxel_cache[cidx] = 0; // Clear light
+                    }
+                }
+            }
+
+            // Track bounding box for upload (expanded by light radius)
+            min_vx = min_vx.min(clear_min_x);
+            min_vy = min_vy.min(clear_min_y);
+            min_vz = min_vz.min(clear_min_z);
+            max_vx = max_vx.max(clear_max_x);
+            max_vy = max_vy.max(clear_max_y);
+            max_vz = max_vz.max(clear_max_z);
+        }
+
+        drop(chunks_read);
+
+        // Early exit if nothing to update
+        if min_vx > max_vx {
+            return;
+        }
+
+        // Collect light sources in the affected region (need to re-propagate)
+        let mut light_sources: Vec<(i32, i32, i32, u8)> = Vec::new();
+
+        // Scan the affected region for emissive blocks
+        let scan_margin = 2; // Small margin to catch lights just outside the cleared area
+        let scan_min_x = (min_vx - scan_margin).max(0);
+        let scan_max_x = (max_vx + scan_margin).min(vol_size - 1);
+        let scan_min_y = (min_vy - scan_margin).max(0);
+        let scan_max_y = (max_vy + scan_margin).min(vol_size - 1);
+        let scan_min_z = (min_vz - scan_margin).max(0);
+        let scan_max_z = (max_vz + scan_margin).min(vol_size - 1);
+
+        for vz in scan_min_z..=scan_max_z {
+            for vy in scan_min_y..=scan_max_y {
+                for vx in scan_min_x..=scan_max_x {
+                    let idx = ((vz as u32 * VOXEL_VOLUME_SIZE * VOXEL_VOLUME_SIZE
+                              + vy as u32 * VOXEL_VOLUME_SIZE
+                              + vx as u32) * 4) as usize;
+                    let emissive = self.voxel_cache[idx + 1];
+                    if emissive > 0 {
+                        light_sources.push((vx, vy, vz, emissive));
+                    }
+                }
+            }
+        }
+
+        // Re-propagate light from sources in the affected region
+        self.propagate_light_in_region(&light_sources, min_vx, min_vy, min_vz, max_vx, max_vy, max_vz);
+
+        // Upload only the affected region to GPU (MUCH faster than full upload)
+        let region_width = (max_vx - min_vx + 1) as u32;
+        let region_height = (max_vy - min_vy + 1) as u32;
+        let region_depth = (max_vz - min_vz + 1) as u32;
+
+        // For small regions, upload the sub-region directly
+        // For larger regions, it's more efficient to upload the full texture
+        let region_voxels = region_width * region_height * region_depth;
+        let full_voxels = VOXEL_VOLUME_SIZE * VOXEL_VOLUME_SIZE * VOXEL_VOLUME_SIZE;
+
+        if region_voxels < full_voxels / 8 {
+            // Small region: extract and upload just that part
+            // This avoids the 64MB full upload
+            let mut region_data = Vec::with_capacity((region_width * region_height * region_depth * 4) as usize);
+
+            for z in min_vz..=max_vz {
+                for y in min_vy..=max_vy {
+                    let start_idx = ((z as u32 * VOXEL_VOLUME_SIZE * VOXEL_VOLUME_SIZE
+                                    + y as u32 * VOXEL_VOLUME_SIZE
+                                    + min_vx as u32) * 4) as usize;
+                    let end_idx = start_idx + (region_width * 4) as usize;
+                    region_data.extend_from_slice(&self.voxel_cache[start_idx..end_idx]);
+                }
+            }
+
+            queue.write_texture(
+                wgpu::ImageCopyTexture {
+                    texture: &self.voxel_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d {
+                        x: min_vx as u32,
+                        y: min_vy as u32,
+                        z: min_vz as u32,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &region_data,
+                wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(region_width * 4),
+                    rows_per_image: Some(region_height),
+                },
+                wgpu::Extent3d {
+                    width: region_width,
+                    height: region_height,
+                    depth_or_array_layers: region_depth,
+                },
+            );
+        } else {
+            // Large region: full upload is more efficient
+            queue.write_texture(
+                wgpu::ImageCopyTexture {
+                    texture: &self.voxel_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &self.voxel_cache,
+                wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(VOXEL_VOLUME_SIZE * 4),
+                    rows_per_image: Some(VOXEL_VOLUME_SIZE),
+                },
+                wgpu::Extent3d {
+                    width: VOXEL_VOLUME_SIZE,
+                    height: VOXEL_VOLUME_SIZE,
+                    depth_or_array_layers: VOXEL_VOLUME_SIZE,
+                },
+            );
+        }
+    }
+
+    /// Propagate light within a specific region (for incremental updates)
+    fn propagate_light_in_region(
+        &mut self,
+        light_sources: &[(i32, i32, i32, u8)],
+        min_x: i32, min_y: i32, min_z: i32,
+        max_x: i32, max_y: i32, max_z: i32,
+    ) {
+        let size = VOXEL_VOLUME_SIZE as i32;
+        let max_light_radius = 10i32;
+        let max_radius_sq = (max_light_radius * max_light_radius) as f32;
+        let max_radius_f = max_light_radius as f32;
+
+        for &(lx, ly, lz, emission) in light_sources {
+            let emission_f = emission as f32 / 255.0;
+
+            // Clamp to both light radius and region bounds
+            let z_min = (lz - max_light_radius).max(0).max(min_z);
+            let z_max = (lz + max_light_radius).min(size - 1).min(max_z);
+            let y_min = (ly - max_light_radius).max(0).max(min_y);
+            let y_max = (ly + max_light_radius).min(size - 1).min(max_y);
+            let x_min = (lx - max_light_radius).max(0).max(min_x);
+            let x_max = (lx + max_light_radius).min(size - 1).min(max_x);
+
+            for vz in z_min..=z_max {
+                let dz = vz - lz;
+                let dz_sq = dz * dz;
+                if dz_sq as f32 > max_radius_sq { continue; }
+
+                for vy in y_min..=y_max {
+                    let dy = vy - ly;
+                    let dz_dy_sq = (dz_sq + dy * dy) as f32;
+                    if dz_dy_sq > max_radius_sq { continue; }
+
+                    for vx in x_min..=x_max {
+                        let dx = vx - lx;
+                        let dist_sq = dz_dy_sq + (dx * dx) as f32;
+                        if dist_sq > max_radius_sq { continue; }
+
+                        let idx = ((vz as u32 * VOXEL_VOLUME_SIZE * VOXEL_VOLUME_SIZE
+                                  + vy as u32 * VOXEL_VOLUME_SIZE
+                                  + vx as u32) * 4) as usize;
+
+                        let opacity = self.voxel_cache[idx];
+                        if opacity > 200 && dist_sq > 2.0 { continue; }
+
+                        let dist = dist_sq.sqrt();
+                        let falloff = 1.0 - dist / max_radius_f;
+                        let light_value = (emission_f * falloff * falloff * 255.0) as u8;
+
+                        let current = self.voxel_cache[idx + 3];
+                        self.voxel_cache[idx + 3] = current.max(light_value);
+                    }
+                }
+            }
+        }
     }
 }
 

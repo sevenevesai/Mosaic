@@ -17,6 +17,17 @@ use crate::constants::{
 use crate::renderer::Camera;
 use crate::world::{Block, WorldManager, raycast};
 
+/// Result of block interaction processing
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BlockInteraction {
+    /// No interaction occurred
+    None,
+    /// A block was broken at the given world position
+    Break { x: i32, y: i32, z: i32 },
+    /// A block was placed at the given world position
+    Place { x: i32, y: i32, z: i32 },
+}
+
 /// Axis-aligned bounding box
 #[derive(Clone, Copy)]
 struct Aabb {
@@ -189,28 +200,28 @@ impl Player {
     }
 
     /// Process block interactions (call from main loop with mutable world access)
-    /// Returns true if any block was modified (placed or broken)
-    pub fn process_block_interactions(&mut self, world: &mut WorldManager) -> bool {
-        let mut changed = false;
-
+    ///
+    /// Returns the type of interaction that occurred (Break, Place, or None),
+    /// including the world position of the affected block for voxel GI updates.
+    pub fn process_block_interactions(&mut self, world: &mut WorldManager) -> BlockInteraction {
         if self.break_requested {
             self.break_requested = false;
-            if self.try_break_block(world) {
-                changed = true;
+            if let Some((x, y, z)) = self.try_break_block(world) {
+                return BlockInteraction::Break { x, y, z };
             }
         }
 
         if self.place_requested {
             self.place_requested = false;
-            if self.try_place_block(world) {
-                changed = true;
+            if let Some((x, y, z)) = self.try_place_block(world) {
+                return BlockInteraction::Place { x, y, z };
             }
         }
 
-        changed
+        BlockInteraction::None
     }
 
-    fn try_break_block(&self, world: &mut WorldManager) -> bool {
+    fn try_break_block(&self, world: &mut WorldManager) -> Option<(i32, i32, i32)> {
         let origin = self.camera.position;
         let direction = self.camera.forward();
 
@@ -221,14 +232,14 @@ impl Player {
                 if block != Block::Bedrock {
                     world.set_block(x, y, z, Block::Air);
                     tracing::debug!("Broke block at ({}, {}, {})", x, y, z);
-                    return true;
+                    return Some((x, y, z));
                 }
             }
         }
-        false
+        None
     }
 
-    fn try_place_block(&self, world: &mut WorldManager) -> bool {
+    fn try_place_block(&self, world: &mut WorldManager) -> Option<(i32, i32, i32)> {
         let origin = self.camera.position;
         let direction = self.camera.forward();
 
@@ -261,11 +272,11 @@ impl Player {
                 if let Some(Block::Air) = world.get_block(x, y, z) {
                     world.set_block(x, y, z, self.selected_block);
                     tracing::debug!("Placed {:?} at ({}, {}, {})", self.selected_block, x, y, z);
-                    return true;
+                    return Some((x, y, z));
                 }
             }
         }
-        false
+        None
     }
 
     pub fn update(&mut self, dt: Duration, world: Option<&WorldManager>) {
