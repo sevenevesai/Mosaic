@@ -1,6 +1,6 @@
 # Neolith Engine
 
-High-performance voxel engine in Rust + wgpu. ~11K LOC, 8 worker threads, 6 render passes.
+High-performance voxel engine in Rust + wgpu. ~12K LOC, 8 worker threads, 5 render passes.
 
 ## Quick Start
 
@@ -9,7 +9,7 @@ cargo build --release
 ./target/release/neolith.exe
 ```
 
-**Controls:** WASD move, Space jump/fly-up, Shift fly-down, Ctrl sprint, F fly mode, F3 debug, T day/night speed, V toggle voxel lighting, 1-8 blocks (8=torch), LMB break, RMB place, P perf log, Esc release mouse.
+**Controls:** WASD move, Space jump/fly-up, Shift fly-down, Ctrl sprint, F fly mode, F3 debug, T day/night speed, 1-8 blocks (8=torch), LMB break, RMB place, P perf log, Esc release mouse.
 
 ## Commands
 
@@ -28,7 +28,7 @@ src/
 ├── lib.rs           # Constants: RENDER_DISTANCE, LOD thresholds, physics
 ├── renderer/
 │   ├── mod.rs       # GPU state, render passes, day/night cycle
-│   ├── pipeline.rs  # WGSL shaders (chunk, voxel-lit, water)
+│   ├── pipeline.rs  # WGSL shaders (chunk, water, sky, UI)
 │   ├── voxel_gi.rs  # Voxel GI: 256³ volume, DDA shadows, VCT
 │   └── chunk_pool.rs # MDI mega-buffers
 ├── world/
@@ -69,12 +69,9 @@ WATER_SEA_LEVEL: 32      // Y level for water generation
 - **Region file corruption** - Always use zstd compression; raw writes can corrupt sector alignment
 - **Chunk fade-in** - Alpha-based; ensure blend state enabled in pipeline
 
-## Lighting Systems
+## Lighting System
 
-The engine supports two lighting modes (toggle with V key):
-
-### Voxel-Based Lighting (NEW - Default)
-Modern approach using `renderer/voxel_gi.rs`:
+Voxel-based global illumination using `renderer/voxel_gi.rs`:
 - **DDA Ray Marching Shadows**: Traces rays through 256³ voxel volume
 - **Voxel Cone Tracing (VCT)**: 5-cone diffuse GI from radiance volume
 - **Voxel AO**: Short-range cone traces for ambient occlusion
@@ -83,13 +80,7 @@ Modern approach using `renderer/voxel_gi.rs`:
 **Key files:**
 - `renderer/voxel_gi.rs` - VoxelGI struct, 3D texture management
 - `renderer/voxel_lighting.wgsl` - DDA + VCT shader functions
-- `renderer/pipeline.rs:VOXEL_LIT_CHUNK_SHADER` - Integrated chunk shader
-
-### Legacy Shadow Maps (Fallback)
-Traditional shadow mapping for comparison:
-- Shadow map coverage: ±280 blocks from camera
-- PCF Vogel disk sampling (16 taps)
-- Known issues documented in `.claude/rules/shadow-system-analysis.md`
+- `renderer/pipeline.rs:CHUNK_SHADER` - Chunk shader with voxel lighting
 
 ## Common Tasks
 

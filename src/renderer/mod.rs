@@ -23,7 +23,7 @@ use crate::utils::gpu_profiler::GpuProfiler;
 use crate::utils::profiler::FrameProfiler;
 use crate::world::WorldManager;
 
-use pipeline::{UiVertex, LineVertex, SHADOW_MAP_SIZE, WaterUniform, create_water_bind_group_layout, create_water_pipeline, create_voxel_lit_chunk_pipeline};
+use pipeline::{UiVertex, LineVertex, WaterUniform, create_water_bind_group_layout, create_water_pipeline, create_voxel_lit_chunk_pipeline};
 use glam::{Vec3, Mat4};
 
 /// Render statistics for the current frame
@@ -49,11 +49,10 @@ pub struct Renderer {
     size: PhysicalSize<u32>,
 
     // Pipelines
+    /// Chunk pipeline (uses DDA ray marching + VCT for lighting)
     chunk_pipeline: wgpu::RenderPipeline,
-    /// Voxel-lit chunk pipeline (uses DDA ray marching + VCT)
-    voxel_lit_chunk_pipeline: wgpu::RenderPipeline,
-    /// Light-only bind group (for voxel shader which doesn't use shadow map)
-    light_only_bind_group: wgpu::BindGroup,
+    /// Light bind group for chunk shader
+    light_bind_group: wgpu::BindGroup,
 
     // Bind groups
     #[allow(dead_code)]
@@ -68,12 +67,8 @@ pub struct Renderer {
     // Depth buffer
     depth_texture: wgpu::TextureView,
 
-    // Shadow mapping
-    shadow_texture: wgpu::TextureView,
-    shadow_pipeline: wgpu::RenderPipeline,
+    // Light uniform buffer
     light_buffer: wgpu::Buffer,
-    light_bind_group: wgpu::BindGroup,      // For shadow pass (just light uniform)
-    shadow_bind_group: wgpu::BindGroup,     // For main pass (light + shadow texture)
 
     // Sky rendering
     sky_pipeline: wgpu::RenderPipeline,
@@ -114,10 +109,8 @@ pub struct Renderer {
     cycle_speed: f32,      // Multiplier for cycle speed (1.0 = 10 min day, higher = faster)
 
     // Voxel-based Global Illumination system
-    // Replaces shadow maps with DDA ray marching, adds VCT for indirect lighting
+    // Uses DDA ray marching for shadows, VCT for indirect lighting
     voxel_gi: VoxelGI,
-    /// Whether to use the new voxel-based lighting (true) or legacy shadow maps (false)
-    use_voxel_lighting: bool,
 }
 
 impl Renderer {
@@ -281,37 +274,20 @@ impl Renderer {
             ],
         });
 
-        // === SHADOW MAPPING SETUP ===
-        // Create shadow map depth texture
-        let shadow_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Shadow Map"),
-            size: wgpu::Extent3d {
-                width: SHADOW_MAP_SIZE,
-                height: SHADOW_MAP_SIZE,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Depth32Float,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let shadow_texture_view = shadow_texture.create_view(&wgpu::TextureViewDescriptor::default());
-
-        // Create light uniform buffer
+        // === LIGHTING SETUP ===
+        // Create light uniform buffer (for sun/moon direction, colors, etc.)
         let light_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Light Buffer"),
             contents: bytemuck::cast_slice(&[LightUniform::default()]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
-        // Light bind group layout (for shadow pass - just the light uniform)
+        // Light bind group layout
         let light_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Light Bind Group Layout"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
+                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
@@ -321,7 +297,7 @@ impl Renderer {
             }],
         });
 
-        // Light bind group for shadow pass
+        // Light bind group
         let light_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Light Bind Group"),
             layout: &light_bind_group_layout,
@@ -330,75 +306,6 @@ impl Renderer {
                 resource: light_buffer.as_entire_binding(),
             }],
         });
-
-        // Shadow bind group layout (for main pass - light uniform + shadow texture)
-        let shadow_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Shadow Bind Group Layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Depth,
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
-                    count: None,
-                },
-            ],
-        });
-
-        // Shadow sampler for comparison sampling
-        let shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("Shadow Sampler"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::FilterMode::Nearest,
-            compare: Some(wgpu::CompareFunction::LessEqual),
-            ..Default::default()
-        });
-
-        // Shadow bind group for main pass
-        let shadow_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Shadow Bind Group"),
-            layout: &shadow_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: light_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&shadow_texture_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&shadow_sampler),
-                },
-            ],
-        });
-
-        // Create shadow pipeline
-        let shadow_pipeline = pipeline::create_shadow_pipeline(&device, &light_bind_group_layout);
 
         // === SKY RENDERING SETUP ===
         let sky_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -432,50 +339,17 @@ impl Renderer {
 
         let sky_pipeline = pipeline::create_sky_pipeline(&device, surface_format, &sky_bind_group_layout);
 
-        // Create chunk rendering pipeline (with shadow support)
-        let chunk_pipeline = pipeline::create_chunk_pipeline(
-            &device,
-            surface_format,
-            &camera_bind_group_layout,
-            &texture_bind_group_layout,
-            &shadow_bind_group_layout,
-        );
-
         // === VOXEL GI SYSTEM SETUP ===
-        // Light-only bind group layout (for voxel shader - no shadow texture)
-        let light_only_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Light Only Bind Group Layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        });
-
-        let light_only_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Light Only Bind Group"),
-            layout: &light_only_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: light_buffer.as_entire_binding(),
-            }],
-        });
-
-        // Create voxel GI system first (needed for bind group layout)
+        // Create voxel GI system (provides DDA shadows + VCT indirect lighting)
         let voxel_gi = VoxelGI::new(&device);
 
-        // Create voxel-lit chunk pipeline
-        let voxel_lit_chunk_pipeline = create_voxel_lit_chunk_pipeline(
+        // Create chunk pipeline (uses voxel GI for lighting)
+        let chunk_pipeline = create_voxel_lit_chunk_pipeline(
             &device,
             surface_format,
             &camera_bind_group_layout,
             &texture_bind_group_layout,
-            &light_only_bind_group_layout,
+            &light_bind_group_layout,
             voxel_gi.bind_group_layout(),
         );
         tracing::info!("Voxel GI system initialized (256^3 volume, DDA shadows + VCT)");
@@ -587,19 +461,14 @@ impl Renderer {
             config,
             size,
             chunk_pipeline,
-            voxel_lit_chunk_pipeline,
-            light_only_bind_group,
+            light_bind_group,
             camera_bind_group_layout,
             camera_buffer,
             camera_bind_group,
             texture_bind_group_layout,
             texture_bind_group,
             depth_texture,
-            shadow_texture: shadow_texture_view,
-            shadow_pipeline,
             light_buffer,
-            light_bind_group,
-            shadow_bind_group,
             sky_pipeline,
             sky_buffer,
             sky_bind_group,
@@ -619,7 +488,6 @@ impl Renderer {
             time_of_day: 0.35,   // Start at mid-morning
             cycle_speed: 10.0,   // 10x speed for testing (1 min = 1 day cycle)
             voxel_gi,
-            use_voxel_lighting: true,  // Enable new voxel-based lighting by default
         }
     }
 
@@ -640,19 +508,6 @@ impl Renderer {
 
     pub fn is_debug_overlay_enabled(&self) -> bool {
         self.debug_overlay.is_enabled()
-    }
-
-    /// Toggle between voxel-based lighting and legacy shadow maps
-    /// Returns true if voxel lighting is now enabled
-    pub fn toggle_voxel_lighting(&mut self) -> bool {
-        self.use_voxel_lighting = !self.use_voxel_lighting;
-        tracing::info!("Voxel lighting: {}", if self.use_voxel_lighting { "ENABLED (DDA shadows + VCT)" } else { "DISABLED (shadow maps)" });
-        self.use_voxel_lighting
-    }
-
-    /// Check if voxel lighting is enabled
-    pub fn is_voxel_lighting_enabled(&self) -> bool {
-        self.use_voxel_lighting
     }
 
     /// Mark voxel volume as needing update (call when blocks change)
@@ -769,20 +624,18 @@ impl Renderer {
             .write_buffer(&self.sky_buffer, 0, bytemuck::cast_slice(&[sky_uniform]));
 
         // === VOXEL GI UPDATE ===
-        // Update the voxel volume texture from chunk data (replaces shadow mapping)
-        if self.use_voxel_lighting {
-            let chunks = world.chunks();
-            self.voxel_gi.update_from_chunks(
-                &self.queue,
-                camera.position,
-                &chunks,
-                cycle.sun_direction,
-                cycle.sun_color,
-                cycle.ambient,
-                self.time_of_day,
-                held_light_emission,  // Player's held torch light
-            );
-        }
+        // Update the voxel volume texture from chunk data
+        let chunks = world.chunks();
+        self.voxel_gi.update_from_chunks(
+            &self.queue,
+            camera.position,
+            &chunks,
+            cycle.sun_direction,
+            cycle.sun_color,
+            cycle.ambient,
+            self.time_of_day,
+            held_light_emission,  // Player's held torch light
+        );
 
         // Build frustum for culling
         let frustum = Frustum::from_view_proj(camera.view_projection_matrix());
@@ -812,100 +665,10 @@ impl Renderer {
         let mut chunks_rendered = 0u32;
         let mut chunks_culled = 0u32;
         let mut triangles = 0u32;
-        let mut shadow_chunks_rendered = 0u32;
-        let mut shadow_chunks_culled = 0u32;
-
-        // Calculate shadow frustum bounds for culling
-        // Shadow map covers ±280 units from camera in X/Z plane
-        // This covers ~17 chunks which better matches typical view distance
-        let shadow_size = 280.0f32;
-        let shadow_min = Vec3::new(
-            camera.position.x - shadow_size,
-            -100.0, // Include all terrain heights
-            camera.position.z - shadow_size,
-        );
-        let shadow_max = Vec3::new(
-            camera.position.x + shadow_size,
-            500.0, // Include tall mountains
-            camera.position.z + shadow_size,
-        );
-
-        let shadow_start = std::time::Instant::now();
-
-        // === SHADOW PASS (only when using legacy shadow maps) ===
-        // Skip when using voxel lighting - it uses DDA ray marching instead
-        if !self.use_voxel_lighting {
-            let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Shadow Pass"),
-                color_attachments: &[],  // No color output
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.shadow_texture,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-
-            shadow_pass.set_pipeline(&self.shadow_pipeline);
-            shadow_pass.set_bind_group(0, &self.light_bind_group, &[]);
-
-            // Build lists for shadow pass (pool vs individual)
-            let mut shadow_pool: Vec<crate::world::ChunkPos> = Vec::with_capacity(2000);
-            let mut shadow_individual: Vec<&crate::world::ChunkMesh> = Vec::with_capacity(500);
-
-            for chunk_mesh in world.visible_meshes() {
-                let chunk_min = chunk_mesh.pos.world_origin();
-                let chunk_max = chunk_min + glam::Vec3::splat(crate::constants::CHUNK_SIZE_F32);
-
-                // AABB intersection test with shadow bounds
-                if chunk_max.x < shadow_min.x || chunk_min.x > shadow_max.x ||
-                   chunk_max.y < shadow_min.y || chunk_min.y > shadow_max.y ||
-                   chunk_max.z < shadow_min.z || chunk_min.z > shadow_max.z {
-                    shadow_chunks_culled += 1;
-                    continue;
-                }
-
-                if self.chunk_pool.mdi_available && self.chunk_pool.has_chunk(&chunk_mesh.pos) {
-                    shadow_pool.push(chunk_mesh.pos);
-                } else if chunk_mesh.gpu_mesh.is_some() {
-                    shadow_individual.push(chunk_mesh);
-                }
-            }
-
-            // MDI shadow pass
-            if self.chunk_pool.mdi_available && !shadow_pool.is_empty() {
-                let draw_count = self.chunk_pool.prepare_indirect_draws(&self.queue, &shadow_pool);
-                if draw_count > 0 {
-                    shadow_pass.set_vertex_buffer(0, self.chunk_pool.vertex_buffer.slice(..));
-                    shadow_pass.set_index_buffer(
-                        self.chunk_pool.index_buffer.slice(..),
-                        wgpu::IndexFormat::Uint32,
-                    );
-                    shadow_pass.multi_draw_indexed_indirect(
-                        &self.chunk_pool.indirect_buffer,
-                        0,
-                        draw_count,
-                    );
-                    shadow_chunks_rendered += draw_count;
-                }
-            }
-
-            // Individual shadow pass (fallback)
-            for chunk_mesh in shadow_individual {
-                if let Some(gpu_mesh) = &chunk_mesh.gpu_mesh {
-                    shadow_pass.set_vertex_buffer(0, gpu_mesh.vertex_buffer.slice(..));
-                    shadow_pass.set_index_buffer(gpu_mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                    shadow_pass.draw_indexed(0..gpu_mesh.index_count, 0, 0..1);
-                    shadow_chunks_rendered += 1;
-                }
-            }
-        }
-
-        let shadow_elapsed = shadow_start.elapsed();
+        // Shadow pass removed - using voxel GI with DDA ray marching instead
+        let shadow_chunks_rendered = 0u32;
+        let shadow_chunks_culled = 0u32;
+        let shadow_elapsed = std::time::Duration::ZERO;
         let main_start = std::time::Instant::now();
 
         // === MAIN RENDER PASS ===
@@ -942,21 +705,12 @@ impl Renderer {
             render_pass.set_bind_group(0, &self.sky_bind_group, &[]);
             render_pass.draw(0..3, 0..1);  // Fullscreen triangle
 
-            // Switch to appropriate chunk pipeline based on lighting mode
-            if self.use_voxel_lighting {
-                // Voxel-lit pipeline: DDA ray marching shadows + VCT for GI
-                render_pass.set_pipeline(&self.voxel_lit_chunk_pipeline);
-                render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
-                render_pass.set_bind_group(1, &self.texture_bind_group, &[]);
-                render_pass.set_bind_group(2, &self.light_only_bind_group, &[]);
-                render_pass.set_bind_group(3, self.voxel_gi.bind_group(), &[]);
-            } else {
-                // Legacy pipeline: shadow maps
-                render_pass.set_pipeline(&self.chunk_pipeline);
-                render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
-                render_pass.set_bind_group(1, &self.texture_bind_group, &[]);
-                render_pass.set_bind_group(2, &self.shadow_bind_group, &[]);
-            }
+            // Set up chunk pipeline (uses voxel GI with DDA ray marching + VCT)
+            render_pass.set_pipeline(&self.chunk_pipeline);
+            render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+            render_pass.set_bind_group(1, &self.texture_bind_group, &[]);
+            render_pass.set_bind_group(2, &self.light_bind_group, &[]);
+            render_pass.set_bind_group(3, self.voxel_gi.bind_group(), &[]);
 
             // Build list of visible chunk positions (frustum culled)
             // Separate chunks that are in the pool vs need individual draws
@@ -1426,7 +1180,10 @@ impl LightUniform {
         let shadow_distance = 200.0;  // Increased for larger coverage
         let shadow_size = 280.0;
 
-        // === SHADOW MAP STABILIZATION ===
+        // === LIGHT VIEW STABILIZATION ===
+        // Note: view_proj is kept for shader compatibility but not used for shadow sampling
+        // (voxel GI uses DDA ray marching instead)
+        const SHADOW_MAP_SIZE: u32 = 4096;
         let texels_per_unit = SHADOW_MAP_SIZE as f32 / (shadow_size * 2.0);
         let units_per_texel = 1.0 / texels_per_unit;
 
