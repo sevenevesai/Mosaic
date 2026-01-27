@@ -310,11 +310,35 @@ fn vs_main(in: VertexInput) -> VertexOutput {
         f32(in.normal_packed.z) / 127.0
     );
 
+    // Foliage flag in 4th byte of normal_packed (bit 0 = is_foliage)
+    let is_foliage = (in.normal_packed.w & 1) != 0;
+
     let current_time = camera.anim_data.x;
     let spawn_time = camera.anim_data.y;
     let wave_speed = camera.anim_data.z;
 
     var pos = in.position;
+
+    // Gentle breeze animation for foliage blocks (leaves)
+    if (is_foliage) {
+        // Use world position for consistent wind across vertices
+        let wind_time = current_time * 0.7;  // Slower, more peaceful
+        let world_pos = pos;
+
+        // Gentle overlapping sine waves for subtle swaying
+        let wind_x = sin(wind_time + world_pos.x * 0.3 + world_pos.z * 0.2) * 0.025
+                   + sin(wind_time * 0.6 + world_pos.z * 0.4) * 0.012;
+        let wind_z = sin(wind_time * 0.5 + world_pos.z * 0.3 + world_pos.x * 0.15) * 0.02
+                   + cos(wind_time * 0.8 + world_pos.x * 0.35) * 0.01;
+
+        // Very subtle vertical movement
+        let wind_y = sin(wind_time * 0.9 + world_pos.x * 0.25 + world_pos.z * 0.25) * 0.006;
+
+        pos.x += wind_x;
+        pos.y += wind_y;
+        pos.z += wind_z;
+    }
+
     let chunk_pos = floor(pos / 16.0) * 16.0;
     let cam_pos = camera.view_pos.xyz;
     let dist = length(chunk_pos.xz - cam_pos.xz);
@@ -644,7 +668,7 @@ fn sample_torch_light(world_pos: vec3<f32>) -> vec3<f32> {
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Texture sampling (same as original)
-    let tiles_per_row = 5.0;
+    let tiles_per_row = 6.0;
     let tile_size = 1.0 / tiles_per_row;
     let tile_pixels = 256.0;
     let tile_base = floor(in.uv / tile_size) * tile_size;

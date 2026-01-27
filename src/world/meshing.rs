@@ -137,11 +137,21 @@ pub struct ChunkVertex {
 
 impl ChunkVertex {
     /// Pack a normal vector into a u32 (only 6 possible normals for cube faces)
+    /// The 4th byte is used for flags: bit 0 = is_foliage (for wind animation)
     pub fn pack_normal(normal: [f32; 3]) -> u32 {
         let nx = ((normal[0] * 127.0) as i8) as u8;
         let ny = ((normal[1] * 127.0) as i8) as u8;
         let nz = ((normal[2] * 127.0) as i8) as u8;
         u32::from_le_bytes([nx, ny, nz, 0])
+    }
+
+    /// Pack a normal vector with foliage flag for wind animation
+    pub fn pack_normal_with_flags(normal: [f32; 3], is_foliage: bool) -> u32 {
+        let nx = ((normal[0] * 127.0) as i8) as u8;
+        let ny = ((normal[1] * 127.0) as i8) as u8;
+        let nz = ((normal[2] * 127.0) as i8) as u8;
+        let flags = if is_foliage { 1u8 } else { 0u8 };
+        u32::from_le_bytes([nx, ny, nz, flags])
     }
 
     /// Pack UV coordinates (0.0-1.0) into u16 pair
@@ -171,6 +181,16 @@ impl ChunkVertex {
         Self {
             position,
             normal_packed: Self::pack_normal(normal),
+            uv: Self::pack_uv(uv),
+            ao_tile_packed: Self::pack_ao_tile_light(ao, tile_u, tile_v, light),
+        }
+    }
+
+    /// Create vertex with tiling, light, and foliage flag (for leaves with wind animation)
+    pub fn new_tiled_lit_foliage(position: [f32; 3], normal: [f32; 3], uv: [f32; 2], ao: f32, tile_u: u8, tile_v: u8, light: u8, is_foliage: bool) -> Self {
+        Self {
+            position,
+            normal_packed: Self::pack_normal_with_flags(normal, is_foliage),
             uv: Self::pack_uv(uv),
             ao_tile_packed: Self::pack_ao_tile_light(ao, tile_u, tile_v, light),
         }
@@ -443,7 +463,7 @@ fn build_chunk_mesh_simple(
 
 #[allow(dead_code)]
 fn get_tile_uvs(tex_idx: u32) -> ([f32; 2], [f32; 2], [f32; 2], [f32; 2]) {
-    let tiles_per_row = 5u32; // 5x5 grid of 256x256 tiles
+    let tiles_per_row = 6u32; // 6x6 grid of 256x256 tiles
     let tile_size = 1.0 / tiles_per_row as f32;
     let u0 = (tex_idx % tiles_per_row) as f32 * tile_size;
     let v0 = (tex_idx / tiles_per_row) as f32 * tile_size;
@@ -581,6 +601,162 @@ fn add_face_right(v: &mut Vec<ChunkVertex>, i: &mut Vec<u32>, x: f32, y: f32, z:
     );
 }
 
+/// Add a quad with foliage flag for wind animation
+fn add_quad_foliage(
+    vertices: &mut Vec<ChunkVertex>,
+    indices: &mut Vec<u32>,
+    positions: [[f32; 3]; 4],
+    normal: [f32; 3],
+    uvs: [[f32; 2]; 4],
+    light: u8,
+) {
+    let base = vertices.len() as u32;
+    for idx in 0..4 {
+        vertices.push(ChunkVertex::new_tiled_lit_foliage(
+            positions[idx], normal, uvs[idx], 1.0, 1, 1, light, true
+        ));
+    }
+    // Vertices are in order: 0-1-2-3
+    // Two CCW triangles when viewed from outside: 0-2-1 and 0-3-2
+    indices.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
+}
+
+/// Generate cube faces for foliage blocks (leaves) with all 6 faces rendered
+/// No neighbor culling - ensures no gaps when foliage sways in the wind
+fn add_foliage_blocks(
+    chunk: &Chunk,
+    neighbors: &[Option<Arc<Chunk>>; 6],
+    world_origin: glam::Vec3,
+    vertices: &mut Vec<ChunkVertex>,
+    indices: &mut Vec<u32>,
+) {
+    let s = BLOCK_SCALE;
+
+    for z in 0..CHUNK_SIZE {
+        for y in 0..CHUNK_SIZE {
+            for x in 0..CHUNK_SIZE {
+                let block = chunk.get_block(x, y, z);
+                if !block.is_foliage() {
+                    continue;
+                }
+
+                let bx = world_origin.x + x as f32 * s;
+                let by = world_origin.y + y as f32 * s;
+                let bz = world_origin.z + z as f32 * s;
+
+                // Get texture UVs (same pattern as get_tile_uvs)
+                let tex_idx = block.texture_indices()[0];
+                let tiles_per_row = 6u32;
+                let tile_size = 1.0 / tiles_per_row as f32;
+                let u0 = (tex_idx % tiles_per_row) as f32 * tile_size;
+                let v0 = (tex_idx / tiles_per_row) as f32 * tile_size;
+                let u1 = u0 + tile_size;
+                let v1 = v0 + tile_size;
+                let uv0 = [u0, v1]; // bottom-left
+                let uv1 = [u1, v1]; // bottom-right
+                let uv2 = [u1, v0]; // top-right
+                let uv3 = [u0, v0]; // top-left
+
+                // Top face (+Y) - same positions as add_face_top
+                {
+                    let light = get_face_light(chunk, neighbors, x, y, z, Axis::Y, true);
+                    add_quad_foliage(vertices, indices,
+                        [
+                            [bx,     by + s, bz],       // 0: back-left
+                            [bx + s, by + s, bz],       // 1: back-right
+                            [bx + s, by + s, bz + s],   // 2: front-right
+                            [bx,     by + s, bz + s],   // 3: front-left
+                        ],
+                        [0.0, 1.0, 0.0],
+                        [uv0, uv1, uv2, uv3],
+                        light,
+                    );
+                }
+
+                // Bottom face (-Y) - same positions as add_face_bottom
+                {
+                    let light = get_face_light(chunk, neighbors, x, y, z, Axis::Y, false);
+                    add_quad_foliage(vertices, indices,
+                        [
+                            [bx,     by, bz + s],   // 0: front-left
+                            [bx + s, by, bz + s],   // 1: front-right
+                            [bx + s, by, bz],       // 2: back-right
+                            [bx,     by, bz],       // 3: back-left
+                        ],
+                        [0.0, -1.0, 0.0],
+                        [uv0, uv1, uv2, uv3],
+                        light,
+                    );
+                }
+
+                // Front face (+Z) - same positions as add_face_front
+                {
+                    let light = get_face_light(chunk, neighbors, x, y, z, Axis::Z, true);
+                    add_quad_foliage(vertices, indices,
+                        [
+                            [bx + s, by,     bz + s],   // 0: bottom-right
+                            [bx,     by,     bz + s],   // 1: bottom-left
+                            [bx,     by + s, bz + s],   // 2: top-left
+                            [bx + s, by + s, bz + s],   // 3: top-right
+                        ],
+                        [0.0, 0.0, 1.0],
+                        [uv0, uv1, uv2, uv3],
+                        light,
+                    );
+                }
+
+                // Back face (-Z) - same positions as add_face_back
+                {
+                    let light = get_face_light(chunk, neighbors, x, y, z, Axis::Z, false);
+                    add_quad_foliage(vertices, indices,
+                        [
+                            [bx,     by,     bz],   // 0: bottom-left
+                            [bx + s, by,     bz],   // 1: bottom-right
+                            [bx + s, by + s, bz],   // 2: top-right
+                            [bx,     by + s, bz],   // 3: top-left
+                        ],
+                        [0.0, 0.0, -1.0],
+                        [uv0, uv1, uv2, uv3],
+                        light,
+                    );
+                }
+
+                // Left face (-X) - same positions as add_face_left
+                {
+                    let light = get_face_light(chunk, neighbors, x, y, z, Axis::X, false);
+                    add_quad_foliage(vertices, indices,
+                        [
+                            [bx, by,     bz],       // 0: bottom-back
+                            [bx, by + s, bz],       // 1: top-back
+                            [bx, by + s, bz + s],   // 2: top-front
+                            [bx, by,     bz + s],   // 3: bottom-front
+                        ],
+                        [-1.0, 0.0, 0.0],
+                        [uv0, uv3, uv2, uv1],  // Reordered like add_face_left
+                        light,
+                    );
+                }
+
+                // Right face (+X) - same positions as add_face_right
+                {
+                    let light = get_face_light(chunk, neighbors, x, y, z, Axis::X, true);
+                    add_quad_foliage(vertices, indices,
+                        [
+                            [bx + s, by,     bz + s],   // 0: bottom-front
+                            [bx + s, by + s, bz + s],   // 1: top-front
+                            [bx + s, by + s, bz],       // 2: top-back
+                            [bx + s, by,     bz],       // 3: bottom-back
+                        ],
+                        [1.0, 0.0, 0.0],
+                        [uv0, uv3, uv2, uv1],  // Reordered like add_face_right
+                        light,
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// Build mesh for a chunk with specified LOD level
 pub fn build_chunk_mesh_lod(
     pos: ChunkPos,
@@ -625,6 +801,12 @@ pub fn build_chunk_mesh_lod(
                 );
             }
         }
+    }
+
+    // Add foliage blocks (leaves) separately - they render all 6 faces without neighbor culling
+    // Only at full detail - at LOD levels, leaves are skipped entirely for performance
+    if step == 1 {
+        add_foliage_blocks(chunk, neighbors, world_origin, &mut vertices, &mut indices);
     }
 
     // Record timing and statistics
@@ -697,7 +879,8 @@ fn binary_greedy_mesh_axis(
                     Axis::Z => (u, v, d),
                 };
                 let block = chunk.get_block(x, y, z);
-                if block.is_solid() {
+                // Skip cross-billboard and foliage blocks - they're rendered separately
+                if block.is_solid() && !block.is_cross_billboard() && !block.is_foliage() {
                     current_occupancy[v] |= 1 << u;
                     block_types[v][u] = block;
                 }
@@ -718,7 +901,9 @@ fn binary_greedy_mesh_axis(
                             Axis::Y => (u, d + 1, v),
                             Axis::Z => (u, v, d + 1),
                         };
-                        if chunk.get_block(x, y, z).is_solid() {
+                        let nb = chunk.get_block(x, y, z);
+                        // Foliage doesn't occlude - we want to see faces behind leaves
+                        if nb.is_solid() && !nb.is_foliage() {
                             neighbor_occupancy[v] |= 1 << u;
                         }
                     }
@@ -732,7 +917,8 @@ fn binary_greedy_mesh_axis(
                             Axis::Y => (u, 0, v),
                             Axis::Z => (u, v, 0),
                         };
-                        if nc.get_block(x, y, z).is_solid() {
+                        let nb = nc.get_block(x, y, z);
+                        if nb.is_solid() && !nb.is_foliage() {
                             neighbor_occupancy[v] |= 1 << u;
                         }
                     }
@@ -749,7 +935,8 @@ fn binary_greedy_mesh_axis(
                             Axis::Y => (u, d - 1, v),
                             Axis::Z => (u, v, d - 1),
                         };
-                        if chunk.get_block(x, y, z).is_solid() {
+                        let nb = chunk.get_block(x, y, z);
+                        if nb.is_solid() && !nb.is_foliage() {
                             neighbor_occupancy[v] |= 1 << u;
                         }
                     }
@@ -763,7 +950,8 @@ fn binary_greedy_mesh_axis(
                             Axis::Y => (u, CHUNK_SIZE - 1, v),
                             Axis::Z => (u, v, CHUNK_SIZE - 1),
                         };
-                        if nc.get_block(x, y, z).is_solid() {
+                        let nb = nc.get_block(x, y, z);
+                        if nb.is_solid() && !nb.is_foliage() {
                             neighbor_occupancy[v] |= 1 << u;
                         }
                     }
@@ -912,6 +1100,9 @@ fn binary_greedy_mesh_axis(
                         d, start_u, start_v, width, height,
                     );
 
+                    // Leaves (texture index 9) are foliage - enable wind animation
+                    let is_foliage = tex_idx == 9;
+
                     emit_greedy_quad(
                         vertices,
                         indices,
@@ -926,6 +1117,7 @@ fn binary_greedy_mesh_axis(
                         tex_idx as u32,
                         light,
                         ao_values,
+                        is_foliage,
                     );
                 }
             }
@@ -998,7 +1190,8 @@ fn greedy_mesh_axis_lod(
                             };
 
                             let block = chunk.get_block(x, y, z);
-                            if !block.is_solid() {
+                            // Skip non-solid, cross-billboard, and foliage blocks (rendered separately)
+                            if !block.is_solid() || block.is_cross_billboard() || block.is_foliage() {
                                 continue;
                             }
 
@@ -1108,6 +1301,9 @@ fn greedy_mesh_axis_lod(
                     d_emit, start_u * step, start_v * step, width * step, height * step,
                 );
 
+                // Leaves (texture index 9) are foliage - enable wind animation
+                let is_foliage = face_info.texture_idx == 9;
+
                 emit_greedy_quad(
                     vertices,
                     indices,
@@ -1122,6 +1318,7 @@ fn greedy_mesh_axis_lod(
                     face_info.texture_idx,
                     light,
                     ao_values,
+                    is_foliage,
                 );
             }
         }
@@ -1660,11 +1857,12 @@ fn emit_greedy_quad(
     texture_idx: u32,
     light_level: u8,
     ao_values: [f32; 4],  // AO for each of the 4 corners
+    is_foliage: bool,     // True for leaves - enables wind animation in shader
 ) {
     let base_index = vertices.len() as u32;
 
     // Get UVs from texture atlas
-    let tiles_per_row = 5u32; // 5x5 grid of 256x256 tiles
+    let tiles_per_row = 6u32; // 6x6 grid of 256x256 tiles
     let tile_size = 1.0 / tiles_per_row as f32;
     let uv_u0 = (texture_idx % tiles_per_row) as f32 * tile_size;
     let uv_v0 = (texture_idx / tiles_per_row) as f32 * tile_size;
@@ -1780,9 +1978,9 @@ fn emit_greedy_quad(
         }
     };
 
-    // Add vertices with tiling, light, and per-corner AO
+    // Add vertices with tiling, light, per-corner AO, and foliage flag
     for i in 0..4 {
-        vertices.push(ChunkVertex::new_tiled_lit(positions[i], normal, uvs[uv_order[i]], ao_values[i], tile_u, tile_v, light_level));
+        vertices.push(ChunkVertex::new_tiled_lit_foliage(positions[i], normal, uvs[uv_order[i]], ao_values[i], tile_u, tile_v, light_level, is_foliage));
     }
 
     // Same index pattern as add_quad: 0-2-1 and 0-3-2

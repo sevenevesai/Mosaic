@@ -547,93 +547,77 @@ impl TerrainGenerator {
         }
     }
 
-    /// Get a stone variant based on position for natural-looking variation
-    /// Uses larger-scale noise for realistic patches of different stone types
+    /// Get stone block (simplified - no random variants)
     #[inline]
-    fn get_stone_variant(&self, x: i32, y: i32, z: i32) -> Block {
-        // Large-scale noise for patch placement (low frequency = large patches)
-        let patch_noise = self.ore_noise.get([
-            x as f64 * 0.03,
-            y as f64 * 0.03,
-            z as f64 * 0.03,
-        ]);
-
-        // Medium-scale noise for variation within patches
-        let detail_hash = fast_hash_3d(x, y, z);
-        let detail = (detail_hash % 100) as f64 / 100.0;
-
-        // Distribute stone types:
-        // - Stone (rubble): ~60% - main stone type
-        // - StoneDirt: ~25% - in patches, more common at surface/caves
-        // - StoneRubble2: ~15% - scattered for additional variety
-        if patch_noise > 0.3 {
-            // StoneDirt patches - dirty stone in certain areas
-            if detail < 0.7 {
-                Block::StoneDirt
-            } else {
-                Block::Stone
-            }
-        } else if patch_noise < -0.4 {
-            // StoneRubble2 patches - rougher stone
-            if detail < 0.6 {
-                Block::StoneRubble2
-            } else {
-                Block::Stone
-            }
-        } else {
-            // Default stone with occasional variation
-            if detail > 0.92 {
-                Block::StoneDirt
-            } else if detail > 0.85 {
-                Block::StoneRubble2
-            } else {
-                Block::Stone
-            }
-        }
+    fn get_stone_variant(&self, _x: i32, _y: i32, _z: i32) -> Block {
+        Block::Stone
     }
 
-    /// Fast ore generation using hash + single noise sample
+    /// Balanced ore generation with depth-based distribution
+    /// Each position can only have ONE ore type - determined by hash
     #[inline]
     fn get_ore_or_stone_fast(&self, x: i32, y: i32, z: i32) -> Block {
-        // Use fast hash for initial ore check - most blocks are stone
         let hash = fast_hash_3d(x, y, z);
 
-        // 95% of blocks are stone variants - skip noise entirely for ore check
-        if hash % 100 > 5 {
-            return self.get_stone_variant(x, y, z);
-        }
-
-        // Only do noise lookup for potential ore positions
-        let ore_value = self.ore_noise.get([
-            x as f64 * 0.15,
-            y as f64 * 0.15,
-            z as f64 * 0.15,
+        // Noise for vein clustering
+        let ore_noise = self.ore_noise.get([
+            x as f64 * 0.1,
+            y as f64 * 0.1,
+            z as f64 * 0.1,
         ]);
 
-        // Ore distribution based on depth and noise
-        if ore_value > 0.6 {
-            if y < 16 {
-                Block::GoldOre
-            } else {
-                Block::IronOre
-            }
-        } else if ore_value > 0.3 {
-            if y < 50 {
-                Block::IronOre
-            } else {
-                // Was CoalOre, now just stone since we removed it
-                self.get_stone_variant(x, y, z)
-            }
-        } else if ore_value > 0.0 {
-            // Was CoalOre, now just stone
-            self.get_stone_variant(x, y, z)
-        } else if y < 20 {
-            Block::RedstoneOre
-        } else if y < 16 && ore_value < -0.5 {
-            Block::DiamondOre
-        } else {
-            self.get_stone_variant(x, y, z)
+        // Coal uses lower frequency noise for chunkier veins (4-8 blocks typically)
+        let coal_noise = self.ore_noise.get([
+            x as f64 * 0.06,
+            y as f64 * 0.06,
+            z as f64 * 0.06,
+        ]);
+
+        // Use hash to pick ONE ore type - smaller slots = rarer
+        let ore_slot = hash % 1000;
+
+        // Coal first - uses separate noise for chunky veins
+        if y >= 20 && y < 90 && coal_noise > 0.5 && ore_slot < 350 {
+            return Block::CoalOre;
         }
+
+        // Must be in an ore-favorable zone for other ores
+        if ore_noise < 0.55 {
+            return Block::Stone;
+        }
+
+        // Deep ores (y < 16) - very rare
+        if y < 16 {
+            if ore_slot < 3 && y < 10 { return Block::UraniumOre; }      // 0.3%
+            if ore_slot < 10 && y < 14 { return Block::TitaniumOre; }    // 0.7%
+            if ore_slot < 25 { return Block::DiamondOre; }               // 1.5%
+            if ore_slot < 45 { return Block::SapphireOre; }              // 2%
+        }
+
+        // Mid-deep ores (y < 32)
+        if y < 32 {
+            if ore_slot < 15 { return Block::RedstoneOre; }              // 1.5%
+            if ore_slot < 25 { return Block::EmeraldOre; }               // 1% (rare)
+            if ore_slot < 45 && y < 28 { return Block::AmethystOre; }    // 2%
+            if ore_slot < 75 { return Block::GoldOre; }                  // 3%
+            if ore_slot < 105 { return Block::LeadOre; }                 // 3%
+        }
+
+        // Mid ores (y < 50)
+        if y < 50 {
+            if ore_slot < 40 { return Block::SilverOre; }                // 4%
+            if ore_slot < 80 { return Block::NickelOre; }                // 4%
+            if ore_slot < 130 { return Block::QuartzOre; }               // 5%
+            if ore_slot < 200 { return Block::IronOre; }                 // 7%
+        }
+
+        // Upper ores (y < 70)
+        if y < 70 {
+            if ore_slot < 80 { return Block::CopperOre; }                // 8%
+            if ore_slot < 160 { return Block::TinOre; }                  // 8%
+        }
+
+        Block::Stone
     }
 
     #[allow(dead_code)]
@@ -1042,6 +1026,17 @@ impl TerrainGenerator {
                     return;
                 }
             }
+
+            // Canopy gaps: randomly skip ~25% of leaf blocks for natural look
+            if block == Block::Leaves {
+                let hash = fast_hash_3d(lx, ly, lz);
+                // Skip leaves at edges more often (creates natural tapered edges)
+                // and randomly skip some interior leaves for gaps
+                if hash % 100 < 25 {
+                    return;
+                }
+            }
+
             chunk.set_block(lx as usize, ly as usize, lz as usize, block);
         }
     }

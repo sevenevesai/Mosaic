@@ -254,6 +254,19 @@ pub enum Block {
     Bedrock = 14,
     Torch = 15,
     Sand = 16,          // Beach/desert sand
+    // New ores
+    CoalOre = 17,       // Common, upper depths
+    CopperOre = 18,     // Common, upper-mid depths
+    EmeraldOre = 19,    // Rare, deep
+    SapphireOre = 20,   // Rare, very deep
+    QuartzOre = 21,     // Uncommon, mid range
+    AmethystOre = 22,   // Rare, deep clusters
+    SilverOre = 23,     // Uncommon, mid depths
+    TinOre = 24,        // Common, upper depths
+    NickelOre = 25,     // Uncommon, mid-lower
+    LeadOre = 26,       // Uncommon, lower depths
+    TitaniumOre = 27,   // Very rare, very deep
+    UraniumOre = 28,    // Very rare, deepest, glows!
 }
 
 impl Block {
@@ -263,6 +276,19 @@ impl Block {
 
     pub fn is_transparent(&self) -> bool {
         matches!(self, Block::Air | Block::Water | Block::Leaves | Block::Torch)
+    }
+
+    /// Returns true if this block should be rendered as crossed billboards instead of a cube
+    /// Cross-billboard blocks are rendered as two intersecting diagonal planes (X shape)
+    /// Currently disabled - all blocks render as cubes
+    pub fn is_cross_billboard(&self) -> bool {
+        false
+    }
+
+    /// Returns true if this block is foliage (renders all 6 faces, no neighbor culling)
+    /// Foliage blocks sway in the wind and need all faces visible to avoid gaps
+    pub fn is_foliage(&self) -> bool {
+        matches!(self, Block::Leaves)
     }
 
     /// Get texture indices for each face: [top, bottom, front, back, left, right]
@@ -285,6 +311,19 @@ impl Block {
             Block::Bedrock => [15; 6],
             Block::Torch => [16; 6],           // Torch has dedicated warm orange texture
             Block::Sand => [17; 6],            // Beach sand
+            // New ores (indices 18-29)
+            Block::CoalOre => [18; 6],
+            Block::CopperOre => [19; 6],
+            Block::EmeraldOre => [20; 6],
+            Block::SapphireOre => [21; 6],
+            Block::QuartzOre => [22; 6],
+            Block::AmethystOre => [23; 6],
+            Block::SilverOre => [24; 6],
+            Block::TinOre => [25; 6],
+            Block::NickelOre => [26; 6],
+            Block::LeadOre => [27; 6],
+            Block::TitaniumOre => [28; 6],
+            Block::UraniumOre => [29; 6],
         }
     }
 
@@ -294,6 +333,7 @@ impl Block {
     pub fn light_emission(&self) -> u8 {
         match self {
             Block::Torch => 14,
+            Block::UraniumOre => 8,  // Radioactive glow!
             _ => 0,
         }
     }
@@ -332,6 +372,18 @@ impl From<u8> for Block {
             14 => Block::Bedrock,
             15 => Block::Torch,
             16 => Block::Sand,
+            17 => Block::CoalOre,
+            18 => Block::CopperOre,
+            19 => Block::EmeraldOre,
+            20 => Block::SapphireOre,
+            21 => Block::QuartzOre,
+            22 => Block::AmethystOre,
+            23 => Block::SilverOre,
+            24 => Block::TinOre,
+            25 => Block::NickelOre,
+            26 => Block::LeadOre,
+            27 => Block::TitaniumOre,
+            28 => Block::UraniumOre,
             _ => Block::Air,
         }
     }

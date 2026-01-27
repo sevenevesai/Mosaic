@@ -417,7 +417,37 @@ impl WorldManager {
                     self.pending_generation.remove(&pos);
                     // Check if chunk has water before inserting
                     let has_water = chunk.has_water();
+
+                    // Scan for light-emitting blocks (ores, torches) and propagate their light
+                    let world_x = pos.x * crate::constants::CHUNK_SIZE_I32;
+                    let world_y = pos.y * crate::constants::CHUNK_SIZE_I32;
+                    let world_z = pos.z * crate::constants::CHUNK_SIZE_I32;
+                    let mut light_sources: Vec<(i32, i32, i32, u8)> = Vec::new();
+                    for lz in 0..crate::constants::CHUNK_SIZE {
+                        for ly in 0..crate::constants::CHUNK_SIZE {
+                            for lx in 0..crate::constants::CHUNK_SIZE {
+                                let block = chunk.get_block(lx, ly, lz);
+                                let emission = block.light_emission();
+                                if emission > 0 {
+                                    light_sources.push((
+                                        world_x + lx as i32,
+                                        world_y + ly as i32,
+                                        world_z + lz as i32,
+                                        emission,
+                                    ));
+                                }
+                            }
+                        }
+                    }
+
                     self.chunks.write().insert(pos, Arc::new(*chunk));
+
+                    // Propagate light from all sources found in this chunk
+                    for (x, y, z, emission) in light_sources {
+                        let updates = self.light_engine.propagate_light(x, y, z, emission, &self.chunks);
+                        apply_light_updates(updates, &self.chunks);
+                    }
+
                     // Queue meshing with appropriate LOD
                     let lod = self.calculate_lod(pos, player_chunk);
                     self.queue_meshing_with_lod(pos, lod);
