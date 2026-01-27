@@ -33,11 +33,13 @@ pub struct RenderStats {
     pub chunks_culled: u32,
     pub triangles: u32,
     pub gpu_time_ms: f64,
-    // Shadow pass stats
+    // Shadow pass stats (legacy, now unused)
     pub shadow_chunks_rendered: u32,
     pub shadow_chunks_culled: u32,
     pub shadow_pass_ms: f64,
     pub main_pass_ms: f64,
+    // Voxel GI timing
+    pub voxel_gi_ms: f64,
 }
 
 /// GPU state and rendering logic
@@ -580,15 +582,20 @@ impl Renderer {
         debug_metrics: &DebugMetrics,
         held_light_emission: u8,  // Light emission of held item (0 = none, 14 = torch)
     ) -> Result<(), wgpu::SurfaceError> {
+        let render_start = std::time::Instant::now();
+
         // Sync meshes to chunk pool for MDI rendering
+        let sync_start = std::time::Instant::now();
         if self.chunk_pool.mdi_available {
             self.sync_meshes_to_pool(world);
         }
+        let sync_elapsed = sync_start.elapsed();
 
         // Poll GPU profiler for previous frame results
         self.gpu_profiler.poll_results(&self.device);
 
         // Update camera uniform with animation timing
+        let uniforms_start = std::time::Instant::now();
         let current_time = self.start_time.elapsed().as_secs_f32();
         let spawn_time = 0.0;  // World starts loading at time 0
 
@@ -622,9 +629,11 @@ impl Renderer {
         let sky_uniform = SkyUniform::from_camera_and_time(camera, self.time_of_day);
         self.queue
             .write_buffer(&self.sky_buffer, 0, bytemuck::cast_slice(&[sky_uniform]));
+        let uniforms_elapsed = uniforms_start.elapsed();
 
         // === VOXEL GI UPDATE ===
         // Update the voxel volume texture from chunk data
+        let voxel_gi_start = std::time::Instant::now();
         let chunks = world.chunks();
         self.voxel_gi.update_from_chunks(
             &self.queue,
@@ -636,6 +645,7 @@ impl Renderer {
             self.time_of_day,
             held_light_emission,  // Player's held torch light
         );
+        let voxel_gi_elapsed = voxel_gi_start.elapsed();
 
         // Build frustum for culling
         let frustum = Frustum::from_view_proj(camera.view_projection_matrix());
@@ -670,6 +680,9 @@ impl Renderer {
         let shadow_chunks_culled = 0u32;
         let shadow_elapsed = std::time::Duration::ZERO;
         let main_start = std::time::Instant::now();
+        // Timing for spike detection (assigned inside render pass)
+        let mut cull_elapsed = std::time::Duration::ZERO;
+        let mut mdi_prep_elapsed = std::time::Duration::ZERO;
 
         // === MAIN RENDER PASS ===
         {
@@ -714,6 +727,7 @@ impl Renderer {
 
             // Build list of visible chunk positions (frustum culled)
             // Separate chunks that are in the pool vs need individual draws
+            let cull_start = std::time::Instant::now();
             let mut pool_chunks: Vec<crate::world::ChunkPos> = Vec::with_capacity(3000);
             let mut individual_chunks: Vec<&crate::world::ChunkMesh> = Vec::with_capacity(500);
 
@@ -739,8 +753,10 @@ impl Renderer {
                     individual_chunks.push(chunk_mesh);
                 }
             }
+            cull_elapsed = cull_start.elapsed();
 
             // MDI pass: render all chunks that are in the pool
+            let mdi_prep_start = std::time::Instant::now();
             if self.chunk_pool.mdi_available && !pool_chunks.is_empty() {
                 let draw_count = self.chunk_pool.prepare_indirect_draws(&self.queue, &pool_chunks);
 
@@ -758,6 +774,8 @@ impl Renderer {
                     chunks_rendered += draw_count;
                 }
             }
+
+            mdi_prep_elapsed = mdi_prep_start.elapsed();
 
             // Individual pass: render chunks not in pool (overflow, oversized, etc.)
             for chunk_mesh in individual_chunks {
@@ -855,11 +873,30 @@ impl Renderer {
         // Resolve GPU timestamps
         self.gpu_profiler.resolve(&mut encoder);
 
+        let submit_start = std::time::Instant::now();
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
+        let submit_elapsed = submit_start.elapsed();
 
         // Begin async readback of GPU timing
         self.gpu_profiler.begin_readback();
+
+        let render_total = render_start.elapsed();
+
+        // Log spike breakdown when render exceeds 5ms
+        if render_total.as_secs_f64() * 1000.0 > 5.0 {
+            tracing::warn!(
+                "RENDER SPIKE {:.1}ms: sync={:.1}ms uniforms={:.1}ms voxel_gi={:.1}ms cull={:.1}ms mdi={:.1}ms submit={:.1}ms | {} chunks",
+                render_total.as_secs_f64() * 1000.0,
+                sync_elapsed.as_secs_f64() * 1000.0,
+                uniforms_elapsed.as_secs_f64() * 1000.0,
+                voxel_gi_elapsed.as_secs_f64() * 1000.0,
+                cull_elapsed.as_secs_f64() * 1000.0,
+                mdi_prep_elapsed.as_secs_f64() * 1000.0,
+                submit_elapsed.as_secs_f64() * 1000.0,
+                chunks_rendered,
+            );
+        }
 
         // Update stats
         self.stats = RenderStats {
@@ -871,6 +908,7 @@ impl Renderer {
             shadow_chunks_culled,
             shadow_pass_ms: shadow_elapsed.as_secs_f64() * 1000.0,
             main_pass_ms: main_elapsed.as_secs_f64() * 1000.0,
+            voxel_gi_ms: voxel_gi_elapsed.as_secs_f64() * 1000.0,
         };
 
         Ok(())
@@ -907,6 +945,11 @@ impl Renderer {
     /// Sync all visible meshes to the chunk pool for MDI rendering
     /// Only uploads meshes that aren't already in the pool (or have changed size)
     pub fn sync_meshes_to_pool(&mut self, world: &crate::world::WorldManager) {
+        // Throttle uploads to prevent frame spikes when many chunks arrive at once
+        // 16 uploads/frame at 60fps = 960 chunks/sec, plenty fast for smooth loading
+        const MAX_UPLOADS_PER_FRAME: usize = 16;
+        let mut uploads_this_frame = 0;
+
         // Only upload meshes not already in pool (or with different size indicating regeneration)
         for mesh in world.visible_meshes() {
             if mesh.vertices.is_empty() {
@@ -921,12 +964,17 @@ impl Renderer {
                 }
             }
 
-            // Upload new or changed mesh
+            // Upload new or changed mesh (throttled)
             self.chunk_pool.upload_chunk(&self.queue, mesh);
+            uploads_this_frame += 1;
+
+            if uploads_this_frame >= MAX_UPLOADS_PER_FRAME {
+                break; // Continue next frame
+            }
         }
 
-        // Evict non-visible chunks if pool is getting full
-        if self.chunk_pool.is_nearly_full() {
+        // Evict non-visible chunks if pool is getting full (only when not busy uploading)
+        if uploads_this_frame == 0 && self.chunk_pool.is_nearly_full() {
             let visible: Vec<_> = world.visible_meshes()
                 .map(|m| m.pos)
                 .collect();

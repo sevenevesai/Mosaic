@@ -445,7 +445,7 @@ impl VoxelGI {
 
         // Time the voxel cache fill (includes light propagation)
         let fill_start = std::time::Instant::now();
-        self.fill_voxel_cache(chunks);
+        self.fill_voxel_cache(chunks, time_of_day, snapped_center);
         let fill_time = fill_start.elapsed();
 
         // Time the GPU upload
@@ -508,12 +508,12 @@ impl VoxelGI {
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniform]));
     }
 
-    fn fill_voxel_cache(&mut self, chunks: &Arc<RwLock<AHashMap<ChunkPos, Arc<Chunk>>>>) {
+    fn fill_voxel_cache(&mut self, chunks: &Arc<RwLock<AHashMap<ChunkPos, Arc<Chunk>>>>, time_of_day: f32, center: Vec3) {
         let half_size = (VOXEL_VOLUME_SIZE / 2) as f32;
         let volume_min = self.volume_center - Vec3::splat(half_size);
         let volume_max = self.volume_center + Vec3::splat(half_size);
 
-        // Time: Clear cache
+        // Clear cache using optimized memset (faster than writing all voxels including air)
         let clear_start = std::time::Instant::now();
         self.voxel_cache.fill(0);
         let clear_time = clear_start.elapsed();
@@ -541,8 +541,7 @@ impl VoxelGI {
         };
         let num_chunks = overlapping_chunks.len();
 
-        // Step 2: Process chunks in PARALLEL
-        // Use AtomicPtr wrapper for safe parallel writes to non-overlapping indices
+        // Step 2: Process chunks in PARALLEL - only write solid blocks (air already zeroed)
         use std::sync::atomic::{AtomicU8, Ordering};
 
         // Reinterpret cache as atomic bytes for safe parallel writes
@@ -554,7 +553,7 @@ impl VoxelGI {
             )
         };
 
-        // Collect only light sources (small data, needs synchronization anyway)
+        // Process only solid/emissive blocks and collect light sources
         let light_sources: Vec<(i32, i32, i32, u8)> = overlapping_chunks
             .par_iter()
             .flat_map(|(chunk_pos, chunk)| {
@@ -565,7 +564,7 @@ impl VoxelGI {
                         for lx in 0..16 {
                             let block = chunk.get_block(lx, ly, lz);
 
-                            // Skip air blocks (most common case)
+                            // Skip air blocks (most common case - already zeroed by clear)
                             if !block.is_solid() && block.light_emission() == 0 {
                                 continue;
                             }
@@ -594,7 +593,7 @@ impl VoxelGI {
                                       + vy as u32 * VOXEL_VOLUME_SIZE
                                       + vx as u32) * 4) as usize;
 
-                            // Write using atomic store (Relaxed is fine - no ordering needed)
+                            // Write only solid/emissive voxels (air already zeroed)
                             if idx + 3 < atomic_cache.len() {
                                 atomic_cache[idx].store(voxel.opacity, Ordering::Relaxed);
                                 atomic_cache[idx + 1].store(voxel.emissive, Ordering::Relaxed);
@@ -621,14 +620,30 @@ impl VoxelGI {
         self.propagate_light(&light_sources);
         let prop_time = prop_start.elapsed();
 
-        // Detailed timing breakdown (info level so it shows)
+        // Determine time of day phase for context
+        let time_phase = if time_of_day < 0.2 { "night" }
+            else if time_of_day < 0.3 { "dawn" }
+            else if time_of_day < 0.7 { "day" }
+            else if time_of_day < 0.8 { "dusk" }
+            else { "night" };
+
+        // Determine environment type based on Y position
+        let env_type = if center.y < 20.0 { "deep-cave" }
+            else if center.y < 45.0 { "cave/underground" }
+            else if center.y < 65.0 { "surface" }
+            else { "sky/mountain" };
+
+        // Detailed timing breakdown with context
         tracing::info!(
-            "Fill breakdown: clear={:.1}ms, chunks={:.1}ms, propagate={:.1}ms ({} lights, {} chunks)",
+            "Voxel fill: clear={:.1}ms chunks={:.1}ms prop={:.1}ms | {} lights, {} chunks | pos=({:.0},{:.0},{:.0}) {} {}",
             clear_time.as_secs_f64() * 1000.0,
             chunk_time.as_secs_f64() * 1000.0,
             prop_time.as_secs_f64() * 1000.0,
             light_sources.len(),
-            num_chunks
+            num_chunks,
+            center.x, center.y, center.z,
+            env_type,
+            time_phase
         );
     }
 

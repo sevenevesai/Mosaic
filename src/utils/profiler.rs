@@ -11,7 +11,9 @@ pub struct FrameProfiler {
     sections: HashMap<String, SectionTimer>,
     frame_times: RingBuffer<Duration>,
     display_enabled: bool,
+    verbose_enabled: bool,
     last_report: Instant,
+    last_verbose_report: Instant,
     render_stats: RenderStats,
 }
 
@@ -19,6 +21,8 @@ struct SectionTimer {
     start: Option<Instant>,
     accumulated: Duration,
     samples: RingBuffer<Duration>,
+    min_ms: f64,
+    max_ms: f64,
 }
 
 impl SectionTimer {
@@ -27,7 +31,22 @@ impl SectionTimer {
             start: None,
             accumulated: Duration::ZERO,
             samples: RingBuffer::new(120),
+            min_ms: f64::MAX,
+            max_ms: 0.0,
         }
+    }
+
+    fn update_min_max(&mut self) {
+        let ms = self.accumulated.as_secs_f64() * 1000.0;
+        if ms > 0.0 {
+            self.min_ms = self.min_ms.min(ms);
+            self.max_ms = self.max_ms.max(ms);
+        }
+    }
+
+    fn reset_min_max(&mut self) {
+        self.min_ms = f64::MAX;
+        self.max_ms = 0.0;
     }
 }
 
@@ -77,7 +96,9 @@ impl FrameProfiler {
             sections: HashMap::new(),
             frame_times: RingBuffer::new(120),
             display_enabled: false,
+            verbose_enabled: false,
             last_report: Instant::now(),
+            last_verbose_report: Instant::now(),
             render_stats: RenderStats::default(),
         }
     }
@@ -100,6 +121,24 @@ impl FrameProfiler {
         }
     }
 
+    pub fn toggle_verbose(&mut self) {
+        self.verbose_enabled = !self.verbose_enabled;
+        if self.verbose_enabled {
+            tracing::info!("=== VERBOSE PROFILING ENABLED ===");
+            tracing::info!("Detailed timing breakdown every 2 seconds");
+            // Reset min/max when enabling
+            for section in self.sections.values_mut() {
+                section.reset_min_max();
+            }
+        } else {
+            tracing::info!("Verbose profiling disabled");
+        }
+    }
+
+    pub fn is_verbose_enabled(&self) -> bool {
+        self.verbose_enabled
+    }
+
     pub fn begin_frame(&mut self) {
         self.frame_start = Instant::now();
         // Reset section accumulators
@@ -112,8 +151,9 @@ impl FrameProfiler {
         let frame_time = self.frame_start.elapsed();
         self.frame_times.push(frame_time);
 
-        // Record section samples
+        // Record section samples and update min/max
         for section in self.sections.values_mut() {
+            section.update_min_max();
             section.samples.push(section.accumulated);
         }
 
@@ -121,6 +161,16 @@ impl FrameProfiler {
         if self.display_enabled && self.last_report.elapsed() > Duration::from_secs(1) {
             self.log_stats();
             self.last_report = Instant::now();
+        }
+
+        // Verbose logging with min/max breakdown
+        if self.verbose_enabled && self.last_verbose_report.elapsed() > Duration::from_secs(2) {
+            self.log_verbose_stats();
+            self.last_verbose_report = Instant::now();
+            // Reset min/max after reporting
+            for section in self.sections.values_mut() {
+                section.reset_min_max();
+            }
         }
     }
 
@@ -169,6 +219,55 @@ impl FrameProfiler {
                 avg.as_secs_f64() * 1000.0
             );
         }
+    }
+
+    fn log_verbose_stats(&self) {
+        let avg_frame = self.frame_times.average();
+        let fps = if avg_frame.as_secs_f64() > 0.0 {
+            1.0 / avg_frame.as_secs_f64()
+        } else {
+            0.0
+        };
+
+        tracing::info!("╔════════════════════════════════════════════════════════════╗");
+        tracing::info!("║ PERFORMANCE BREAKDOWN (last 2 seconds)                     ║");
+        tracing::info!("╠════════════════════════════════════════════════════════════╣");
+        tracing::info!(
+            "║ FPS: {:.1} | Frame: {:.2}ms avg | GPU: {:.2}ms",
+            fps,
+            avg_frame.as_secs_f64() * 1000.0,
+            self.render_stats.gpu_time_ms
+        );
+        tracing::info!(
+            "║ Chunks: {} rendered, {} culled | Tris: {}K",
+            self.render_stats.chunks_rendered,
+            self.render_stats.chunks_culled,
+            self.render_stats.triangles / 1000
+        );
+        tracing::info!("╠════════════════════════════════════════════════════════════╣");
+        tracing::info!("║ Section              │  Avg    │  Min    │  Max    │ Spiky ║");
+        tracing::info!("╠══════════════════════╪═════════╪═════════╪═════════╪═══════╣");
+
+        // Sort sections by average time (descending) for easier reading
+        let mut sections: Vec<_> = self.sections.iter().collect();
+        sections.sort_by(|a, b| {
+            let avg_a = a.1.samples.average().as_secs_f64();
+            let avg_b = b.1.samples.average().as_secs_f64();
+            avg_b.partial_cmp(&avg_a).unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        for (name, section) in sections {
+            let avg = section.samples.average().as_secs_f64() * 1000.0;
+            let min = if section.min_ms == f64::MAX { 0.0 } else { section.min_ms };
+            let max = section.max_ms;
+            // Mark as spiky if max > 3x avg (indicates frame time variance)
+            let spiky = if avg > 0.01 && max > avg * 3.0 { "!!" } else { "  " };
+            tracing::info!(
+                "║ {:20} │ {:6.2}ms │ {:6.2}ms │ {:6.2}ms │   {}  ║",
+                name, avg, min, max, spiky
+            );
+        }
+        tracing::info!("╚════════════════════════════════════════════════════════════╝");
     }
 
     pub fn fps(&self) -> f64 {

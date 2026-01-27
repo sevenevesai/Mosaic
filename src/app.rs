@@ -152,6 +152,9 @@ impl App {
                                 tracing::info!("Day/night cycle speed: {}x", speed);
                             }
                         }
+                        KeyCode::KeyP if pressed => {
+                            self.profiler.toggle_verbose();
+                        }
                         _ => {
                             self.player.handle_key(key_code, pressed);
                         }
@@ -198,7 +201,8 @@ impl App {
         // Update day/night cycle
         self.renderer.update_time(dt.as_secs_f32());
 
-        // Update player
+        // Update player (physics, collision, block interactions)
+        self.profiler.begin_section("player_update");
         if self.cursor_grabbed {
             self.player.update(dt, Some(&self.world));
             // Process block break/place interactions
@@ -220,16 +224,18 @@ impl App {
                 }
             }
         }
+        self.profiler.end_section("player_update");
 
-        // Update world (chunk loading, meshing)
+        // Update world (chunk loading/generation, meshing, lighting)
         self.profiler.begin_section("world_update");
         self.world.update(&self.player.position());
         self.profiler.end_section("world_update");
 
         // Upload meshes to GPU (per-chunk buffers - for fallback)
-        // Note: Pool upload now happens during render after frustum culling
+        self.profiler.begin_section("mesh_upload");
         self.world.upload_meshes(self.renderer.device());
         self.world.upload_water_meshes(self.renderer.device());
+        self.profiler.end_section("mesh_upload");
 
         // Get target block for outline rendering
         let target_block = if self.cursor_grabbed {
