@@ -1236,10 +1236,21 @@ impl DayNightCycle {
         // Moon is opposite to sun
         let moon_direction = -sun_direction;
 
-        // Calculate sun/moon intensity based on height
-        let sun_intensity = (sun_direction.y * 2.0).clamp(0.0, 1.0);
-        // Moon is much dimmer than sun - subtle illumination
-        let moon_intensity = (moon_direction.y * 1.2).clamp(0.0, 0.25);
+        // Calculate sun/moon intensity - stay visible until actually below horizon
+        // Only fade once below the horizon line (y < 0)
+        let sun_intensity = if sun_direction.y > 0.0 {
+            // Above horizon - full intensity, slight dim very close to horizon
+            (sun_direction.y * 4.0 + 0.5).clamp(0.5, 1.0)
+        } else {
+            // Below horizon - fade out quickly
+            ((sun_direction.y + 0.15) * 4.0).clamp(0.0, 0.5)
+        };
+        // Moon - stays visible until below horizon, dimmer than sun
+        let moon_intensity = if moon_direction.y > 0.0 {
+            (moon_direction.y * 2.0 + 0.15).clamp(0.15, 0.25)
+        } else {
+            ((moon_direction.y + 0.1) * 2.0).clamp(0.0, 0.15)
+        };
 
         // Define color keyframes (warm palette)
         // Time points: midnight(0), pre-dawn(0.15), dawn(0.25), morning(0.35),

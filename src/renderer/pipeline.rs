@@ -159,56 +159,81 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let moon_intensity = sky.moon_direction.w;
     let moon_dot = dot(view_dir, moon_dir);
 
-    // Sun rendering (only when above horizon)
+    // Sun rendering - warmer at horizon, larger near sunrise/sunset
     if (sun_intensity > 0.05) {
-        // Sun disc - warm color that shifts with time
-        let sun_size = 0.9975;
+        // Calculate how close sun is to horizon (0 = horizon, 1 = high in sky)
+        let sun_height = sun_dir.y;
+        let horizon_factor = 1.0 - smoothstep(0.0, 0.35, sun_height);
+
+        // Sun appears larger near horizon (atmospheric magnification)
+        let base_sun_size = 0.9985;
+        let sun_size = base_sun_size - horizon_factor * 0.002;  // Larger disc near horizon
+
+        // Color shifts warm/orange near horizon, whiter when high
+        let sun_color_high = vec3<f32>(1.0, 0.98, 0.92);      // Bright warm white
+        let sun_color_horizon = vec3<f32>(1.0, 0.65, 0.25);   // Deep orange/amber
+        let sun_tint = mix(sun_color_high, sun_color_horizon, horizon_factor);
+
+        // Outer atmospheric bloom - wider and warmer near horizon
+        let bloom_outer = pow(max(sun_dot, 0.0), 6.0) * (0.12 + horizon_factor * 0.15) * sun_intensity;
+        sky_color += sun_tint * bloom_outer;
+
+        // Middle bloom layer
+        let bloom_mid = pow(max(sun_dot, 0.0), 24.0) * (0.20 + horizon_factor * 0.1) * sun_intensity;
+        sky_color += mix(sun_tint, vec3<f32>(1.0, 0.95, 0.85), 0.5) * bloom_mid;
+
+        // Inner bloom - tighter, brighter
+        let bloom_inner = pow(max(sun_dot, 0.0), 96.0) * 0.35 * sun_intensity;
+        sky_color += vec3<f32>(1.0, 0.97, 0.88) * bloom_inner;
+
+        // Sun disc core
         if (sun_dot > sun_size) {
-            let disc_intensity = smoothstep(sun_size, 0.999, sun_dot) * sun_intensity;
-            let sun_color = vec3<f32>(1.0, 0.95, 0.85);
-            sky_color = mix(sky_color, sun_color, disc_intensity);
+            let disc_intensity = smoothstep(sun_size, sun_size + 0.001, sun_dot) * sun_intensity;
+            let core_color = mix(vec3<f32>(1.0, 1.0, 0.95), sun_tint, horizon_factor * 0.4);
+            sky_color = mix(sky_color, core_color, disc_intensity);
+            // Overbright center
+            sky_color += vec3<f32>(0.25, 0.20, 0.10) * disc_intensity * (1.0 - horizon_factor * 0.3);
         }
 
-        // Sun glow
-        let glow_size = 0.95;
-        if (sun_dot > glow_size) {
-            let glow_strength = smoothstep(glow_size, 0.999, sun_dot) * 0.5 * sun_intensity;
-            let glow_color = vec3<f32>(1.0, 0.90, 0.70);
-            sky_color = mix(sky_color, glow_color, glow_strength);
-        }
-
-        // Outer glow
-        let outer_glow_size = 0.85;
-        if (sun_dot > outer_glow_size) {
-            let outer_strength = smoothstep(outer_glow_size, 0.98, sun_dot) * 0.2 * sun_intensity;
-            let outer_color = vec3<f32>(1.0, 0.85, 0.65);
-            sky_color = mix(sky_color, outer_color, outer_strength);
-        }
-
-        // Horizon glow near sun
-        if (view_dir.y < 0.3 && view_dir.y > -0.1) {
-            let horizon_glow = max(sun_dot, 0.0) * (1.0 - abs(view_dir.y) * 3.0) * 0.15 * sun_intensity;
-            sky_color += vec3<f32>(1.0, 0.80, 0.55) * horizon_glow;
+        // Rich horizon glow during sunrise/sunset
+        if (sun_height < 0.2 && sun_height > -0.1) {
+            let glow_strength = 1.0 - smoothstep(-0.1, 0.2, sun_height);
+            let angular_glow = pow(max(sun_dot, 0.0), 3.0);
+            let horizon_glow = angular_glow * glow_strength * 0.3 * sun_intensity;
+            // Gradient from orange to pink/magenta further from sun
+            let glow_color = mix(vec3<f32>(1.0, 0.55, 0.20), vec3<f32>(1.0, 0.70, 0.50), 1.0 - angular_glow);
+            sky_color += glow_color * horizon_glow;
         }
     }
 
-    // Moon rendering (only when above horizon) - sharp crisp moon, not sun-like
+    // Moon rendering - solid and luminous
     if (moon_intensity > 0.05) {
-        // Moon disc - crisp edge, warm pale color
-        let moon_size = 0.9985;
-        if (moon_dot > moon_size) {
-            // Sharp edge transition
-            let disc_intensity = smoothstep(moon_size, 0.9992, moon_dot);
-            let moon_color = vec3<f32>(0.95, 0.90, 0.80);  // Pale warm moon
-            sky_color = mix(sky_color, moon_color, disc_intensity);
-        }
+        // Subtle outer halo - very soft atmospheric glow
+        let moon_halo = pow(max(moon_dot, 0.0), 12.0) * 0.06;
+        sky_color += vec3<f32>(0.75, 0.78, 0.85) * moon_halo;
 
-        // Thin tight glow right around moon edge
-        let moon_glow_size = 0.995;
-        if (moon_dot > moon_glow_size && moon_dot <= moon_size) {
-            let glow_strength = smoothstep(moon_glow_size, moon_size, moon_dot) * 0.15;
-            let glow_color = vec3<f32>(0.85, 0.82, 0.75);
-            sky_color = mix(sky_color, glow_color, glow_strength);
+        // Moon disc - solid, bright, well-defined
+        let moon_size = 0.9990;
+        let moon_edge = 0.9995;
+
+        if (moon_dot > moon_size) {
+            // Sharp edge with slight softness
+            let edge_blend = smoothstep(moon_size, moon_edge, moon_dot);
+
+            // Solid moon surface - pale cream/silver
+            let moon_surface = vec3<f32>(0.92, 0.90, 0.85);
+
+            // Slight limb darkening for 3D appearance
+            let limb_factor = smoothstep(moon_size, moon_edge, moon_dot);
+            let shaded_surface = mix(moon_surface * 0.85, moon_surface, limb_factor);
+
+            // Apply moon with full opacity for solid look
+            sky_color = mix(sky_color, shaded_surface, edge_blend * moon_intensity);
+
+            // Subtle bright edge highlight
+            if (moon_dot > moon_edge - 0.0003 && moon_dot < moon_edge) {
+                sky_color += vec3<f32>(0.1, 0.1, 0.08) * moon_intensity;
+            }
         }
     }
 
