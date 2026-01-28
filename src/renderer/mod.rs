@@ -767,9 +767,9 @@ impl Renderer {
             inv_view_proj: camera.view_projection_matrix().inverse().to_cols_array_2d(),
             camera_pos: camera.position.extend(1.0).to_array(),
             sun_direction: [cycle.sun_direction.x, cycle.sun_direction.y, cycle.sun_direction.z, cycle.sun_intensity],
-            sun_color: [cycle.sun_color.x, cycle.sun_color.y, cycle.sun_color.z, 0.02], // a = density
+            sun_color: [cycle.sun_color.x, cycle.sun_color.y, cycle.sun_color.z, 0.006], // a = density (very low for thin rays)
             volume_center: [camera.position.x, camera.position.y, camera.position.z, 256.0],
-            screen_params: [self.size.width as f32, self.size.height as f32, 32.0, current_time],
+            screen_params: [self.size.width as f32, self.size.height as f32, 40.0, current_time],
         };
         self.queue
             .write_buffer(&self.volumetric_uniform_buffer, 0, bytemuck::cast_slice(&[volumetric_uniform]));

@@ -216,7 +216,7 @@ impl VolumetricLighting {
             composite_bind_group,
             width: vol_width,
             height: vol_height,
-            enabled: true,
+            enabled: false,  // Default OFF - toggle with V key
         }
     }
 
@@ -561,8 +561,8 @@ fn sample_voxel_opacity(world_pos: vec3<f32>) -> f32 {
 // Simple shadow test: march toward sun and check for occlusion
 // Returns 1.0 if in light, 0.0 if in shadow
 fn shadow_test(world_pos: vec3<f32>, sun_dir: vec3<f32>) -> f32 {
-    let max_distance = 64.0;  // Maximum shadow ray distance
-    let num_steps = 16;       // Shadow ray steps
+    let max_distance = 48.0;  // Maximum shadow ray distance
+    let num_steps = 12;       // Shadow ray steps (reduced for performance)
     let step_size = max_distance / f32(num_steps);
 
     var pos = world_pos + sun_dir * 1.0; // Start slightly offset to avoid self-shadowing
@@ -583,6 +583,32 @@ fn henyey_greenstein(cos_theta: f32, g: f32) -> f32 {
     let g2 = g * g;
     let denom = 1.0 + g2 - 2.0 * g * cos_theta;
     return (1.0 - g2) / (4.0 * 3.14159 * pow(denom, 1.5));
+}
+
+// Interleaved gradient noise - much better than Bayer for volumetrics
+// Produces less visible patterns than regular dithering
+fn interleaved_gradient_noise(pixel: vec2<f32>) -> f32 {
+    let magic = vec3<f32>(0.06711056, 0.00583715, 52.9829189);
+    return fract(magic.z * fract(dot(pixel, magic.xy)));
+}
+
+// Check if there's any occlusion above a point (for outdoor suppression)
+// Returns 0.0 = open sky, 1.0 = fully occluded
+fn sky_occlusion(world_pos: vec3<f32>) -> f32 {
+    let up = vec3<f32>(0.0, 1.0, 0.0);
+    let check_height = 32.0;
+    let num_checks = 8;
+    let step_h = check_height / f32(num_checks);
+
+    var pos = world_pos;
+    for (var i = 0; i < num_checks; i++) {
+        pos += up * step_h;
+        let opacity = sample_voxel_opacity(pos);
+        if (opacity > 0.5) {
+            return 1.0; // Found occlusion above
+        }
+    }
+    return 0.0; // Open sky
 }
 
 @fragment
@@ -617,63 +643,73 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     // Raymarch parameters
-    let num_steps = 32;
-    let step_size = min(ray_length, 128.0) / f32(num_steps);  // Cap ray length
+    let num_steps = 40;
+    let max_ray_dist = min(ray_length, 80.0);
+    let step_size = max_ray_dist / f32(num_steps);
     let density = volumetric.sun_color.a;
 
-    // Accumulate in-scattering
+    // Accumulate in-scattering with EDGE DETECTION for sharp beams
     var accumulated_light = vec3<f32>(0.0);
     var pos = camera_pos;
+    var prev_in_light = 0.0;
+    var found_shadow = false;  // Track if we've seen any shadow
 
-    // Phase function: how much light scatters toward camera
-    // g > 0 = forward scattering (light scatters in direction of travel)
-    // For god rays we want some forward scattering
+    // Phase function - very mild forward scattering
     let cos_theta = dot(ray_dir, sun_dir);
-    let phase = henyey_greenstein(cos_theta, 0.5);
+    let phase = henyey_greenstein(cos_theta, 0.2);
 
-    // Dithering offset to reduce banding (Bayer 2x2 pattern)
-    // WGSL doesn't allow dynamic array indexing, so use conditionals
-    let px = u32(in.position.x) % 2u;
-    let py = u32(in.position.y) % 2u;
-    var dither_offset = 0.0;
-    if (px == 0u && py == 0u) { dither_offset = 0.0; }
-    else if (px == 1u && py == 0u) { dither_offset = 0.5; }
-    else if (px == 0u && py == 1u) { dither_offset = 0.75; }
-    else { dither_offset = 0.25; }
-    pos += ray_dir * step_size * dither_offset;
+    // Interleaved gradient noise dithering
+    let noise = interleaved_gradient_noise(in.position.xy);
+    pos += ray_dir * step_size * noise;
 
     for (var i = 0; i < num_steps; i++) {
         pos += ray_dir * step_size;
 
         // Check if we've passed the surface
-        if (length(pos - camera_pos) > ray_length) {
+        let dist_from_cam = length(pos - camera_pos);
+        if (dist_from_cam > max_ray_dist) {
             break;
         }
 
         // Sample voxel opacity at this position
         let opacity = sample_voxel_opacity(pos);
 
-        // Only accumulate in air (not inside solid blocks)
+        // Only process in air
         if (opacity < 0.3) {
             // Check if this point can see the sun
             let in_light = shadow_test(pos, sun_dir);
 
-            if (in_light > 0.5) {
-                // This point is lit by the sun - accumulate scattering
-                let contribution = phase * density * step_size;
+            // Track if we've encountered shadow
+            if (in_light < 0.5) {
+                found_shadow = true;
+            }
+
+            // === BEAM EDGE DETECTION ===
+            // Only show strong scattering near shadow/light transitions
+            // This creates DEFINED beam edges instead of uniform wash
+            let light_delta = abs(in_light - prev_in_light);
+            let edge_factor = light_delta * 3.0;  // Boost at transitions
+
+            // Also allow contribution if we're in light AND have seen shadow
+            // This shows the beam interior, not just edges
+            var contribution = 0.0;
+            if (in_light > 0.5 && found_shadow) {
+                // In lit region after seeing shadow = inside a beam
+                contribution = phase * density * step_size * (0.3 + edge_factor);
                 accumulated_light += volumetric.sun_color.rgb * contribution * sun_intensity;
             }
+
+            prev_in_light = in_light;
         }
     }
 
-    // DEBUG MODE: Show bright magenta where light beams are detected
-    // Uncomment this to validate raymarching logic:
-    // if (length(accumulated_light) > 0.001) {
-    //     return vec4<f32>(1.0, 0.0, 1.0, 1.0); // Bright magenta
-    // }
+    // If we never found shadow, we're in open sunlight - no beams
+    if (!found_shadow) {
+        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    }
 
-    // Clamp accumulated light to prevent over-bright
-    accumulated_light = min(accumulated_light, vec3<f32>(1.5));
+    // Very subtle clamp - keep rays thin and defined
+    accumulated_light = min(accumulated_light, vec3<f32>(0.6));
 
     return vec4<f32>(accumulated_light, 1.0);
 }
