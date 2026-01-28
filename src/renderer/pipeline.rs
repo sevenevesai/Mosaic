@@ -257,7 +257,7 @@ struct VoxelVolumeUniform {
     sun_direction: vec4<f32>,
     sun_color: vec4<f32>,
     ambient_color: vec4<f32>,
-    time_of_day: vec4<f32>,  // x = time, yzw = padding
+    time_of_day: vec4<f32>,  // x = time, y = shadow_mode (0=hard, 1=soft), z = shadow_debug, w = padding
     player_light: vec4<f32>, // xyz = position, w = intensity (0-1, where 1 = 15 emission)
 };
 
@@ -381,60 +381,127 @@ fn is_in_volume(uv: vec3<f32>) -> bool {
     return all(uv >= vec3<f32>(0.0)) && all(uv <= vec3<f32>(1.0));
 }
 
-fn ray_march_shadow(world_pos: vec3<f32>, light_dir: vec3<f32>) -> f32 {
-    let max_steps = 48;
-    let step_size = 1.0;
+// ═══════════════════════════════════════════════════════════════════════════
+// SHADOW MODE: HARD (new style - solid fill, sharp edges)
+// ═══════════════════════════════════════════════════════════════════════════
+fn ray_march_shadow_hard(world_pos: vec3<f32>, light_dir: vec3<f32>) -> f32 {
+    let max_steps = 128;  // More steps for longer shadows
 
     var accumulated_opacity = 0.0;
-    var min_distance_to_occluder = 1000.0;
-    var hit_distance = 0.0;
+    var solid_hits = 0;
 
-    // Start just slightly offset to avoid self-shadowing
-    var pos = world_pos + light_dir * 0.5;
-    var total_distance = 0.5;
+    var pos = world_pos;
+    var total_distance = 0.0;
 
     for (var i = 0; i < max_steps; i++) {
-        pos += light_dir * step_size;
-        total_distance += step_size;
+        // Adaptive step size: small near (accuracy), larger far (range)
+        // First 8 steps: 0.25 (2 blocks total)
+        // Next 24 steps: 0.5 (12 blocks total = 14)
+        // Next 32 steps: 1.0 (32 blocks total = 46)
+        // Remaining 64 steps: 2.0 (128 blocks total = 174 max range)
+        var current_step: f32;
+        if (i < 8) {
+            current_step = 0.25;  // Fine detail near surface
+        } else if (i < 32) {
+            current_step = 0.5;   // Medium detail
+        } else if (i < 64) {
+            current_step = 1.0;   // Coarse
+        } else {
+            current_step = 2.0;   // Very coarse for long shadows
+        }
+
+        pos += light_dir * current_step;
+        total_distance += current_step;
 
         let uv = world_to_voxel_uv(pos);
-
-        // Fade shadow near volume edges instead of hard cutoff
         let edge_dist = min(
             min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y)),
             min(uv.z, 1.0 - uv.z)
         );
 
-        if (edge_dist < 0.0) {
-            break;  // Exited volume
-        }
+        if (edge_dist < 0.0) { break; }
 
-        // Edge fade factor (smooth transition at volume boundary)
         let edge_fade = smoothstep(0.0, 0.05, edge_dist);
-
         let voxel = textureSampleLevel(t_voxel, s_voxel, uv, 0.0);
         let opacity = voxel.r * edge_fade;
 
-        // Track closest occluder for penumbra calculation
-        if (opacity > 0.3 && min_distance_to_occluder > 999.0) {
-            min_distance_to_occluder = total_distance;
-            hit_distance = total_distance;
+        if (opacity > 0.5) {
+            solid_hits += 1;
+            accumulated_opacity += 0.4;
+        } else if (opacity > 0.1) {
+            accumulated_opacity += opacity * 0.2;
         }
 
-        // Accumulate opacity
-        accumulated_opacity += opacity * 0.15;
-
-        // Early exit if fully shadowed
-        if (accumulated_opacity >= 1.0) {
-            break;
-        }
+        if (accumulated_opacity >= 1.2) { break; }
     }
 
-    // Calculate shadow with distance-based softness (penumbra)
+    var shadow: f32;
+    if (solid_hits > 0) {
+        let shadow_strength = smoothstep(0.3, 0.7, clamp(accumulated_opacity, 0.0, 1.0));
+        shadow = mix(1.0, 0.25, shadow_strength);  // Darker shadows
+    } else if (accumulated_opacity > 0.0) {
+        shadow = 1.0 - clamp(accumulated_opacity * 0.5, 0.0, 0.5);
+    } else {
+        shadow = 1.0;
+    }
+
+    if (accumulated_opacity > 1.0) {
+        let depth_darkness = clamp((accumulated_opacity - 1.0) * 0.08, 0.0, 0.15);
+        shadow *= (1.0 - depth_darkness);
+    }
+
+    return shadow;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SHADOW MODE: SOFT (old style - gradient, painterly)
+// ═══════════════════════════════════════════════════════════════════════════
+fn ray_march_shadow_soft_core(world_pos: vec3<f32>, light_dir: vec3<f32>) -> f32 {
+    let max_steps = 96;  // More steps for longer shadows
+
+    var accumulated_opacity = 0.0;
+    var min_distance_to_occluder = 1000.0;
+
+    var pos = world_pos + light_dir * 0.5;
+    var total_distance = 0.5;
+
+    for (var i = 0; i < max_steps; i++) {
+        // Adaptive step size for longer range
+        var step_size: f32;
+        if (i < 16) {
+            step_size = 0.5;
+        } else if (i < 48) {
+            step_size = 1.0;
+        } else {
+            step_size = 2.0;
+        }
+
+        pos += light_dir * step_size;
+        total_distance += step_size;
+
+        let uv = world_to_voxel_uv(pos);
+        let edge_dist = min(
+            min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y)),
+            min(uv.z, 1.0 - uv.z)
+        );
+
+        if (edge_dist < 0.0) { break; }
+
+        let edge_fade = smoothstep(0.0, 0.05, edge_dist);
+        let voxel = textureSampleLevel(t_voxel, s_voxel, uv, 0.0);
+        let opacity = voxel.r * edge_fade;
+
+        if (opacity > 0.3 && min_distance_to_occluder > 999.0) {
+            min_distance_to_occluder = total_distance;
+        }
+
+        accumulated_opacity += opacity * 0.15;
+
+        if (accumulated_opacity >= 1.0) { break; }
+    }
+
     var shadow = 1.0 - clamp(accumulated_opacity, 0.0, 1.0);
 
-    // Soft penumbra: shadows get softer further from occluder
-    // Close occluders = sharp shadow, far occluders = soft shadow
     if (min_distance_to_occluder < 999.0) {
         let penumbra_softness = smoothstep(1.0, 12.0, min_distance_to_occluder);
         shadow = mix(shadow * 0.3, shadow, penumbra_softness * 0.5 + 0.5);
@@ -443,9 +510,8 @@ fn ray_march_shadow(world_pos: vec3<f32>, light_dir: vec3<f32>) -> f32 {
     return shadow;
 }
 
-// Soft shadow with multi-tap jittering for area light simulation
-fn ray_march_shadow_soft(world_pos: vec3<f32>, light_dir: vec3<f32>, softness: f32) -> f32 {
-    // Build perpendicular vectors to light direction for jittering
+// Multi-tap soft shadow (old style)
+fn ray_march_shadow_soft_multitap(world_pos: vec3<f32>, light_dir: vec3<f32>, softness: f32) -> f32 {
     var tangent: vec3<f32>;
     if (abs(light_dir.y) < 0.9) {
         tangent = normalize(cross(light_dir, vec3<f32>(0.0, 1.0, 0.0)));
@@ -454,7 +520,6 @@ fn ray_march_shadow_soft(world_pos: vec3<f32>, light_dir: vec3<f32>, softness: f
     }
     let bitangent = cross(light_dir, tangent);
 
-    // 4-tap Poisson disk pattern (unrolled - WGSL requires constant array indices)
     let jitter_scale = softness * 1.5;
 
     let o0 = vec2<f32>(-0.7, -0.3) * jitter_scale;
@@ -467,12 +532,25 @@ fn ray_march_shadow_soft(world_pos: vec3<f32>, light_dir: vec3<f32>, softness: f
     let d2 = normalize(light_dir + tangent * o2.x + bitangent * o2.y);
     let d3 = normalize(light_dir + tangent * o3.x + bitangent * o3.y);
 
-    let shadow_sum = ray_march_shadow(world_pos, d0)
-                   + ray_march_shadow(world_pos, d1)
-                   + ray_march_shadow(world_pos, d2)
-                   + ray_march_shadow(world_pos, d3);
+    let shadow_sum = ray_march_shadow_soft_core(world_pos, d0)
+                   + ray_march_shadow_soft_core(world_pos, d1)
+                   + ray_march_shadow_soft_core(world_pos, d2)
+                   + ray_march_shadow_soft_core(world_pos, d3);
 
-    return shadow_sum * 0.25;  // Average of 4 samples
+    return shadow_sum * 0.25;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// UNIFIED SHADOW FUNCTION - picks mode based on uniform
+// ═══════════════════════════════════════════════════════════════════════════
+fn ray_march_shadow(world_pos: vec3<f32>, light_dir: vec3<f32>, shadow_mode: f32) -> f32 {
+    if (shadow_mode > 0.5) {
+        // Soft mode (old style)
+        return ray_march_shadow_soft_multitap(world_pos, light_dir, 0.3);
+    } else {
+        // Hard mode (new style)
+        return ray_march_shadow_hard(world_pos, light_dir);
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -621,7 +699,51 @@ fn trace_sky_occlusion(world_pos: vec3<f32>) -> f32 {
 // VOXEL-BASED TORCH/EMISSIVE LIGHTING
 // ═══════════════════════════════════════════════════════════════════════════
 
-// Calculate light from player's held torch
+// Trace shadow ray from surface toward held light
+fn trace_held_light_shadow(world_pos: vec3<f32>, light_pos: vec3<f32>) -> f32 {
+    let to_light = light_pos - world_pos;
+    let dist_to_light = length(to_light);
+    let light_dir = to_light / dist_to_light;
+
+    // Start slightly off surface to avoid self-shadowing
+    var pos = world_pos + light_dir * 0.3;
+    let max_steps = 32;
+    let step_size = max(dist_to_light / f32(max_steps), 0.5);
+
+    var accumulated_opacity = 0.0;
+
+    for (var i = 0; i < max_steps; i++) {
+        pos += light_dir * step_size;
+
+        // Check if we've reached or passed the light
+        if (distance(world_pos, pos) >= dist_to_light - 0.5) {
+            break;
+        }
+
+        let uv = world_to_voxel_uv(pos);
+        if (!is_in_volume(uv)) {
+            continue;
+        }
+
+        let voxel = textureSampleLevel(t_voxel, s_voxel, uv, 0.0);
+        let opacity = voxel.r;
+
+        // Solid block blocks light
+        if (opacity > 0.5) {
+            accumulated_opacity += 0.5;
+        } else if (opacity > 0.1) {
+            accumulated_opacity += opacity * 0.3;
+        }
+
+        if (accumulated_opacity >= 1.0) {
+            return 0.0;  // Fully blocked
+        }
+    }
+
+    return 1.0 - clamp(accumulated_opacity, 0.0, 1.0);
+}
+
+// Calculate light from player's held torch (with shadow casting)
 fn calculate_held_light(world_pos: vec3<f32>) -> vec3<f32> {
     let torch_color = vec3<f32>(1.0, 0.85, 0.6);
     let player_pos = voxel_volume.player_light.xyz;
@@ -639,11 +761,15 @@ fn calculate_held_light(world_pos: vec3<f32>) -> vec3<f32> {
         return vec3<f32>(0.0);
     }
 
+    // Trace shadow from surface toward held light
+    let shadow = trace_held_light_shadow(world_pos, player_pos);
+
     // Quartic falloff: smaller bright core, dims quickly, long subtle tail to edge
     let falloff = 1.0 - (dist / max_radius);
     let light_strength = pow(falloff, 4.0) * intensity;
 
-    return torch_color * light_strength * 2.5;
+    // Apply shadow - light blocked by geometry between surface and player
+    return torch_color * light_strength * shadow * 2.5;
 }
 
 fn sample_torch_light(world_pos: vec3<f32>) -> vec3<f32> {
@@ -746,19 +872,40 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let in_volume = is_in_volume(debug_uv);
 
     // DDA Ray March Shadow (replaces shadow map)
-    let shadow = ray_march_shadow_soft(in.world_position + in.normal * 0.1, sun_dir, 0.3);
+    let ndotl = max(dot(in.normal, sun_dir), 0.0);
+    let shadow_mode = voxel_volume.time_of_day.y;   // 0 = hard, 1 = soft
+    let shadow_debug = voxel_volume.time_of_day.z;  // 0 = off, 1 = on
 
-    // DEBUG MODE: Visualize shadow values
-    // Red = outside volume, Green = in shadow, Blue = lit
-    let DEBUG_SHADOWS = false;
-    if (DEBUG_SHADOWS) {
-        if (!in_volume) {
-            return vec4<f32>(1.0, 0.0, 0.0, 1.0);  // RED = outside volume
-        } else if (shadow < 0.5) {
-            return vec4<f32>(0.0, shadow, 0.0, 1.0);  // GREEN = shadowed
-        } else {
-            return vec4<f32>(0.0, 0.0, shadow, 1.0);  // BLUE = lit
-        }
+    var shadow = 1.0;  // Default: fully lit
+    var was_traced = 0.0;  // Track if we traced or not
+
+    // Always trace shadow for all faces - shadow determines if the AREA is lit,
+    // not whether the face receives direct sun (that's what ndotl is for).
+    // Previously, side faces weren't traced in hard mode, causing them to appear
+    // lighter than shadowed top faces because they got full ambient.
+    {
+        was_traced = 1.0;
+        // Offset along normal to prevent self-shadowing
+        // Use a larger offset for grazing angles to avoid acne
+        let grazing_factor = 1.0 - max(ndotl, 0.0);
+        let normal_offset = mix(0.15, 0.5, grazing_factor);
+        let shadow_origin = in.world_position + in.normal * normal_offset;
+        shadow = ray_march_shadow(shadow_origin, sun_dir, shadow_mode);
+    }
+
+    // === SHADOW DEBUG MODE ===
+    // Press U to toggle
+    // RED channel   = ndotl (how much face sees sun: 0=away, 1=facing sun)
+    // GREEN channel = shadow value (0=full shadow, 1=fully lit)
+    // BLUE channel  = was traced (0=skipped, 1=traced)
+    //
+    // What to look for:
+    // - Bright RED tops = faces that see sun (should have shadows cast ON them)
+    // - GREEN shows shadow: dark green = shadowed, bright green = lit
+    // - BLUE shows tracing: blue = traced, no blue = skipped
+    // - A face with RED but no GREEN shadow = shadow not being cast properly
+    if (shadow_debug > 0.5) {
+        return vec4<f32>(ndotl, shadow, was_traced, 1.0);
     }
 
     // Shadow fade with sun intensity - stronger shadows during day
@@ -827,7 +974,17 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Shadow affects the whole natural light result
     // In caves (no sky access), shadow multiplier is lower
     let min_shadow_light = mix(0.07, 0.3, sky_access);  // 7% minimum in caves, 30% with sky
-    let shadow_multiplier = mix(min_shadow_light, 1.0, final_shadow);
+
+    // Shadow applies to ALL faces - if a block is in shadow, all its faces are darkened
+    var shadow_multiplier: f32;
+    if (shadow_mode > 0.5) {
+        // Soft mode: shadow applies everywhere (painterly look)
+        shadow_multiplier = mix(min_shadow_light, 1.0, final_shadow);
+    } else {
+        // Hard mode: shadow applies to ALL faces equally
+        // This prevents side faces from being lighter than shadowed top faces
+        shadow_multiplier = mix(min_shadow_light, 1.0, final_shadow);
+    }
     let natural_light = natural_light_raw * shadow_multiplier;
     let natural_lit = natural_light * face_brightness;
 
@@ -867,9 +1024,25 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let max_fog = mix(0.03, 0.15, height_influence);
         fog_factor = clamp(fog_factor, 0.0, max_fog);
 
+        // === RENDER DISTANCE FADE ===
+        // Smoothly fade chunks to sky color before they pop out at render edge
+        // Render distance: 24 chunks = 384 blocks
+        // Start fade 3 chunks early (48 blocks), full fade at edge
+        let render_dist = 384.0;  // 24 chunks * 16 blocks
+        let fade_start = render_dist - 48.0;  // Start fading 3 chunks before edge
+        let edge_fade = smoothstep(fade_start, render_dist, dist);
+
+        // Blend atmospheric fog with stronger edge fade
+        fog_factor = max(fog_factor, edge_fade);
+
         let mist_color = vec3<f32>(0.78, 0.83, 0.90);
         let haze_color = vec3<f32>(0.82, 0.85, 0.90);
         fog_color = mix(haze_color, mist_color, height_influence);
+
+        // At render edge, blend fog color towards sky for seamless horizon
+        let sky_blend = smoothstep(fade_start + 24.0, render_dist, dist);
+        let horizon_color = mix(vec3<f32>(0.7, 0.8, 0.95), vec3<f32>(0.4, 0.45, 0.6), is_night);
+        fog_color = mix(fog_color, horizon_color, sky_blend);
     }
 
     final_color = mix(final_color, fog_color, fog_factor);

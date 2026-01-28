@@ -9,7 +9,7 @@ cargo build --release
 ./target/release/neolith.exe
 ```
 
-**Controls:** WASD move, Space jump/fly-up, Shift fly-down, Ctrl sprint, F fly mode, F3 debug, T day/night speed, 1-8 blocks (1=Stone, 2=Dirt, 3=Grass, 4=StoneDirt, 5=Brick, 6=Wood, 7=Leaves, 8=Torch), LMB break, RMB place, P perf log, Esc release mouse.
+**Controls:** WASD move, Space jump/fly-up, Shift fly-down, Ctrl sprint, F fly mode, F3 debug, T day/night speed, Y shadow mode, U shadow debug, 1-8 blocks (1=Stone, 2=Dirt, 3=Grass, 4=StoneDirt, 5=Brick, 6=Wood, 7=Leaves, 8=Torch), LMB break, RMB place, P perf log, Esc release mouse.
 
 ## Commands
 
@@ -118,10 +118,18 @@ WATER_SEA_LEVEL: 32      // Y level for water generation
 ## Lighting System
 
 Voxel-based global illumination using `renderer/voxel_gi.rs`:
-- **DDA Ray Marching Shadows**: Traces rays through 256³ voxel volume
+- **DDA Ray Marching Shadows**: Traces rays through 256³ voxel volume (max ~170 blocks)
 - **Sky Occlusion**: Gradual light falloff into caves (0.08 opacity per voxel)
 - **Cave Ambient**: 10% minimum ambient, 7% minimum shadow light
 - **Voxel Cone Tracing (VCT)**: 5-cone diffuse GI from radiance volume
+
+**Shadow Modes** (Y key to toggle):
+| Mode | Style | Best For |
+|------|-------|----------|
+| **Hard** | Solid fill, sharp edges, lighter caves | Realism, accuracy |
+| **Soft** | Gradient, painterly, darker caves | Atmosphere, artistic |
+
+**Shadow Debug** (U key): Visualizes R=sun-facing, G=shadow value, B=was-traced
 
 ## Foliage System
 

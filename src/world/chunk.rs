@@ -267,6 +267,9 @@ pub enum Block {
     LeadOre = 26,       // Uncommon, lower depths
     TitaniumOre = 27,   // Very rare, very deep
     UraniumOre = 28,    // Very rare, deepest, glows!
+    // Tree log variants
+    OakLog = 29,        // Oak tree log
+    BirchLog = 30,      // Birch tree log
 }
 
 impl Block {
@@ -330,6 +333,9 @@ impl Block {
             Block::LeadOre => [27; 6],
             Block::TitaniumOre => [28; 6],
             Block::UraniumOre => [29; 6],
+            // Tree logs: top/bottom=8 (wood rings), sides=bark texture
+            Block::OakLog => [8, 8, 30, 30, 30, 30],     // Oak bark on sides
+            Block::BirchLog => [8, 8, 31, 31, 31, 31],   // Birch bark on sides
         }
     }
 
@@ -390,6 +396,8 @@ impl From<u8> for Block {
             26 => Block::LeadOre,
             27 => Block::TitaniumOre,
             28 => Block::UraniumOre,
+            29 => Block::OakLog,
+            30 => Block::BirchLog,
             _ => Block::Air,
         }
     }

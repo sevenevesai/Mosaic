@@ -112,6 +112,11 @@ pub struct Renderer {
     time_of_day: f32,      // 0.0 = midnight, 0.25 = dawn, 0.5 = noon, 0.75 = dusk
     cycle_speed: f32,      // Multiplier for cycle speed (1.0 = 10 min day, higher = faster)
 
+    // Shadow mode: 0.0 = hard shadows, 1.0 = soft shadows (old style)
+    shadow_mode: f32,
+    // Shadow debug mode: 0.0 = off, 1.0 = visualize shadow data
+    shadow_debug: f32,
+
     // Voxel-based Global Illumination system
     // Uses DDA ray marching for shadows, VCT for indirect lighting
     voxel_gi: VoxelGI,
@@ -519,6 +524,8 @@ impl Renderer {
             start_time: std::time::Instant::now(),
             time_of_day: 0.35,   // Start at mid-morning
             cycle_speed: 10.0,   // 10x speed for testing (1 min = 1 day cycle)
+            shadow_mode: 0.0,    // Start with hard shadows (0=hard, 1=soft)
+            shadow_debug: 0.0,   // Shadow debug off by default
             voxel_gi,
             bloom,
             scene_texture,
@@ -612,6 +619,29 @@ impl Renderer {
         self.cycle_speed
     }
 
+    /// Toggle shadow mode between hard (0) and soft (1)
+    /// Returns the new mode for display
+    pub fn toggle_shadow_mode(&mut self) -> f32 {
+        self.shadow_mode = if self.shadow_mode < 0.5 { 1.0 } else { 0.0 };
+        self.shadow_mode
+    }
+
+    /// Get current shadow mode (0=hard, 1=soft)
+    pub fn shadow_mode(&self) -> f32 {
+        self.shadow_mode
+    }
+
+    /// Toggle shadow debug visualization
+    pub fn toggle_shadow_debug(&mut self) -> f32 {
+        self.shadow_debug = if self.shadow_debug < 0.5 { 1.0 } else { 0.0 };
+        self.shadow_debug
+    }
+
+    /// Get current shadow debug mode
+    pub fn shadow_debug(&self) -> f32 {
+        self.shadow_debug
+    }
+
     fn create_depth_texture(
         device: &wgpu::Device,
         config: &wgpu::SurfaceConfiguration,
@@ -703,6 +733,8 @@ impl Renderer {
             cycle.sun_color,
             cycle.ambient,
             self.time_of_day,
+            self.shadow_mode,
+            self.shadow_debug,
             held_light_emission,  // Player's held torch light
         );
         let voxel_gi_elapsed = voxel_gi_start.elapsed();

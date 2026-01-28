@@ -152,6 +152,22 @@ impl App {
                                 tracing::info!("Day/night cycle speed: {}x", speed);
                             }
                         }
+                        KeyCode::KeyY if pressed => {
+                            let mode = self.renderer.toggle_shadow_mode();
+                            if mode > 0.5 {
+                                tracing::info!("Shadow mode: SOFT (old style - gradient)");
+                            } else {
+                                tracing::info!("Shadow mode: HARD (new style - solid)");
+                            }
+                        }
+                        KeyCode::KeyU if pressed => {
+                            let debug = self.renderer.toggle_shadow_debug();
+                            if debug > 0.5 {
+                                tracing::info!("Shadow DEBUG: ON (R=ndotl, G=shadow, B=traced)");
+                            } else {
+                                tracing::info!("Shadow DEBUG: OFF");
+                            }
+                        }
                         KeyCode::KeyP if pressed => {
                             self.profiler.toggle_verbose();
                         }

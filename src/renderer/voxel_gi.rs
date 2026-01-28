@@ -85,8 +85,9 @@ pub struct VoxelVolumeUniform {
     pub sun_color: [f32; 4],
     /// Ambient color
     pub ambient_color: [f32; 4],
-    /// Time of day for lighting calculations (vec4 for alignment)
-    pub time_of_day: [f32; 4],  // x = time, yzw = padding
+    /// Time of day and shadow settings (vec4 for alignment)
+    /// x = time, y = shadow_mode (0=hard, 1=soft), z = shadow_debug, w = padding
+    pub time_of_day: [f32; 4],
     /// Player held light: [x, y, z, intensity (0-15 normalized to 0-1)]
     pub player_light: [f32; 4],
 }
@@ -434,6 +435,8 @@ impl VoxelGI {
         sun_color: Vec3,
         ambient_color: Vec3,
         time_of_day: f32,
+        shadow_mode: f32,
+        shadow_debug: f32,
         held_light_emission: u8,
     ) {
         // Snap camera position to voxel grid to prevent jitter
@@ -453,7 +456,7 @@ impl VoxelGI {
 
         // If no updates needed, just update uniforms
         if !needs_full_refresh && !has_dirty_blocks {
-            self.update_uniform(queue, self.last_update_center, sun_direction, sun_color, ambient_color, time_of_day, camera_pos, held_light_emission);
+            self.update_uniform(queue, self.last_update_center, sun_direction, sun_color, ambient_color, time_of_day, shadow_mode, shadow_debug, camera_pos, held_light_emission);
             return;
         }
 
@@ -474,7 +477,7 @@ impl VoxelGI {
             }
 
             // Update uniforms with current volume center
-            self.update_uniform(queue, self.last_update_center, sun_direction, sun_color, ambient_color, time_of_day, camera_pos, held_light_emission);
+            self.update_uniform(queue, self.last_update_center, sun_direction, sun_color, ambient_color, time_of_day, shadow_mode, shadow_debug, camera_pos, held_light_emission);
             return;
         }
 
@@ -493,7 +496,7 @@ impl VoxelGI {
         self.last_update_center = snapped_center;
 
         // Update uniform buffer
-        self.update_uniform(queue, snapped_center, sun_direction, sun_color, ambient_color, time_of_day, camera_pos, held_light_emission);
+        self.update_uniform(queue, snapped_center, sun_direction, sun_color, ambient_color, time_of_day, shadow_mode, shadow_debug, camera_pos, held_light_emission);
 
         // Time the voxel cache fill
         let fill_start = std::time::Instant::now();
@@ -543,6 +546,8 @@ impl VoxelGI {
         sun_color: Vec3,
         ambient_color: Vec3,
         time_of_day: f32,
+        shadow_mode: f32,
+        shadow_debug: f32,
         player_pos: Vec3,
         held_light_emission: u8,
     ) {
@@ -554,7 +559,7 @@ impl VoxelGI {
             sun_direction: [sun_direction.x, sun_direction.y, sun_direction.z, sun_direction.y.max(0.0).min(1.0)],
             sun_color: [sun_color.x, sun_color.y, sun_color.z, 1.0],
             ambient_color: [ambient_color.x, ambient_color.y, ambient_color.z, 1.0],
-            time_of_day: [time_of_day, 0.0, 0.0, 0.0],
+            time_of_day: [time_of_day, shadow_mode, shadow_debug, 0.0],
             player_light: [player_pos.x, player_pos.y, player_pos.z, held_light_emission as f32 / 15.0],
         };
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniform]));

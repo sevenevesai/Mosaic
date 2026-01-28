@@ -24,7 +24,7 @@ const TEXTURE_FILES: &[&str] = &[
     "256_Water Shallow 01.png",     // 6: Water
     "256_Wood Planks 01.png",       // 7: Wood bark (log sides)
     "256_Wood Planks 02.png",       // 8: Wood planks (log top/bottom)
-    "256_Grass 02 Blades.png",      // 9: Leaves (blade grass texture for foliage)
+    "64_Leaves_Grass_Dense.png",    // 9: Leaves (dense grass leaves for foliage)
     "256_Stone Rubble 02.png",      // 10: StoneRubble2 (stone variant)
     "64_Ore_Iron.png",              // 11: Iron ore
     "64_Ore_Gold.png",              // 12: Gold ore
@@ -46,6 +46,9 @@ const TEXTURE_FILES: &[&str] = &[
     "64_Ore_Lead.png",              // 27: Lead ore
     "64_Ore_Titanium.png",          // 28: Titanium ore
     "64_Ore_Uranium.png",           // 29: Uranium ore (glows!)
+    // Tree bark variants (30-31)
+    "64_Bark_Oak_Dark.png",         // 30: Oak bark (dark variant)
+    "64_Bark_Birch.png",            // 31: Birch bark (white)
 ];
 
 const TEXTURE_DIR: &str = "assets/textures/256x256 Pixel Textures";

@@ -63,6 +63,18 @@ enum TreeType {
     BushyShrub,
 }
 
+impl TreeType {
+    /// Get the log block type for this tree
+    fn log_block(&self) -> Block {
+        match self {
+            TreeType::SmallOak => Block::OakLog,
+            TreeType::LargeOak => Block::OakLog,
+            TreeType::TallPine => Block::Wood,      // Keep original for pines
+            TreeType::BushyShrub => Block::BirchLog, // Birch for shrubs (variety)
+        }
+    }
+}
+
 /// Generate a chunk at the given position with the specified seed
 pub fn generate_chunk_with_seed(pos: ChunkPos, seed: u64) -> Chunk {
     let mut chunk = Chunk::new();
@@ -814,7 +826,7 @@ impl TerrainGenerator {
         let trunk_height = height - 2;
         for dy in 0..trunk_height {
             let wy = tree_base_y + dy;
-            self.try_set_block(chunk, tree_x - world_x, wy - world_y, tree_z - world_z, Block::Wood, false);
+            self.try_set_block(chunk, tree_x - world_x, wy - world_y, tree_z - world_z, Block::OakLog, false);
         }
 
         // Generate leaves (spherical canopy)
@@ -871,12 +883,12 @@ impl TerrainGenerator {
                 // 2x2 trunk at base
                 for dx in 0..=1 {
                     for dz in 0..=1 {
-                        self.try_set_block(chunk, tree_x + dx - world_x, wy - world_y, tree_z + dz - world_z, Block::Wood, false);
+                        self.try_set_block(chunk, tree_x + dx - world_x, wy - world_y, tree_z + dz - world_z, Block::OakLog, false);
                     }
                 }
             } else {
                 // 1x1 trunk higher up
-                self.try_set_block(chunk, tree_x - world_x, wy - world_y, tree_z - world_z, Block::Wood, false);
+                self.try_set_block(chunk, tree_x - world_x, wy - world_y, tree_z - world_z, Block::OakLog, false);
             }
         }
 
@@ -989,7 +1001,7 @@ impl TerrainGenerator {
         let trunk_height = height.min(2);
         for dy in 0..trunk_height {
             let wy = tree_base_y + dy;
-            self.try_set_block(chunk, tree_x - world_x, wy - world_y, tree_z - world_z, Block::Wood, false);
+            self.try_set_block(chunk, tree_x - world_x, wy - world_y, tree_z - world_z, Block::BirchLog, false);
         }
 
         // Dense bushy leaves
