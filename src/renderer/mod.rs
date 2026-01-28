@@ -9,6 +9,7 @@ mod debug_overlay;
 mod pipeline;
 mod texture;
 pub mod voxel_gi;
+mod volumetrics;
 
 pub use bloom::Bloom;
 pub use camera::{Camera, Frustum};
@@ -16,6 +17,7 @@ pub use chunk_pool::ChunkPool;
 pub use debug_overlay::{DebugOverlay, DebugMetrics};
 pub use texture::TextureAtlas;
 pub use voxel_gi::VoxelGI;
+pub use volumetrics::VolumetricLighting;
 
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
@@ -125,6 +127,10 @@ pub struct Renderer {
     bloom: Bloom,
     scene_texture: wgpu::Texture,
     scene_texture_view: wgpu::TextureView,
+
+    // Volumetric light shafts (god rays)
+    volumetrics: VolumetricLighting,
+    volumetric_uniform_buffer: wgpu::Buffer,
 }
 
 impl Renderer {
@@ -467,6 +473,27 @@ impl Renderer {
         let mut bloom = Bloom::new(&device, size.width, size.height, surface_format);
         bloom.create_extract_bind_group(&device, &scene_texture_view);
 
+        // Create volumetric light shafts system
+        let volumetrics = VolumetricLighting::new(
+            &device,
+            size.width,
+            size.height,
+            surface_format,
+            voxel_gi.bind_group_layout(),
+        );
+        let volumetric_uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Volumetric Uniform Buffer"),
+            contents: bytemuck::cast_slice(&[volumetrics::VolumetricUniform {
+                inv_view_proj: Mat4::IDENTITY.to_cols_array_2d(),
+                camera_pos: [0.0; 4],
+                sun_direction: [0.5, 0.8, 0.3, 1.0],
+                sun_color: [1.0, 0.95, 0.85, 0.015], // a = density
+                volume_center: [0.0; 4],
+                screen_params: [size.width as f32, size.height as f32, 32.0, 0.0],
+            }]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
         // Create water uniform bind group layout and buffer
         let water_bind_group_layout = create_water_bind_group_layout(&device);
         let water_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -530,6 +557,8 @@ impl Renderer {
             bloom,
             scene_texture,
             scene_texture_view,
+            volumetrics,
+            volumetric_uniform_buffer,
         }
     }
 
@@ -562,6 +591,9 @@ impl Renderer {
             // Resize bloom textures
             self.bloom.resize(&self.device, new_size.width, new_size.height);
             self.bloom.create_extract_bind_group(&self.device, &self.scene_texture_view);
+
+            // Resize volumetrics textures
+            self.volumetrics.resize(&self.device, new_size.width, new_size.height);
         }
     }
 
@@ -642,6 +674,16 @@ impl Renderer {
         self.shadow_debug
     }
 
+    /// Toggle volumetric light shafts on/off
+    pub fn toggle_volumetrics(&mut self) -> bool {
+        self.volumetrics.toggle()
+    }
+
+    /// Check if volumetrics are enabled
+    pub fn volumetrics_enabled(&self) -> bool {
+        self.volumetrics.enabled
+    }
+
     fn create_depth_texture(
         device: &wgpu::Device,
         config: &wgpu::SurfaceConfiguration,
@@ -719,6 +761,19 @@ impl Renderer {
         let sky_uniform = SkyUniform::from_camera_and_time(camera, self.time_of_day);
         self.queue
             .write_buffer(&self.sky_buffer, 0, bytemuck::cast_slice(&[sky_uniform]));
+
+        // Update volumetric uniform for light shafts
+        let volumetric_uniform = volumetrics::VolumetricUniform {
+            inv_view_proj: camera.view_projection_matrix().inverse().to_cols_array_2d(),
+            camera_pos: camera.position.extend(1.0).to_array(),
+            sun_direction: [cycle.sun_direction.x, cycle.sun_direction.y, cycle.sun_direction.z, cycle.sun_intensity],
+            sun_color: [cycle.sun_color.x, cycle.sun_color.y, cycle.sun_color.z, 0.02], // a = density
+            volume_center: [camera.position.x, camera.position.y, camera.position.z, 256.0],
+            screen_params: [self.size.width as f32, self.size.height as f32, 32.0, current_time],
+        };
+        self.queue
+            .write_buffer(&self.volumetric_uniform_buffer, 0, bytemuck::cast_slice(&[volumetric_uniform]));
+
         let uniforms_elapsed = uniforms_start.elapsed();
 
         // === VOXEL GI UPDATE ===
@@ -964,6 +1019,20 @@ impl Renderer {
             // Render debug overlay
             self.debug_overlay.render(&mut render_pass, &self.queue, debug_metrics);
         }
+
+        // === VOLUMETRIC LIGHT SHAFTS ===
+        // Render god rays using raymarching through voxel volume
+        // This runs at half resolution and composites onto the scene
+        self.volumetrics.create_bind_group(
+            &self.device,
+            &self.depth_texture,
+            &self.volumetric_uniform_buffer,
+        );
+        self.volumetrics.render(
+            &mut encoder,
+            &self.scene_texture_view,  // Composite onto scene (before bloom)
+            self.voxel_gi.bind_group(),
+        );
 
         // === BLOOM POST-PROCESSING ===
         // Apply bloom effect: extract bright pixels, blur, composite to output

@@ -1,0 +1,30 @@
+  What I DON'T want:
+  - Screen-space radial blur from sun (that's a different effect)
+  - Diffuse fog/haze everywhere
+  - Just brightening surfaces where light hits
+
+  What I DO want:
+  - Visible light beams IN THE AIR following the sun direction
+  - Sharp beam edges defined by the opening geometry
+  - Beams visible against dark cave backgrounds (contrast)
+  - Subtle, atmospheric - not blinding
+
+  My engine context:
+  - Rust + wgpu voxel engine (~13K LOC)
+  - Already have: 256³ voxel volume for GI, DDA shadow ray marching, bloom post-process
+  - Performance critical - targeting 60+ FPS
+  - See CLAUDE.md for full architecture
+
+  Before writing ANY code:
+  1. Research how modern engines implement this (UE5 volumetric fog, Unity HDRP, etc.)
+  2. Identify 2-3 viable approaches and their tradeoffs
+  3. Propose which fits best for my voxel/performance constraints
+  4. Create a detailed implementation plan
+  5. Get my approval before coding
+
+  Implementation approach:
+  - Start with an obvious debug visualization (bright colors showing where effect triggers)
+  - Confirm the DETECTION logic works before adding visual effect
+  - Then tune the visual quality incrementally
+
+  Focus on getting it RIGHT over getting it FAST. I'd rather have a well-researched solution that takes longer than rapid iteration that produces garbage.

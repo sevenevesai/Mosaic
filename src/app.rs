@@ -168,6 +168,14 @@ impl App {
                                 tracing::info!("Shadow DEBUG: OFF");
                             }
                         }
+                        KeyCode::KeyV if pressed => {
+                            let enabled = self.renderer.toggle_volumetrics();
+                            if enabled {
+                                tracing::info!("Volumetric light shafts: ON");
+                            } else {
+                                tracing::info!("Volumetric light shafts: OFF");
+                            }
+                        }
                         KeyCode::KeyP if pressed => {
                             self.profiler.toggle_verbose();
                         }

@@ -9,7 +9,7 @@ cargo build --release
 ./target/release/neolith.exe
 ```
 
-**Controls:** WASD move, Space jump/fly-up, Shift fly-down, Ctrl sprint, F fly mode, F3 debug, T day/night speed, Y shadow mode, U shadow debug, 1-8 blocks (1=Stone, 2=Dirt, 3=Grass, 4=StoneDirt, 5=Brick, 6=Wood, 7=Leaves, 8=Torch), LMB break, RMB place, P perf log, Esc release mouse.
+**Controls:** WASD move, Space jump/fly-up, Shift fly-down, Ctrl sprint, F fly mode, F3 debug, T day/night speed, Y shadow mode, U shadow debug, V volumetric light shafts, 1-8 blocks (1=Stone, 2=Dirt, 3=Grass, 4=StoneDirt, 5=Brick, 6=Wood, 7=Leaves, 8=Torch), LMB break, RMB place, P perf log, Esc release mouse.
 
 ## Commands
 
@@ -31,6 +31,7 @@ src/
 │   ├── mod.rs       # GPU state, render passes, day/night cycle
 │   ├── pipeline.rs  # WGSL shaders (chunk, water, sky, UI)
 │   ├── voxel_gi.rs  # Voxel GI: 256³ volume, DDA shadows, VCT
+│   ├── volumetrics.rs # Volumetric light shafts (god rays)
 │   └── chunk_pool.rs # MDI mega-buffers
 ├── world/
 │   ├── mod.rs       # WorldManager, 8 worker threads, chunk lifecycle
