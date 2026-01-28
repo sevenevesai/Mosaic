@@ -266,6 +266,8 @@ impl App {
         // Update world (chunk loading/generation, meshing, lighting)
         self.profiler.begin_section("world_update");
         self.world.update(&self.player.position());
+        // Run water flow simulation
+        self.world.tick_water_simulation(dt.as_secs_f32());
         self.profiler.end_section("world_update");
 
         // Upload meshes to GPU (per-chunk buffers - for fallback)

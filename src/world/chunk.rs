@@ -16,7 +16,15 @@ pub struct WaterColumn {
     /// Foam factor (0.0-1.0) - higher near block edges
     pub foam: f32,
     /// Flow direction for animation (radians, 0 = +X direction)
+    /// Computed from flow velocity components
     pub flow_angle: f32,
+    /// Flow velocity X component (blocks/sec, positive = +X direction)
+    pub flow_velocity_x: f32,
+    /// Flow velocity Z component (blocks/sec, positive = +Z direction)
+    pub flow_velocity_z: f32,
+    /// Whether this is an infinite water source (springs, sea level water)
+    /// Source water maintains its level and doesn't drain
+    pub is_source: bool,
 }
 
 impl Default for WaterColumn {
@@ -26,7 +34,37 @@ impl Default for WaterColumn {
             has_water: false,
             foam: 0.0,
             flow_angle: 0.0,
+            flow_velocity_x: 0.0,
+            flow_velocity_z: 0.0,
+            is_source: false,
         }
+    }
+}
+
+impl WaterColumn {
+    /// Calculate flow angle from velocity components
+    /// Returns angle in radians (0 = +X, PI/2 = +Z)
+    #[inline]
+    pub fn calculate_flow_angle(&self) -> f32 {
+        if self.flow_velocity_x.abs() < 0.001 && self.flow_velocity_z.abs() < 0.001 {
+            // No significant flow, return current angle for stability
+            self.flow_angle
+        } else {
+            self.flow_velocity_z.atan2(self.flow_velocity_x)
+        }
+    }
+
+    /// Get flow speed (magnitude of velocity)
+    #[inline]
+    pub fn flow_speed(&self) -> f32 {
+        (self.flow_velocity_x * self.flow_velocity_x +
+         self.flow_velocity_z * self.flow_velocity_z).sqrt()
+    }
+
+    /// Update flow angle from current velocity components
+    #[inline]
+    pub fn update_flow_angle(&mut self) {
+        self.flow_angle = self.calculate_flow_angle();
     }
 }
 
@@ -71,6 +109,31 @@ impl ChunkWaterData {
         col.surface_y = surface_y;
         col.has_water = true;
         col.foam = foam;
+        self.has_any_water = true;
+        self.min_water_y = self.min_water_y.min(surface_y);
+        self.max_water_y = self.max_water_y.max(surface_y);
+    }
+
+    /// Set water with flow data and source flag
+    /// This is the full version that sets all water column properties
+    pub fn set_water_with_flow(
+        &mut self,
+        x: usize,
+        z: usize,
+        surface_y: f32,
+        foam: f32,
+        flow_velocity_x: f32,
+        flow_velocity_z: f32,
+        is_source: bool,
+    ) {
+        let col = &mut self.columns[z][x];
+        col.surface_y = surface_y;
+        col.has_water = true;
+        col.foam = foam;
+        col.flow_velocity_x = flow_velocity_x;
+        col.flow_velocity_z = flow_velocity_z;
+        col.is_source = is_source;
+        col.update_flow_angle();
         self.has_any_water = true;
         self.min_water_y = self.min_water_y.min(surface_y);
         self.max_water_y = self.max_water_y.max(surface_y);
@@ -574,6 +637,22 @@ impl Chunk {
         self.ensure_water_data().set_water(x, z, surface_y, foam);
     }
 
+    /// Set water surface with flow data at a column (allocates water data if needed)
+    pub fn set_water_surface_with_flow(
+        &mut self,
+        x: usize,
+        z: usize,
+        surface_y: f32,
+        foam: f32,
+        flow_velocity_x: f32,
+        flow_velocity_z: f32,
+        is_source: bool,
+    ) {
+        self.ensure_water_data().set_water_with_flow(
+            x, z, surface_y, foam, flow_velocity_x, flow_velocity_z, is_source
+        );
+    }
+
     /// Clear all water data from this chunk
     pub fn clear_water(&mut self) {
         self.water = None;
@@ -743,9 +822,11 @@ mod tests {
         assert_eq!(Block::from(2), Block::Grass);
         assert_eq!(Block::from(3), Block::Stone);
         assert_eq!(Block::from(15), Block::Torch);
+        assert_eq!(Block::from(16), Block::Sand);
+        assert_eq!(Block::from(30), Block::BirchLog);
 
         // Invalid values default to Air
-        assert_eq!(Block::from(16), Block::Air);
+        assert_eq!(Block::from(31), Block::Air);
         assert_eq!(Block::from(255), Block::Air);
     }
 

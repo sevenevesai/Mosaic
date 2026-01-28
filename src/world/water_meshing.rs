@@ -10,6 +10,10 @@ use std::time::Instant;
 use super::chunk::{Chunk, ChunkPos, WaterColumn};
 use crate::constants::{CHUNK_SIZE, CHUNK_SIZE_I32, BLOCK_SCALE};
 
+/// Depth of the skirt geometry below water surface at water boundaries
+/// Must be greater than maximum wave displacement to prevent gaps
+const WATER_SKIRT_DEPTH: f32 = 1.5;
+
 /// Water vertex format (24 bytes - matches ChunkVertex size)
 ///
 /// Layout:
@@ -213,7 +217,8 @@ pub fn build_water_mesh(
     // We create a (CHUNK_SIZE+1) x (CHUNK_SIZE+1) grid of vertices
     // to cover all the water surface area properly
 
-    // First, collect all water heights and build the vertex grid
+    // Collect water heights and foam at vertex grid intersections
+    // This ensures adjacent cells share the same interpolated values at corners
     let mut vertex_heights: [[Option<f32>; CHUNK_SIZE + 1]; CHUNK_SIZE + 1] = [[None; CHUNK_SIZE + 1]; CHUNK_SIZE + 1];
     let mut vertex_foam: [[f32; CHUNK_SIZE + 1]; CHUNK_SIZE + 1] = [[0.0; CHUNK_SIZE + 1]; CHUNK_SIZE + 1];
 
@@ -253,7 +258,8 @@ pub fn build_water_mesh(
         }
     };
 
-    // Sample heights at grid intersections
+    // Sample heights and foam at grid intersections
+    // By averaging at corners, adjacent cells will have identical values for shared vertices
     for z in 0..=CHUNK_SIZE {
         for x in 0..=CHUNK_SIZE {
             // Sample from the four adjacent columns (may cross chunk boundaries)
@@ -292,6 +298,20 @@ pub fn build_water_mesh(
                 continue;
             }
 
+            // Check if this is a boundary cell that needs neighbor data
+            // If neighbor isn't available, skip this cell to avoid seams
+            let needs_x_pos = x == CHUNK_SIZE - 1;
+            let needs_z_pos = z == CHUNK_SIZE - 1;
+
+            if needs_x_pos && neighbor_x_pos.is_none() {
+                // Skip right-edge cells when X+ neighbor isn't available
+                continue;
+            }
+            if needs_z_pos && neighbor_z_pos.is_none() {
+                // Skip bottom-edge cells when Z+ neighbor isn't available
+                continue;
+            }
+
             // Get heights for the 4 corners of this cell
             let h00 = vertex_heights[z][x];
             let h10 = vertex_heights[z][x + 1];
@@ -310,7 +330,8 @@ pub fn build_water_mesh(
             }
 
             // Use average of valid heights to fill in missing corners
-            // This creates smooth shoreline transitions
+            // This is for shoreline transitions (where water meets land),
+            // NOT chunk boundaries (which are skipped above)
             let avg_height = valid_heights.iter().sum::<f32>() / valid_heights.len() as f32;
             let h00 = h00.unwrap_or(avg_height);
             let h10 = h10.unwrap_or(avg_height);
@@ -342,8 +363,10 @@ pub fn build_water_mesh(
             let block_light: u8 = 0;
             let sky_light: u8 = 15;
 
-            // Flow angle (could be computed from nearby terrain slope)
-            let flow_angle = col.flow_angle;
+            // Use uniform flow direction for visual waves to prevent banding artifacts
+            // Varying flow angles cause interference patterns when interpolated across quads
+            // The flow simulation still runs - could be used for foam/particles later
+            let uniform_flow = 0.0f32;
 
             // Normal pointing up (waves will modify this in shader)
             let normal = [0.0, 1.0, 0.0];
@@ -355,7 +378,7 @@ pub fn build_water_mesh(
             vertices.push(WaterVertex::new(
                 [wx, h00, wz],
                 normal,
-                f00, depth, flow_angle,
+                f00, depth, uniform_flow,
                 block_light, sky_light,
             ));
 
@@ -363,7 +386,7 @@ pub fn build_water_mesh(
             vertices.push(WaterVertex::new(
                 [wx + BLOCK_SCALE, h10, wz],
                 normal,
-                f10, depth, flow_angle,
+                f10, depth, uniform_flow,
                 block_light, sky_light,
             ));
 
@@ -371,7 +394,7 @@ pub fn build_water_mesh(
             vertices.push(WaterVertex::new(
                 [wx, h01, wz + BLOCK_SCALE],
                 normal,
-                f01, depth, flow_angle,
+                f01, depth, uniform_flow,
                 block_light, sky_light,
             ));
 
@@ -379,7 +402,7 @@ pub fn build_water_mesh(
             vertices.push(WaterVertex::new(
                 [wx + BLOCK_SCALE, h11, wz + BLOCK_SCALE],
                 normal,
-                f11, depth, flow_angle,
+                f11, depth, uniform_flow,
                 block_light, sky_light,
             ));
 
@@ -393,6 +416,107 @@ pub fn build_water_mesh(
             indices.push(base_idx + 1);
             indices.push(base_idx + 2);
             indices.push(base_idx + 3);
+
+            // Add skirt geometry - vertical walls extending below the surface
+            // This hides gaps created by wave displacement
+            let skirt_bottom = water_y - WATER_SKIRT_DEPTH;
+
+            // Helper to add a skirt quad (vertical wall)
+            // Takes 2 top vertices (already in buffer) and creates 2 bottom vertices + triangles
+            let add_skirt_quad = |vertices: &mut Vec<WaterVertex>, indices: &mut Vec<u32>,
+                                  top_pos1: [f32; 3], top_pos2: [f32; 3],
+                                  normal: [f32; 3], foam: f32, depth: f32,
+                                  flow_angle: f32, block_light: u8, sky_light: u8| {
+                let skirt_idx = vertices.len() as u32;
+
+                // Bottom vertices (at skirt depth)
+                let bottom_pos1 = [top_pos1[0], skirt_bottom, top_pos1[2]];
+                let bottom_pos2 = [top_pos2[0], skirt_bottom, top_pos2[2]];
+
+                // Add 4 vertices for this skirt face (top-left, top-right, bottom-left, bottom-right)
+                vertices.push(WaterVertex::new(top_pos1, normal, foam, depth, flow_angle, block_light, sky_light));
+                vertices.push(WaterVertex::new(top_pos2, normal, foam, depth, flow_angle, block_light, sky_light));
+                vertices.push(WaterVertex::new(bottom_pos1, normal, foam * 0.3, depth + WATER_SKIRT_DEPTH, flow_angle, block_light, sky_light));
+                vertices.push(WaterVertex::new(bottom_pos2, normal, foam * 0.3, depth + WATER_SKIRT_DEPTH, flow_angle, block_light, sky_light));
+
+                // Two triangles for the quad (CCW winding)
+                indices.push(skirt_idx);      // top-left
+                indices.push(skirt_idx + 2);  // bottom-left
+                indices.push(skirt_idx + 1);  // top-right
+
+                indices.push(skirt_idx + 1);  // top-right
+                indices.push(skirt_idx + 2);  // bottom-left
+                indices.push(skirt_idx + 3);  // bottom-right
+            };
+
+            // Get top vertex positions from what we just created
+            let top_v0 = [wx, h00, wz];
+            let top_v1 = [wx + BLOCK_SCALE, h10, wz];
+            let top_v2 = [wx, h01, wz + BLOCK_SCALE];
+            let top_v3 = [wx + BLOCK_SCALE, h11, wz + BLOCK_SCALE];
+
+            // Check adjacent water for each edge
+            // -X edge (left side): vertices 0 and 2
+            let has_water_neg_x = if x > 0 {
+                water_data.get_column(x - 1, z).has_water
+            } else {
+                neighbor_x_neg.map_or(false, |n| n.get_column(CHUNK_SIZE - 1, z).has_water)
+            };
+
+            // +X edge (right side): vertices 1 and 3
+            let has_water_pos_x = if x < CHUNK_SIZE - 1 {
+                water_data.get_column(x + 1, z).has_water
+            } else {
+                neighbor_x_pos.map_or(false, |n| n.get_column(0, z).has_water)
+            };
+
+            // -Z edge (front side): vertices 0 and 1
+            let has_water_neg_z = if z > 0 {
+                water_data.get_column(x, z - 1).has_water
+            } else {
+                neighbor_z_neg.map_or(false, |n| n.get_column(x, CHUNK_SIZE - 1).has_water)
+            };
+
+            // +Z edge (back side): vertices 2 and 3
+            let has_water_pos_z = if z < CHUNK_SIZE - 1 {
+                water_data.get_column(x, z + 1).has_water
+            } else {
+                neighbor_z_pos.map_or(false, |n| n.get_column(x, 0).has_water)
+            };
+
+            // Use upward normal for skirts so they render identically to surface
+            let skirt_normal = [0.0, 1.0, 0.0];
+
+            // Only add boundary skirts (where there's no adjacent water)
+            // No internal skirts needed - keeps underwater view clean
+
+            // -X edge (vertices 0 and 2)
+            if !has_water_neg_x {
+                add_skirt_quad(&mut vertices, &mut indices,
+                    top_v2, top_v0,
+                    skirt_normal, (f01 + f00) / 2.0, depth, uniform_flow, block_light, sky_light);
+            }
+
+            // +X edge (vertices 1 and 3)
+            if !has_water_pos_x {
+                add_skirt_quad(&mut vertices, &mut indices,
+                    top_v1, top_v3,
+                    skirt_normal, (f10 + f11) / 2.0, depth, uniform_flow, block_light, sky_light);
+            }
+
+            // -Z edge (vertices 0 and 1)
+            if !has_water_neg_z {
+                add_skirt_quad(&mut vertices, &mut indices,
+                    top_v0, top_v1,
+                    skirt_normal, (f00 + f10) / 2.0, depth, uniform_flow, block_light, sky_light);
+            }
+
+            // +Z edge (vertices 2 and 3)
+            if !has_water_pos_z {
+                add_skirt_quad(&mut vertices, &mut indices,
+                    top_v3, top_v2,
+                    skirt_normal, (f11 + f01) / 2.0, depth, uniform_flow, block_light, sky_light);
+            }
         }
     }
 

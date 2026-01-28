@@ -92,4 +92,41 @@ pub mod constants {
 
     /// Fresnel power for reflection blend
     pub const WATER_FRESNEL_POWER: f32 = 4.0;
+
+    // ============ WATER FLOW SIMULATION CONSTANTS ============
+
+    /// Water flow simulation tick rate (ticks per second)
+    /// 20 Hz provides smooth flow without excessive CPU usage
+    pub const WATER_FLOW_TICK_RATE: f32 = 1.0 / 20.0;
+
+    /// Gravity constant for water pressure calculation (blocks/s^2)
+    pub const WATER_FLOW_GRAVITY: f32 = 9.8;
+
+    /// Cross-sectional area of virtual pipes between cells
+    pub const WATER_FLOW_PIPE_AREA: f32 = 1.0;
+
+    /// Length between adjacent cell centers (blocks)
+    pub const WATER_FLOW_PIPE_LENGTH: f32 = 1.0;
+
+    /// Velocity damping factor per tick (0.0-1.0)
+    /// Higher values = slower energy loss = longer flowing water
+    pub const WATER_FLOW_DAMPING: f32 = 0.985;
+
+    /// Minimum flow velocity before considered stationary (blocks/s)
+    pub const WATER_FLOW_MIN_VELOCITY: f32 = 0.001;
+
+    /// Minimum height difference to trigger flow (blocks)
+    pub const WATER_FLOW_MIN_HEIGHT_DIFF: f32 = 0.001;
+
+    /// Maximum number of active water cells to simulate per tick
+    pub const WATER_FLOW_MAX_ACTIVE_CELLS: usize = 50000;
+
+    /// Radius around block changes to activate water simulation (blocks)
+    pub const WATER_FLOW_ACTIVATION_RADIUS: i32 = 4;
+
+    /// Number of simulation ticks before a stable cell becomes inactive
+    pub const WATER_FLOW_STABILITY_TICKS: u32 = 10;
+
+    /// Initial flow scale when generating water from terrain gradient
+    pub const WATER_FLOW_INITIAL_SCALE: f32 = 0.5;
 }

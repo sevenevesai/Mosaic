@@ -1352,6 +1352,7 @@ struct VertexOutput {
     @location(4) block_light: f32,
     @location(5) sky_light: f32,
     @location(6) view_dir: vec3<f32>,
+    @location(7) flow_angle: f32,  // Flow direction in radians (0 = +X)
 };
 
 // Gerstner wave function for realistic water motion
@@ -1369,11 +1370,24 @@ fn gerstner_wave(pos: vec2<f32>, time: f32, dir: vec2<f32>, wavelength: f32, ste
     );
 }
 
-// Unified wave calculation - all waves flow in similar direction with variation
-// This prevents the grid/X-pattern from opposing wave directions
-fn calculate_waves(pos: vec2<f32>, time: f32) -> vec3<f32> {
-    // Primary wave direction (roughly toward +X with slight angle)
-    let primary_dir = vec2<f32>(0.9, 0.4);
+// Rotate a 2D vector by an angle (in radians)
+fn rotate_2d(v: vec2<f32>, angle: f32) -> vec2<f32> {
+    let c = cos(angle);
+    let s = sin(angle);
+    return vec2<f32>(
+        v.x * c - v.y * s,
+        v.x * s + v.y * c
+    );
+}
+
+// Unified wave calculation - all waves flow in direction based on flow_angle
+// flow_angle: direction of water flow in radians (0 = +X, PI/2 = +Z)
+fn calculate_waves(pos: vec2<f32>, time: f32, flow_angle: f32) -> vec3<f32> {
+    // Base direction from flow simulation
+    let flow_dir = vec2<f32>(cos(flow_angle), sin(flow_angle));
+
+    // Primary wave follows flow direction
+    let primary_dir = flow_dir;
 
     // All waves flow in similar directions - subtle angular variation only
     var total = vec3<f32>(0.0);
@@ -1381,20 +1395,50 @@ fn calculate_waves(pos: vec2<f32>, time: f32) -> vec3<f32> {
     // Primary wave - longest, visible but controlled height
     total += gerstner_wave(pos, time, primary_dir, 14.0, 0.22);
 
-    // Secondary wave - adds natural variation
-    let secondary_dir = vec2<f32>(0.85, 0.55);  // ~15 degrees off primary
+    // Secondary wave - adds natural variation (~30 degrees offset)
+    let secondary_dir = rotate_2d(flow_dir, 0.52);  // ~30 degrees
     total += gerstner_wave(pos, time * 0.9, secondary_dir, 9.0, 0.15);
 
-    // Tertiary wave - smaller ripples for detail
-    let tertiary_dir = vec2<f32>(0.95, 0.25);   // ~10 degrees other way
+    // Tertiary wave - smaller ripples for detail (~-15 degrees offset)
+    let tertiary_dir = rotate_2d(flow_dir, -0.26);   // ~-15 degrees
     total += gerstner_wave(pos, time * 1.15, tertiary_dir, 6.0, 0.10);
 
     return total;
 }
 
+// Legacy version for code that doesn't have flow_angle yet
+fn calculate_waves_default(pos: vec2<f32>, time: f32) -> vec3<f32> {
+    return calculate_waves(pos, time, 0.0);  // Default to +X direction
+}
+
 // Calculate combined wave height at a position (for foam calculation)
-fn gerstner_wave_height(pos: vec2<f32>, time: f32) -> f32 {
-    return calculate_waves(pos, time).y;
+fn gerstner_wave_height(pos: vec2<f32>, time: f32, flow_angle: f32) -> f32 {
+    return calculate_waves(pos, time, flow_angle).y;
+}
+
+// Smooth noise for subtle water surface variation
+fn water_noise(p: vec2<f32>) -> f32 {
+    return fract(sin(dot(p, vec2<f32>(12.9898, 78.233))) * 43758.5453);
+}
+
+// Multi-octave smooth ripple noise for realistic water surface
+fn ripple_height(pos: vec2<f32>, time: f32) -> f32 {
+    var height = 0.0;
+
+    // Large gentle swells
+    let p1 = pos * 0.04 + vec2<f32>(time * 0.02, time * 0.015);
+    height += sin(p1.x * 2.0 + p1.y * 1.5) * 0.4;
+    height += sin(p1.x * 1.2 - p1.y * 2.1) * 0.3;
+
+    // Medium ripples
+    let p2 = pos * 0.12 + vec2<f32>(-time * 0.03, time * 0.025);
+    height += sin(p2.x * 3.0 + p2.y * 2.5) * 0.2;
+
+    // Small detail ripples
+    let p3 = pos * 0.25 + vec2<f32>(time * 0.04, -time * 0.03);
+    height += sin(p3.x * 4.0 + p3.y * 3.5) * 0.1;
+
+    return height;
 }
 
 @vertex
@@ -1405,35 +1449,39 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     let world_xz = pos.xz;
     let t = camera.anim_data.x * water.wave_speed;
 
-    // Apply unified wave system - all waves flow together
-    let wave_offset = calculate_waves(world_xz, t);
+    // Unpack foam factor, depth, and flow_angle from uv_data
+    let uv_bytes = unpack4x8unorm(in.uv_data);
+    out.foam_factor = uv_bytes.x;
+    out.water_depth = uv_bytes.y * 255.0;
 
-    // Scale wave displacement
-    pos.y += wave_offset.y * water.wave_strength;
-    pos.x += wave_offset.x * water.wave_strength * 0.15;
-    pos.z += wave_offset.z * water.wave_strength * 0.15;
+    // Unpack flow angle (kept for compatibility but using subtle ripples now)
+    let flow_lo = u32(uv_bytes.z * 255.0);
+    let flow_hi = u32(uv_bytes.w * 255.0);
+    let flow_u16 = flow_lo | (flow_hi << 8u);
+    let flow_angle = f32(flow_u16) / 65535.0 * 6.28318;
+    out.flow_angle = flow_angle;
 
-    // Calculate smooth normal from wave derivatives
-    let epsilon = 0.5;  // Larger epsilon for smoother normals
-    let wave_at_x_plus = calculate_waves(world_xz + vec2(epsilon, 0.0), t);
-    let wave_at_x_minus = calculate_waves(world_xz - vec2(epsilon, 0.0), t);
-    let wave_at_z_plus = calculate_waves(world_xz + vec2(0.0, epsilon), t);
-    let wave_at_z_minus = calculate_waves(world_xz - vec2(0.0, epsilon), t);
+    // Subtle height displacement - very gentle surface movement
+    let ripple = ripple_height(world_xz, t);
+    pos.y += ripple * water.wave_strength * 0.3;
 
-    // Central difference for smoother derivatives
-    let dx = (wave_at_x_plus.y - wave_at_x_minus.y) / (2.0 * epsilon);
-    let dz = (wave_at_z_plus.y - wave_at_z_minus.y) / (2.0 * epsilon);
+    // Calculate normal from ripple derivatives for realistic reflections
+    let epsilon = 0.5;
+    let h_px = ripple_height(world_xz + vec2<f32>(epsilon, 0.0), t);
+    let h_nx = ripple_height(world_xz - vec2<f32>(epsilon, 0.0), t);
+    let h_pz = ripple_height(world_xz + vec2<f32>(0.0, epsilon), t);
+    let h_nz = ripple_height(world_xz - vec2<f32>(0.0, epsilon), t);
 
-    var wave_normal = normalize(vec3<f32>(-dx * water.wave_strength, 1.0, -dz * water.wave_strength));
+    let dx = (h_px - h_nx) / (2.0 * epsilon);
+    let dz = (h_pz - h_nz) / (2.0 * epsilon);
+
+    // Subtle normal perturbation for gentle rippling reflections
+    let normal_strength = water.wave_strength * 0.5;
+    var ripple_normal = normalize(vec3<f32>(-dx * normal_strength, 1.0, -dz * normal_strength));
 
     out.clip_position = camera.view_proj * vec4<f32>(pos, 1.0);
     out.world_position = pos;
-    out.normal = wave_normal;
-
-    // Unpack foam factor and depth from uv_data
-    let uv_bytes = unpack4x8unorm(in.uv_data);
-    out.foam_factor = uv_bytes.x;
-    out.water_depth = uv_bytes.y * 255.0;  // Scale back to 0-255 range
+    out.normal = ripple_normal;
 
     // Unpack light data
     let light_bytes = unpack4x8unorm(in.light_data);
@@ -1474,125 +1522,108 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let time = camera.anim_data.x;
 
     // === VIEW-ANGLE DEPTH ===
-    // Looking at an angle means light travels through more water
     let view_dot = max(dot(view_dir, vec3<f32>(0.0, 1.0, 0.0)), 0.1);
-    let optical_depth = in.water_depth / view_dot;  // Effective depth based on view angle
+    let optical_depth = in.water_depth / view_dot;
 
     // === FRESNEL (Schlick approximation) ===
-    // Water has F0 of about 0.02
+    // Water F0 = 0.02, but boost for more visible reflections
     let n_dot_v = max(dot(normal, view_dir), 0.0);
     let fresnel = schlick_fresnel(n_dot_v, 0.02);
 
     // === SKY/ENVIRONMENT REFLECTION ===
     let reflect_dir = reflect(-view_dir, normal);
 
-    // Dynamic sky color based on sun position
+    // Rich sky gradient for reflections
     let sky_brightness = max(light.sun_direction.w, 0.15);
     let sky_up = mix(
-        vec3<f32>(0.15, 0.25, 0.45),   // Night sky
-        vec3<f32>(0.40, 0.65, 0.95),   // Day sky zenith
+        vec3<f32>(0.12, 0.18, 0.35),   // Night sky - deeper blue
+        vec3<f32>(0.45, 0.68, 0.98),   // Day sky zenith - vibrant blue
         sky_brightness
     );
     let sky_horizon = mix(
-        vec3<f32>(0.10, 0.15, 0.25),   // Night horizon
-        vec3<f32>(0.55, 0.70, 0.85),   // Day horizon
+        vec3<f32>(0.08, 0.12, 0.22),   // Night horizon
+        vec3<f32>(0.65, 0.78, 0.92),   // Day horizon - bright warm
         sky_brightness
     );
-    let sky_blend = pow(max(reflect_dir.y, 0.0), 0.8);
+
+    // Smooth gradient based on reflection direction
+    let sky_blend = pow(max(reflect_dir.y, 0.0), 0.6);
     var sky_reflection = mix(sky_horizon, sky_up, sky_blend);
 
-    // Sun specular - smooth blended highlights
+    // Sun specular highlight - bright and sharp
     let sun_dir = normalize(light.sun_direction.xyz);
     let sun_intensity = light.sun_direction.w;
     let sun_reflect = max(dot(reflect_dir, sun_dir), 0.0);
 
-    // Use smoothstep for softer falloff instead of harsh pow
-    let spec_tight = smoothstep(0.995, 1.0, sun_reflect) * 1.5;      // Core highlight
-    let spec_medium = smoothstep(0.95, 0.995, sun_reflect) * 0.4;    // Inner glow
-    let spec_wide = smoothstep(0.85, 0.96, sun_reflect) * 0.15;      // Outer soft glow
-    let sun_specular = (spec_tight + spec_medium + spec_wide) * sun_intensity;
-    sky_reflection += vec3<f32>(1.0, 0.97, 0.90) * sun_specular;
+    // Layered specular for realistic sun reflection
+    let spec_core = smoothstep(0.997, 1.0, sun_reflect) * 2.5;     // Bright core
+    let spec_inner = smoothstep(0.98, 0.997, sun_reflect) * 0.8;   // Inner glow
+    let spec_outer = smoothstep(0.92, 0.98, sun_reflect) * 0.25;   // Soft outer halo
+    let sun_specular = (spec_core + spec_inner + spec_outer) * sun_intensity;
+    sky_reflection += vec3<f32>(1.0, 0.98, 0.92) * sun_specular;
 
-    // === WATER COLOR WITH ABSORPTION ===
-    // Real water absorbs red first, then green - deeper = more blue
-    let absorption_depth = clamp(optical_depth / 12.0, 0.0, 1.0);
+    // === WATER COLOR WITH DEPTH ===
+    let absorption_depth = clamp(optical_depth / 10.0, 0.0, 1.0);
 
-    // Natural water colors - shallow is nearly invisible, color builds with depth
-    // Real water: shallow = clear, deep = blue from light absorption
-    let surface_color = vec3<f32>(0.08, 0.12, 0.14);   // Very dark, nearly invisible
-    let mid_color = vec3<f32>(0.12, 0.20, 0.28);       // Subtle blue tint emerging
-    let deep_color = vec3<f32>(0.06, 0.12, 0.22);      // Deep water blue-gray
+    // Clean water colors - emphasize clarity
+    let surface_color = vec3<f32>(0.06, 0.10, 0.12);   // Nearly clear
+    let mid_color = vec3<f32>(0.10, 0.18, 0.26);       // Subtle teal
+    let deep_color = vec3<f32>(0.05, 0.10, 0.18);      // Deep blue-gray
 
-    // Smooth depth gradient using smoothstep for soft transitions
-    let shallow_blend = smoothstep(0.0, 0.5, absorption_depth);
-    let deep_blend = smoothstep(0.3, 1.0, absorption_depth);
+    let shallow_blend = smoothstep(0.0, 0.4, absorption_depth);
+    let deep_blend = smoothstep(0.25, 1.0, absorption_depth);
     var water_color = mix(surface_color, mid_color, shallow_blend);
     water_color = mix(water_color, deep_color, deep_blend);
 
     // === SUBSURFACE SCATTERING ===
-    // Light penetrating through water creates subtle glow
     let sun_through = max(dot(-view_dir, sun_dir), 0.0);
-    let scatter_amount = pow(sun_through, 4.0) * (1.0 - absorption_depth) * 0.25;
-    let scatter_color = vec3<f32>(0.25, 0.35, 0.32);  // Subtle warm-gray with hint of green
+    let scatter_amount = pow(sun_through, 3.0) * (1.0 - absorption_depth) * 0.2;
+    let scatter_color = vec3<f32>(0.20, 0.30, 0.28);
     water_color += scatter_color * scatter_amount * sun_intensity;
 
-    // === CAUSTICS SHIMMER ===
-    // Subtle animated light patterns on the water surface
-    let caustic = caustic_noise(in.world_position.xz, time);
-    let caustic_strength = (1.0 - absorption_depth) * sun_intensity * 0.08;
-    water_color += vec3<f32>(0.20, 0.22, 0.20) * caustic * caustic_strength;
-
     // === COMBINE REFLECTION AND WATER COLOR ===
-    // Fresnel controls the blend - water is highly reflective at grazing angles
-    // Shallow water reflects less (you see through it), deep water reflects more
-    let depth_reflection_boost = smoothstep(0.0, 0.4, absorption_depth) * 0.25;
-    let reflection_strength = smoothstep(0.0, 1.0, fresnel) * (0.55 + depth_reflection_boost) + 0.05;
-    var final_color = mix(water_color, sky_reflection, reflection_strength);
+    // Strong Fresnel-based reflections - realistic water behavior
+    // At grazing angles, water is almost mirror-like
+    let fresnel_boost = pow(fresnel, 0.7);  // Boost Fresnel effect
+    let depth_boost = smoothstep(0.0, 0.5, absorption_depth) * 0.15;
+    let reflection_strength = fresnel_boost * 0.85 + depth_boost + 0.08;
+    var final_color = mix(water_color, sky_reflection, clamp(reflection_strength, 0.0, 0.95));
 
-    // === FOAM ===
+    // === SUBTLE FOAM (shorelines only) ===
     let base_foam = in.foam_factor;
-    let wave_foam_sample = gerstner_wave_height(in.world_position.xz, time * water.wave_speed);
-    let wave_peak_foam = smoothstep(0.15, 0.25, wave_foam_sample) * 0.08;
-    let total_foam = clamp(base_foam + wave_peak_foam, 0.0, 1.0);
-
-    if (total_foam > water.foam_threshold) {
-        let foam_intensity = (total_foam - water.foam_threshold) / (1.0 - water.foam_threshold);
-        let noise_pos = in.world_position.xz * 0.3 + vec2<f32>(time * 0.05, time * 0.04);
+    if (base_foam > water.foam_threshold) {
+        let foam_intensity = (base_foam - water.foam_threshold) / (1.0 - water.foam_threshold);
+        let noise_pos = in.world_position.xz * 0.4 + vec2<f32>(time * 0.03, time * 0.025);
         let foam_noise = fract(sin(dot(noise_pos, vec2<f32>(12.9898, 78.233))) * 43758.5453);
 
-        // Foam - mostly white with subtle warm tint
-        let foam_color = mix(vec3<f32>(0.92, 0.94, 0.92), water_color * 1.2, 0.10);
-        let foam_blend = foam_intensity * foam_intensity * (0.35 + foam_noise * 0.2);
-        final_color = mix(final_color, foam_color, foam_blend * 0.55);
+        let foam_color = vec3<f32>(0.95, 0.96, 0.94);
+        let foam_blend = foam_intensity * foam_intensity * (0.4 + foam_noise * 0.15);
+        final_color = mix(final_color, foam_color, foam_blend * 0.5);
     }
 
     // === LIGHTING ===
-    let ambient = light.ambient_color.rgb * 0.5;
-    let sun_diffuse = max(dot(normal, sun_dir), 0.0) * 0.3;
+    let ambient = light.ambient_color.rgb * 0.6;
+    let sun_diffuse = max(dot(normal, sun_dir), 0.0) * 0.25;
     let sun_contrib = light.sun_color.rgb * sun_diffuse * sun_intensity;
 
-    // Block light (torches) - warm glow in water
     let torch_color = vec3<f32>(1.0, 0.80, 0.55);
-    let block_contrib = torch_color * in.block_light * 0.7;
-
-    // Sky light contribution
-    let sky_contrib = vec3<f32>(0.5, 0.6, 0.8) * in.sky_light * 0.25;
+    let block_contrib = torch_color * in.block_light * 0.6;
+    let sky_contrib = vec3<f32>(0.5, 0.6, 0.8) * in.sky_light * 0.2;
 
     let total_light = ambient + sun_contrib + block_contrib + sky_contrib;
     final_color *= total_light;
 
     // === ATMOSPHERIC FOG ===
     let dist = length(camera.view_pos.xyz - in.world_position);
-    let fog_factor = 1.0 - exp(-dist * 0.00012);
-    // Fog color matches sky for consistency
-    let fog_color = mix(sky_horizon, sky_up, 0.3);
-    final_color = mix(final_color, fog_color, clamp(fog_factor, 0.0, 0.2));
+    let fog_factor = 1.0 - exp(-dist * 0.00010);
+    let fog_color = mix(sky_horizon, sky_up, 0.35);
+    final_color = mix(final_color, fog_color, clamp(fog_factor, 0.0, 0.15));
 
     // === TRANSPARENCY ===
-    // Shallow water is very transparent, opacity builds with depth
-    let depth_opacity = 1.0 - exp(-optical_depth * 0.05);  // Gradual opacity buildup
-    let base_alpha = mix(0.15, 0.65, depth_opacity);       // Very clear shallow, solid deep
-    let alpha = mix(base_alpha, 0.80, fresnel * 0.5);      // Fresnel adds some opacity at edges
+    // Clearer shallow water, more opaque with depth
+    let depth_opacity = 1.0 - exp(-optical_depth * 0.06);
+    let base_alpha = mix(0.20, 0.70, depth_opacity);
+    let alpha = mix(base_alpha, 0.85, fresnel * 0.4);
 
     return vec4<f32>(final_color, alpha);
 }

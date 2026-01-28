@@ -268,11 +268,13 @@ impl Player {
                 && player_min.z < block_max.z && player_max.z > block_min.z;
 
             if !intersects {
-                // Only place if target is air
-                if let Some(Block::Air) = world.get_block(x, y, z) {
-                    world.set_block(x, y, z, self.selected_block);
-                    tracing::debug!("Placed {:?} at ({}, {}, {})", self.selected_block, x, y, z);
-                    return Some((x, y, z));
+                // Place if target is air or water (can replace water with solid blocks)
+                if let Some(block) = world.get_block(x, y, z) {
+                    if block == Block::Air || block == Block::Water {
+                        world.set_block(x, y, z, self.selected_block);
+                        tracing::debug!("Placed {:?} at ({}, {}, {})", self.selected_block, x, y, z);
+                        return Some((x, y, z));
+                    }
                 }
             }
         }

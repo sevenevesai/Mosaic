@@ -8,6 +8,7 @@ pub mod lighting;
 mod meshing;
 pub mod storage;
 mod water_meshing;
+pub mod water_flow;
 
 pub use chunk::{Block, Chunk, ChunkPos, ChunkWaterData, WaterColumn};
 pub use generation::{generate_chunk, generate_chunk_with_seed};
@@ -15,6 +16,7 @@ pub use lighting::{LightEngine, apply_light_updates, world_to_chunk_local};
 pub use meshing::{ChunkMesh, ChunkVertex, GpuMesh, LodLevel, build_chunk_mesh, build_chunk_mesh_lod, MESH_STATS};
 pub use storage::{WorldStorage, SharedStorage, StorageError, create_shared_storage};
 pub use water_meshing::{WaterMesh, WaterVertex, GpuWaterMesh, build_water_mesh, chunk_has_water};
+pub use water_flow::{WaterFlowEngine, apply_water_updates};
 
 use std::sync::Arc;
 
@@ -23,7 +25,7 @@ use crossbeam_channel::{Receiver, Sender};
 use glam::Vec3;
 use parking_lot::RwLock;
 
-use crate::constants::{CHUNK_SIZE_I32, RENDER_DISTANCE};
+use crate::constants::{CHUNK_SIZE_I32, RENDER_DISTANCE, WATER_FLOW_TICK_RATE};
 
 /// Result of a raycast into the world
 #[derive(Debug, Clone, Copy)]
@@ -34,6 +36,8 @@ pub struct RaycastHit {
     pub adjacent_pos: [i32; 3],
     /// Distance from ray origin to hit
     pub distance: f32,
+    /// Whether the hit block is water (for placement logic)
+    pub hit_water: bool,
 }
 
 /// Perform a raycast through the voxel world using DDA algorithm
@@ -107,6 +111,7 @@ pub fn raycast(
                     block_pos: [block_x, block_y, block_z],
                     adjacent_pos: [prev_x, prev_y, prev_z],
                     distance,
+                    hit_water: false,
                 });
             }
         }
@@ -193,6 +198,12 @@ pub struct WorldManager {
     /// Light propagation engine
     light_engine: LightEngine,
 
+    /// Water flow simulation engine
+    water_flow_engine: water_flow::WaterFlowEngine,
+
+    /// Accumulator for water flow simulation fixed timestep
+    water_flow_accumulator: f32,
+
     /// World storage for persistence (None if not saving)
     storage: Option<storage::SharedStorage>,
 
@@ -273,6 +284,8 @@ impl WorldManager {
             _workers: workers,
             last_player_chunk: None,
             light_engine: LightEngine::new(),
+            water_flow_engine: water_flow::WaterFlowEngine::new(),
+            water_flow_accumulator: 0.0,
             storage,
             seed,
             urgent_mesh_uploads: Vec::new(),
@@ -978,6 +991,58 @@ impl WorldManager {
             // Mark as urgent so when the mesh result arrives, it gets priority upload
             self.pending_urgent.insert(pos);
         }
+    }
+
+    // ============ WATER FLOW SIMULATION ============
+
+    /// Run water flow simulation for the given delta time
+    /// Uses a fixed timestep accumulator for stable physics
+    pub fn tick_water_simulation(&mut self, dt: f32) {
+        if !self.water_flow_engine.enabled {
+            return;
+        }
+
+        self.water_flow_accumulator += dt;
+
+        // Run simulation at fixed timestep
+        while self.water_flow_accumulator >= WATER_FLOW_TICK_RATE {
+            let updates = self.water_flow_engine.simulate_tick(
+                WATER_FLOW_TICK_RATE,
+                &self.chunks,
+            );
+
+            // Apply updates to chunks
+            if !updates.is_empty() {
+                water_flow::apply_water_updates(updates, &self.chunks);
+
+                // Queue water remeshing for dirty chunks
+                for chunk_pos in self.water_flow_engine.take_dirty_chunks() {
+                    self.queue_water_meshing(chunk_pos);
+                }
+            }
+
+            self.water_flow_accumulator -= WATER_FLOW_TICK_RATE;
+        }
+    }
+
+    /// Activate water flow simulation in a region around a world position
+    pub fn activate_water_flow(&mut self, x: i32, z: i32, radius: i32) {
+        self.water_flow_engine.activate_region(x, z, radius);
+    }
+
+    /// Get number of active water cells being simulated
+    pub fn active_water_cell_count(&self) -> usize {
+        self.water_flow_engine.active_cell_count()
+    }
+
+    /// Enable or disable water flow simulation
+    pub fn set_water_flow_enabled(&mut self, enabled: bool) {
+        self.water_flow_engine.enabled = enabled;
+    }
+
+    /// Check if water flow simulation is enabled
+    pub fn water_flow_enabled(&self) -> bool {
+        self.water_flow_engine.enabled
     }
 
     /// Save all dirty chunks and world metadata (blocking)
