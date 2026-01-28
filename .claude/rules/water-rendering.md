@@ -45,28 +45,42 @@ WATER_WAVE_STRENGTH: 0.12    // Wave displacement amplitude
 WATER_FRESNEL_POWER: 4.0     // Fresnel reflection exponent
 ```
 
+## Mesh Generation
+
+**Skirt Geometry** (prevents gaps during wave animation):
+- Vertical walls extend 1.5 blocks below water surface at boundaries
+- Only added where no adjacent water exists (edges of water bodies)
+- Uses upward normals to render identically to surface
+- Constant `WATER_SKIRT_DEPTH: f32 = 1.5` in `water_meshing.rs`
+
+**Vertex Interpolation**:
+- Heights and foam averaged at grid corners for seamless adjacent cells
+- Flow angles use uniform value (0.0) to prevent interference patterns
+- Per-vertex flow angles cause visible banding - avoid!
+
 ## Shader Effects
 
-**Gerstner Waves** (4 overlapping):
-- Different directions and frequencies for natural look
-- Unified flow direction prevents grid/X-pattern artifacts
+**Smooth Ripples** (replaces Gerstner waves):
+- Multi-octave sine waves for calm surface
+- Large gentle swells + medium ripples + small detail
+- Subtle height displacement (~30% of wave_strength)
+- Normal perturbation for reflection variation
 
-**Fresnel Reflection**:
+**Fresnel Reflection** (Schlick approximation):
 ```wgsl
-let fresnel = pow(1.0 - max(dot(view_dir, normal), 0.0), FRESNEL_POWER);
-// More reflective at grazing angles
+let fresnel = schlick_fresnel(n_dot_v, 0.02);  // Water F0 = 0.02
+let reflection_strength = fresnel * 0.85 + depth_boost + 0.08;
 ```
+Strong reflections at grazing angles, transparent looking down.
 
 **Depth-Based Coloring**:
-- Shallow: turquoise
-- Medium: teal
-- Deep: dark blue
-- Uses Schlick approximation for color absorption
+- Shallow: nearly clear (0.06, 0.10, 0.12)
+- Medium: subtle teal (0.10, 0.18, 0.26)
+- Deep: blue-gray (0.05, 0.10, 0.18)
 
 **Foam**:
-- White foam at shorelines (depth < threshold)
-- Wave-responsive (more foam at wave crests)
-- Block edge detection for foam around objects
+- Shoreline foam only (base_foam from mesh)
+- No wave-peak foam (removed for calm look)
 
 ## Rendering Pipeline
 
@@ -89,9 +103,10 @@ When camera Y < water surface Y:
 | File | Purpose |
 |------|---------|
 | `world/chunk.rs` | `ChunkWaterData`, `WaterColumn` structs |
-| `world/water_meshing.rs` | Mesh generation, `WaterVertex` |
+| `world/water_meshing.rs` | Mesh generation, `WaterVertex`, skirt geometry |
+| `world/water_flow.rs` | Pipe-model flow simulation engine |
 | `world/generation.rs` | Water heightfield generation |
-| `renderer/pipeline.rs` | Water shader (301 LOC) |
+| `renderer/pipeline.rs` | Water shader (ripples, Fresnel, depth color) |
 | `renderer/mod.rs` | Water render pass, underwater detection |
 
 ## Adding Water Features
@@ -102,8 +117,9 @@ Currently water is full-height. For partial levels:
 2. Modify `water_meshing.rs` to use level for surface_y
 3. Update shader for stepped appearance
 
-**Water Flow Simulation:**
-Would require:
-1. Cellular automata in `world/` module
-2. Per-tick flow updates
-3. Flow direction passed to shader for wave alignment
+**Water Flow Simulation** (`world/water_flow.rs`):
+Pipe-model simulation exists but visual flow uses uniform direction:
+- `WaterFlowEngine` manages active cells, flux calculations
+- Per-cell flow angles cause visual artifacts when interpolated
+- Flow data could be used for: foam intensity, particle effects, gameplay
+- To enable visual flow: would need shared vertex grid or screen-space solution

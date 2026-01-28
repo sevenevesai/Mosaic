@@ -822,7 +822,7 @@ fn sample_torch_light(world_pos: vec3<f32>) -> vec3<f32> {
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Texture sampling (same as original)
-    let tiles_per_row = 6.0;
+    let tiles_per_row = 8.0;
     let tile_size = 1.0 / tiles_per_row;
     let tile_pixels = 256.0;
     let tile_base = floor(in.uv / tile_size) * tile_size;

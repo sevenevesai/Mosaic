@@ -13,7 +13,9 @@ pub struct TextureAtlas {
 }
 
 /// Maps tile indices to texture file names
-/// 0-17: Original blocks, 18-29: New ores
+/// Atlas is 8x8 = 64 tiles total
+/// 0-31: Original blocks + ores + bark
+/// 32-56: New biome blocks (Phase 3)
 const TEXTURE_FILES: &[&str] = &[
     "256_Dirt Pebbles 01.png",      // 0: Dirt
     "256_Grass 01 Simple.png",      // 1: Grass top
@@ -33,7 +35,7 @@ const TEXTURE_FILES: &[&str] = &[
     "256_Dirt Rocks 01.png",        // 15: Bedrock (dirt with rocks)
     "",                             // 16: Torch (procedural only - orange glow)
     "256_Sand 01.png",              // 17: Sand (beach/desert)
-    // New ores (18-29)
+    // Ores (18-29)
     "64_Ore_Coal.png",              // 18: Coal ore
     "64_Ore_Copper.png",            // 19: Copper ore
     "64_Ore_Emerald.png",           // 20: Emerald ore
@@ -49,6 +51,52 @@ const TEXTURE_FILES: &[&str] = &[
     // Tree bark variants (30-31)
     "64_Bark_Oak_Dark.png",         // 30: Oak bark (dark variant)
     "64_Bark_Birch.png",            // 31: Birch bark (white)
+
+    // === NEW BIOME TEXTURES (32-56) ===
+    // Using existing textures where possible, procedural fallback otherwise
+
+    // Desert/Badlands (32-33)
+    "256_Sand 02.png",              // 32: Sandstone (sand variant)
+    "256_Tile Pattern 03 Red.png",  // 33: Red sandstone (red tile pattern)
+
+    // Tundra/Snow (34-37)
+    "64_Snow_2.png",                // 34: Snow top
+    "64_Ice_Block_2.png",           // 35: Snowy stone/rocks
+    "64_Ice_Block_1.png",           // 36: Ice block
+    "64_Ice_Block_1.png",           // 37: Packed ice (same as ice for now)
+
+    // Swamp (38-39)
+    "256_Dirt Muddy 01.png",        // 38: Mud (muddy dirt)
+    "256_Dirt Cracked 01.png",      // 39: Peat (cracked dirt)
+
+    // Jungle (40-43)
+    "256_Grass 02 Blades.png",      // 40: Jungle grass top (grass blades)
+    "256_Roots 01 Mud.png",         // 41: Jungle grass side (roots)
+    "64_Leaves_Grass_Dense.png",    // 42: Jungle leaves (same as regular leaves)
+    "256_Roots 02 Mud.png",         // 43: Vines (roots texture)
+
+    // Mountain (44)
+    "256_Stone Rubble 01.png",      // 44: Gravel (stone rubble)
+
+    // Structure blocks (45-47)
+    "256_Roots 01 Mud.png",         // 45: Mossy stone (roots for moss effect)
+    "256_Dirt Cracked 02.png",      // 46: Cracked stone (cracked dirt)
+    "256_Cement 03.png",            // 47: Claystone (cement variant)
+
+    // Cave decoration (48-50)
+    "256_Stone 2.png",              // 48: Stalactite/stalagmite (stone)
+    "256_Tiles Circle 08.png",      // 49: Crystal amethyst (decorative tile)
+    "256_Cement 01.png",            // 50: Crystal quartz (white cement)
+
+    // Desert vegetation (51-53)
+    "256_Grass 02 Blades.png",      // 51: Cactus side (green grass blades)
+    "256_Mound 01.png",             // 52: Cactus top (mound)
+    "256_Dirt Cracked 01.png",      // 53: Dead bush (cracked earth)
+
+    // Additional trees (54-56)
+    "256_Dirt Rocks 02.png",        // 54: Pine bark (dark rocky)
+    "256_Roots 02 Mud.png",         // 55: Jungle bark (roots)
+    "64_Leaves_Grass_Dense.png",    // 56: Spruce leaves (same as leaves)
 ];
 
 const TEXTURE_DIR: &str = "assets/textures/256x256 Pixel Textures";
@@ -57,8 +105,8 @@ impl TextureAtlas {
     /// Load texture atlas from PNG files with full mipmap chain and anisotropic filtering
     /// This provides smooth, high-quality textures at all distances
     pub fn load(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
-        let tiles_per_row = 6u32; // 6x6 grid = 36 tiles (using 30)
-        let atlas_size = TEXTURE_TILE_SIZE * tiles_per_row; // 256 * 6 = 1536
+        let tiles_per_row = 8u32; // 8x8 grid = 64 tiles (using 57)
+        let atlas_size = TEXTURE_TILE_SIZE * tiles_per_row; // 256 * 8 = 2048
 
         // Calculate mip levels: log2(1024) = 10 levels (1024 -> 512 -> 256 -> ... -> 1)
         let mip_level_count = (atlas_size as f32).log2().floor() as u32 + 1;
@@ -297,7 +345,7 @@ impl TextureAtlas {
 
     /// Generate a procedural texture atlas for testing (fallback)
     fn generate_procedural_atlas() -> Vec<u8> {
-        let tiles_per_row = 6u32;
+        let tiles_per_row = 8u32;
         let atlas_size = (TEXTURE_TILE_SIZE * tiles_per_row) as usize;
         let mut data = vec![0u8; atlas_size * atlas_size * 4];
 

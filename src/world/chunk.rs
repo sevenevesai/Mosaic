@@ -333,15 +333,79 @@ pub enum Block {
     // Tree log variants
     OakLog = 29,        // Oak tree log
     BirchLog = 30,      // Birch tree log
+
+    // === NEW BIOME BLOCKS (Phase 3) ===
+
+    // Desert/Badlands biome
+    Sandstone = 31,     // Desert subsurface
+    RedSandstone = 32,  // Badlands formations
+
+    // Tundra/Snow biome
+    SnowGrass = 33,     // Snow-covered grass
+    Snow = 34,          // Snow layer
+    Ice = 35,           // Frozen water surface
+    PackedIce = 36,     // Deep/ancient ice
+
+    // Swamp biome
+    MudBlock = 37,      // Swamp surface
+    Peat = 38,          // Swamp subsurface
+
+    // Jungle biome
+    JungleGrass = 39,   // Dense jungle floor
+    JungleLeaves = 40,  // Dense jungle foliage
+    Vines = 41,         // Hanging vines (foliage)
+
+    // Mountain biome
+    Gravel = 42,        // Mountain scree, riverbeds
+
+    // Structure blocks (ruins, formations)
+    MossyStone = 43,    // Decayed ruin walls
+    CrackedStone = 44,  // Damaged ruins
+    ClayStone = 45,     // Hoodoo/pillar material
+
+    // Cave decoration
+    Stalactite = 46,    // Ceiling formations
+    Stalagmite = 47,    // Floor formations
+    CrystalAmethyst = 48, // Cavern crystals (purple)
+    CrystalQuartz = 49,   // Cavern crystals (white)
+
+    // Desert vegetation
+    Cactus = 50,        // Desert plant (solid, prickly)
+    DeadBush = 51,      // Desert shrub (foliage)
+
+    // Additional tree types
+    PineLog = 52,       // Pine tree log
+    JungleLog = 53,     // Jungle tree log
+    SpruceLeaves = 54,  // Spruce/pine needles
 }
 
 impl Block {
     pub fn is_solid(&self) -> bool {
-        !matches!(self, Block::Air | Block::Water | Block::Torch)
+        !matches!(
+            self,
+            Block::Air
+                | Block::Water
+                | Block::Torch
+                | Block::Vines
+                | Block::DeadBush
+                | Block::Snow
+        )
     }
 
     pub fn is_transparent(&self) -> bool {
-        matches!(self, Block::Air | Block::Water | Block::Leaves | Block::Torch)
+        matches!(
+            self,
+            Block::Air
+                | Block::Water
+                | Block::Leaves
+                | Block::JungleLeaves
+                | Block::SpruceLeaves
+                | Block::Vines
+                | Block::Torch
+                | Block::Ice
+                | Block::DeadBush
+                | Block::Snow
+        )
     }
 
     /// Returns true if this block should be rendered as crossed billboards instead of a cube
@@ -354,16 +418,27 @@ impl Block {
     /// Returns true if this block is foliage (renders all 6 faces, no neighbor culling)
     /// Foliage blocks sway in the wind and need all faces visible to avoid gaps
     pub fn is_foliage(&self) -> bool {
-        matches!(self, Block::Leaves)
+        matches!(
+            self,
+            Block::Leaves
+                | Block::JungleLeaves
+                | Block::SpruceLeaves
+                | Block::Vines
+                | Block::DeadBush
+        )
     }
 
     /// Returns true if this block is emissive (light source visible at any distance)
     /// Emissive blocks render at full brightness regardless of lighting calculations
     pub fn is_emissive(&self) -> bool {
-        matches!(self, Block::Torch | Block::UraniumOre)
+        matches!(
+            self,
+            Block::Torch | Block::UraniumOre | Block::CrystalAmethyst | Block::CrystalQuartz
+        )
     }
 
     /// Get texture indices for each face: [top, bottom, front, back, left, right]
+    /// Atlas is 8x8 (64 tiles), indices 0-63
     pub fn texture_indices(&self) -> [u32; 6] {
         match self {
             Block::Air => [0; 6],
@@ -381,9 +456,9 @@ impl Block {
             Block::DiamondOre => [13; 6],
             Block::RedstoneOre => [14; 6],
             Block::Bedrock => [15; 6],
-            Block::Torch => [16; 6],           // Torch has dedicated warm orange texture
+            Block::Torch => [16; 6],           // Torch procedural orange
             Block::Sand => [17; 6],            // Beach sand
-            // New ores (indices 18-29)
+            // Ores (18-29)
             Block::CoalOre => [18; 6],
             Block::CopperOre => [19; 6],
             Block::EmeraldOre => [20; 6],
@@ -396,9 +471,53 @@ impl Block {
             Block::LeadOre => [27; 6],
             Block::TitaniumOre => [28; 6],
             Block::UraniumOre => [29; 6],
-            // Tree logs: top/bottom=8 (wood rings), sides=bark texture
-            Block::OakLog => [8, 8, 30, 30, 30, 30],     // Oak bark on sides
-            Block::BirchLog => [8, 8, 31, 31, 31, 31],   // Birch bark on sides
+            // Tree logs (30-31, 52-53)
+            Block::OakLog => [8, 8, 30, 30, 30, 30],
+            Block::BirchLog => [8, 8, 31, 31, 31, 31],
+
+            // === NEW BIOME BLOCKS ===
+
+            // Desert/Badlands (32-33)
+            Block::Sandstone => [32; 6],       // Layered sandstone
+            Block::RedSandstone => [33; 6],    // Red/orange sandstone
+
+            // Tundra/Snow (34-37)
+            Block::SnowGrass => [34, 0, 35, 35, 35, 35], // Snow top, dirt bottom, snowy sides
+            Block::Snow => [34; 6],            // Pure snow
+            Block::Ice => [36; 6],             // Translucent ice
+            Block::PackedIce => [37; 6],       // Dense blue ice
+
+            // Swamp (38-39)
+            Block::MudBlock => [38; 6],        // Dark mud
+            Block::Peat => [39; 6],            // Brown peat
+
+            // Jungle (40-42)
+            Block::JungleGrass => [40, 0, 41, 41, 41, 41], // Lush grass top
+            Block::JungleLeaves => [42; 6],    // Dense tropical leaves
+            Block::Vines => [43; 6],           // Hanging vines
+
+            // Mountain (44)
+            Block::Gravel => [44; 6],          // Gray gravel
+
+            // Structure blocks (45-47)
+            Block::MossyStone => [45; 6],      // Mossy cobblestone
+            Block::CrackedStone => [46; 6],    // Cracked stone
+            Block::ClayStone => [47; 6],       // Tan claystone
+
+            // Cave decoration (48-51)
+            Block::Stalactite => [48; 6],      // Pointed stone
+            Block::Stalagmite => [48; 6],      // Same texture as stalactite
+            Block::CrystalAmethyst => [49; 6], // Purple crystal (emissive)
+            Block::CrystalQuartz => [50; 6],   // White crystal (emissive)
+
+            // Desert vegetation (51-52)
+            Block::Cactus => [51, 52, 51, 51, 51, 51], // Cactus top different
+            Block::DeadBush => [53; 6],        // Dead shrub
+
+            // Additional trees (54-56)
+            Block::PineLog => [8, 8, 54, 54, 54, 54],   // Pine bark
+            Block::JungleLog => [8, 8, 55, 55, 55, 55], // Jungle bark
+            Block::SpruceLeaves => [56; 6],    // Blue-green needles
         }
     }
 
@@ -408,7 +527,9 @@ impl Block {
     pub fn light_emission(&self) -> u8 {
         match self {
             Block::Torch => 14,
-            Block::UraniumOre => 8,  // Radioactive glow!
+            Block::UraniumOre => 8,       // Radioactive glow!
+            Block::CrystalAmethyst => 10, // Purple glow
+            Block::CrystalQuartz => 12,   // Bright white glow
             _ => 0,
         }
     }
@@ -416,7 +537,21 @@ impl Block {
     /// Check if this block allows light to pass through
     #[inline]
     pub fn is_light_transparent(&self) -> bool {
-        matches!(self, Block::Air | Block::Water | Block::Leaves | Block::Torch)
+        matches!(
+            self,
+            Block::Air
+                | Block::Water
+                | Block::Leaves
+                | Block::JungleLeaves
+                | Block::SpruceLeaves
+                | Block::Vines
+                | Block::Torch
+                | Block::Ice
+                | Block::DeadBush
+                | Block::Snow
+                | Block::CrystalAmethyst
+                | Block::CrystalQuartz
+        )
     }
 
     /// Get texture index for a specific face direction
@@ -461,6 +596,31 @@ impl From<u8> for Block {
             28 => Block::UraniumOre,
             29 => Block::OakLog,
             30 => Block::BirchLog,
+            // New biome blocks
+            31 => Block::Sandstone,
+            32 => Block::RedSandstone,
+            33 => Block::SnowGrass,
+            34 => Block::Snow,
+            35 => Block::Ice,
+            36 => Block::PackedIce,
+            37 => Block::MudBlock,
+            38 => Block::Peat,
+            39 => Block::JungleGrass,
+            40 => Block::JungleLeaves,
+            41 => Block::Vines,
+            42 => Block::Gravel,
+            43 => Block::MossyStone,
+            44 => Block::CrackedStone,
+            45 => Block::ClayStone,
+            46 => Block::Stalactite,
+            47 => Block::Stalagmite,
+            48 => Block::CrystalAmethyst,
+            49 => Block::CrystalQuartz,
+            50 => Block::Cactus,
+            51 => Block::DeadBush,
+            52 => Block::PineLog,
+            53 => Block::JungleLog,
+            54 => Block::SpruceLeaves,
             _ => Block::Air,
         }
     }
@@ -825,8 +985,13 @@ mod tests {
         assert_eq!(Block::from(16), Block::Sand);
         assert_eq!(Block::from(30), Block::BirchLog);
 
+        // New biome blocks
+        assert_eq!(Block::from(31), Block::Sandstone);
+        assert_eq!(Block::from(42), Block::Gravel);
+        assert_eq!(Block::from(54), Block::SpruceLeaves);
+
         // Invalid values default to Air
-        assert_eq!(Block::from(31), Block::Air);
+        assert_eq!(Block::from(55), Block::Air);
         assert_eq!(Block::from(255), Block::Air);
     }
 

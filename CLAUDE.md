@@ -36,6 +36,8 @@ src/
 ├── world/
 │   ├── mod.rs       # WorldManager, 8 worker threads, chunk lifecycle
 │   ├── meshing.rs   # Binary greedy meshing (~1,800 LOC)
+│   ├── water_meshing.rs # Water heightfield mesh with skirts
+│   ├── water_flow.rs # Pipe-model water flow simulation
 │   ├── generation.rs # Biomes, caves, terrain, trees
 │   ├── lighting.rs  # BFS flood fill propagation
 │   └── storage/     # Region files, zstd compression
@@ -131,6 +133,25 @@ Voxel-based global illumination using `renderer/voxel_gi.rs`:
 | **Soft** | Gradient, painterly, darker caves | Atmosphere, artistic |
 
 **Shadow Debug** (U key): Visualizes R=sun-facing, G=shadow value, B=was-traced
+
+## Water Rendering
+
+Heightfield-based water with realistic reflections (`world/water_meshing.rs`, `renderer/pipeline.rs`):
+- **Surface**: Smooth sine-wave ripples (not Gerstner waves) for calm, reflective look
+- **Skirt geometry**: Vertical walls at water boundaries prevent gaps during wave animation
+- **Fresnel reflections**: Strong sky reflections at grazing angles, transparent when looking down
+- **Depth coloring**: Shallow=clear, deep=blue-gray with light absorption
+- **Flow system**: `water_flow.rs` exists for simulation (uniform visual flow for seamless rendering)
+
+**Gotcha**: Per-vertex flow angles cause interference patterns - use uniform flow (0.0) for visuals.
+
+## Sun/Moon Rendering
+
+Celestial bodies with bloom effects (`renderer/pipeline.rs` SKY_SHADER, `renderer/mod.rs`):
+- **Sun**: Multi-layer bloom, warmer orange at horizon, appears larger when setting
+- **Moon**: Solid pale disc with limb darkening, subtle atmospheric halo
+- **Visibility**: Both stay visible until actually below horizon (y < 0), then fade
+- **Intensity**: Calculated in `DayNightCycle::calculate()` - sun 50-100%, moon 15-25%
 
 ## Foliage System
 

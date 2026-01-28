@@ -340,8 +340,8 @@ const fn face_index(axis: Axis, positive: bool) -> usize {
     }
 }
 
-/// Maximum number of texture indices (4x4 atlas = 16 textures)
-const MAX_TEXTURES: usize = 32; // Support up to 32 texture types
+/// Maximum number of texture indices (8x8 atlas = 64 textures)
+const MAX_TEXTURES: usize = 64; // Support up to 64 texture types
 
 /// Sample the combined light level at a block position
 /// Checks neighbor chunks if position is outside current chunk bounds
@@ -485,7 +485,7 @@ fn build_chunk_mesh_simple(
 
 #[allow(dead_code)]
 fn get_tile_uvs(tex_idx: u32) -> ([f32; 2], [f32; 2], [f32; 2], [f32; 2]) {
-    let tiles_per_row = 6u32; // 6x6 grid of 256x256 tiles
+    let tiles_per_row = 8u32; // 8x8 grid of 256x256 tiles
     let tile_size = 1.0 / tiles_per_row as f32;
     let u0 = (tex_idx % tiles_per_row) as f32 * tile_size;
     let v0 = (tex_idx / tiles_per_row) as f32 * tile_size;
@@ -688,7 +688,7 @@ fn add_foliage_blocks(
 
                 // Get texture UVs (same pattern as get_tile_uvs)
                 let tex_idx = block.texture_indices()[0];
-                let tiles_per_row = 6u32;
+                let tiles_per_row = 8u32;
                 let tile_size = 1.0 / tiles_per_row as f32;
                 let u0 = (tex_idx % tiles_per_row) as f32 * tile_size;
                 let v0 = (tex_idx / tiles_per_row) as f32 * tile_size;
@@ -824,7 +824,7 @@ fn add_emissive_blocks(
 
                 // Get texture UVs
                 let tex_idx = block.texture_indices()[0];
-                let tiles_per_row = 6u32;
+                let tiles_per_row = 8u32;
                 let tile_size = 1.0 / tiles_per_row as f32;
                 let u0 = (tex_idx % tiles_per_row) as f32 * tile_size;
                 let v0 = (tex_idx / tiles_per_row) as f32 * tile_size;
@@ -1162,7 +1162,7 @@ fn binary_greedy_mesh_axis(
 
         // Per-texture visibility masks: texture_masks[tex_idx][row] = bitmask
         let mut texture_masks = [[0u16; CHUNK_SIZE]; MAX_TEXTURES];
-        let mut textures_present: u32 = 0; // Tracks which textures have faces (up to 32)
+        let mut textures_present: u64 = 0; // Tracks which textures have faces (up to 64)
 
         for v in 0..CHUNK_SIZE {
             let mut row_bits = visible_mask[v];
@@ -2047,7 +2047,7 @@ fn emit_greedy_quad(
     let base_index = vertices.len() as u32;
 
     // Get UVs from texture atlas
-    let tiles_per_row = 6u32; // 6x6 grid of 256x256 tiles
+    let tiles_per_row = 8u32; // 8x8 grid of 256x256 tiles
     let tile_size = 1.0 / tiles_per_row as f32;
     let uv_u0 = (texture_idx % tiles_per_row) as f32 * tile_size;
     let uv_v0 = (texture_idx / tiles_per_row) as f32 * tile_size;

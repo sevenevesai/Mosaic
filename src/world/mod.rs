@@ -3,7 +3,7 @@
 //! Handles chunks, terrain generation, and mesh building.
 
 mod chunk;
-mod generation;
+pub mod generation;
 pub mod lighting;
 mod meshing;
 pub mod storage;
