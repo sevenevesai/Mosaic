@@ -697,6 +697,20 @@ impl Chunk {
         }
     }
 
+    /// Get raw blocks data as a byte slice for fast GPU upload
+    /// Since Block is #[repr(u8)], this is a zero-cost cast
+    /// Layout: x + y * 16 + z * 256 (same as index())
+    #[inline]
+    pub fn blocks_as_bytes(&self) -> &[u8] {
+        // SAFETY: Block is #[repr(u8)] so this cast is valid
+        unsafe {
+            std::slice::from_raw_parts(
+                self.blocks.as_ptr() as *const u8,
+                CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE,
+            )
+        }
+    }
+
     // ============ SOLID COUNT METHODS (for mesh optimization) ============
 
     /// Get count of solid blocks in this chunk

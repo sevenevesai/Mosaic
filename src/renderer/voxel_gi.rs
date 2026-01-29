@@ -1055,15 +1055,9 @@ impl VoxelGI {
                             chunk_index,
                         });
 
-                        // Add block data (copy raw bytes in correct order)
-                        for lz in 0..16 {
-                            for ly in 0..16 {
-                                for lx in 0..16 {
-                                    let block = chunk.get_block(lx, ly, lz);
-                                    blocks_vec.push(block as u8);
-                                }
-                            }
-                        }
+                        // Add block data - single memcpy instead of 4096 iterations
+                        // Block is #[repr(u8)] so this is a direct byte copy
+                        blocks_vec.extend_from_slice(chunk.blocks_as_bytes());
 
                         // Update lookup texture
                         let lx = (cx - min_chunk.x) as usize;
