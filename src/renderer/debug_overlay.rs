@@ -561,87 +561,130 @@ Mesh: {:>6.0}us/chunk ({} chunks, {:.1}ms total, {}K quads)\n",
         );
     }
 
-    /// Render the debug overlay
+    /// Render the debug overlay and optionally the settings menu
     pub fn render<'a>(
         &'a mut self,
         render_pass: &mut wgpu::RenderPass<'a>,
         queue: &wgpu::Queue,
         metrics: &DebugMetrics,
+        menu_lines: Option<&[(String, bool)]>,
+        dimmer_pipeline: Option<&'a wgpu::RenderPipeline>,
     ) {
         // Always check for periodic logging (even if overlay disabled)
         self.maybe_log_metrics(metrics);
 
-        if !self.enabled {
-            return;
-        }
-
-        // Build text lines
-        let lines = vec![
-            format!("FPS: {:.0} ({:.2}ms)", metrics.fps, metrics.frame_time_ms),
-            format!("GPU: {:.2}ms", metrics.gpu_time_ms),
-            format!("World: {:.2}ms  Render: {:.2}ms", metrics.world_update_ms, metrics.render_ms),
-            format!("Shadow: {:.2}ms  Main: {:.2}ms", metrics.shadow_pass_ms, metrics.main_pass_ms),
-            String::new(),
-            format!("Triangles: {}K", metrics.triangles / 1000),
-            format!("Draw calls: {}", metrics.draw_calls),
-            format!("Chunks: {} rendered, {} culled", metrics.chunks_rendered, metrics.chunks_culled),
-            format!("Shadow: {} rendered, {} culled", metrics.shadow_chunks_rendered, metrics.shadow_chunks_culled),
-            format!("Loaded: {} chunks", metrics.loaded_chunks),
-            String::new(),
-            format!("Pending: {} gen, {} mesh", metrics.chunks_pending_gen, metrics.chunks_pending_mesh),
-            format!("Vertices: {}K", metrics.total_vertices / 1000),
-            String::new(),
-            format!("Mesh: {:.0}us/chunk ({} chunks)", metrics.mesh_avg_time_us, metrics.mesh_chunks_total),
-            format!("Mesh total: {:.1}ms, {}K quads", metrics.mesh_total_time_ms, metrics.mesh_total_quads / 1000),
-            String::new(),
-            format!("XYZ: {:.1}, {:.1}, {:.1}", metrics.pos_x, metrics.pos_y, metrics.pos_z),
-            format!("Chunk: {}, {}, {}", metrics.chunk_x, metrics.chunk_y, metrics.chunk_z),
-            format!("Look: {:.1}, {:.1}", metrics.yaw.to_degrees(), metrics.pitch.to_degrees()),
-            String::new(),
-            format!("Light: {} (sky:{} block:{})", metrics.light_level, metrics.sky_light, metrics.block_light),
-        ];
-
-        // Generate vertices for all text
-        let mut vertices = Vec::new();
         let scale = 2.0; // 2x scale for readability
         let char_w = (CHAR_WIDTH as f32 * scale) / self.screen_width * 2.0;
         let char_h = (CHAR_HEIGHT as f32 * scale) / self.screen_height * 2.0;
-        let line_height = char_h * 1.2;
 
-        let start_x = -0.98; // Left edge with padding
-        let mut y = 0.95; // Top edge with padding
+        let mut vertices = Vec::new();
 
-        for line in &lines {
-            let mut x = start_x;
-            for ch in line.chars() {
-                if let Some((u0, v0, u1, v1)) = self.char_uvs(ch) {
-                    // Two triangles for quad
-                    vertices.push(TextVertex { position: [x, y - char_h], uv: [u0, v1] });
-                    vertices.push(TextVertex { position: [x + char_w, y - char_h], uv: [u1, v1] });
-                    vertices.push(TextVertex { position: [x + char_w, y], uv: [u1, v0] });
+        // Build debug overlay text if enabled
+        if self.enabled {
+            let lines = vec![
+                format!("FPS: {:.0} ({:.2}ms)", metrics.fps, metrics.frame_time_ms),
+                format!("GPU: {:.2}ms", metrics.gpu_time_ms),
+                format!("World: {:.2}ms  Render: {:.2}ms", metrics.world_update_ms, metrics.render_ms),
+                format!("Shadow: {:.2}ms  Main: {:.2}ms", metrics.shadow_pass_ms, metrics.main_pass_ms),
+                String::new(),
+                format!("Triangles: {}K", metrics.triangles / 1000),
+                format!("Draw calls: {}", metrics.draw_calls),
+                format!("Chunks: {} rendered, {} culled", metrics.chunks_rendered, metrics.chunks_culled),
+                format!("Shadow: {} rendered, {} culled", metrics.shadow_chunks_rendered, metrics.shadow_chunks_culled),
+                format!("Loaded: {} chunks", metrics.loaded_chunks),
+                String::new(),
+                format!("Pending: {} gen, {} mesh", metrics.chunks_pending_gen, metrics.chunks_pending_mesh),
+                format!("Vertices: {}K", metrics.total_vertices / 1000),
+                String::new(),
+                format!("Mesh: {:.0}us/chunk ({} chunks)", metrics.mesh_avg_time_us, metrics.mesh_chunks_total),
+                format!("Mesh total: {:.1}ms, {}K quads", metrics.mesh_total_time_ms, metrics.mesh_total_quads / 1000),
+                String::new(),
+                format!("XYZ: {:.1}, {:.1}, {:.1}", metrics.pos_x, metrics.pos_y, metrics.pos_z),
+                format!("Chunk: {}, {}, {}", metrics.chunk_x, metrics.chunk_y, metrics.chunk_z),
+                format!("Look: {:.1}, {:.1}", metrics.yaw.to_degrees(), metrics.pitch.to_degrees()),
+                String::new(),
+                format!("Light: {} (sky:{} block:{})", metrics.light_level, metrics.sky_light, metrics.block_light),
+            ];
 
-                    vertices.push(TextVertex { position: [x, y - char_h], uv: [u0, v1] });
-                    vertices.push(TextVertex { position: [x + char_w, y], uv: [u1, v0] });
-                    vertices.push(TextVertex { position: [x, y], uv: [u0, v0] });
+            let line_height = char_h * 1.2;
+            let start_x = -0.98; // Left edge with padding
+            let mut y = 0.95; // Top edge with padding
+
+            for line in &lines {
+                let mut x = start_x;
+                for ch in line.chars() {
+                    if let Some((u0, v0, u1, v1)) = self.char_uvs(ch) {
+                        vertices.push(TextVertex { position: [x, y - char_h], uv: [u0, v1] });
+                        vertices.push(TextVertex { position: [x + char_w, y - char_h], uv: [u1, v1] });
+                        vertices.push(TextVertex { position: [x + char_w, y], uv: [u1, v0] });
+                        vertices.push(TextVertex { position: [x, y - char_h], uv: [u0, v1] });
+                        vertices.push(TextVertex { position: [x + char_w, y], uv: [u1, v0] });
+                        vertices.push(TextVertex { position: [x, y], uv: [u0, v0] });
+                    }
+                    x += char_w;
                 }
-                x += char_w;
+                y -= line_height;
             }
-            y -= line_height;
         }
 
-        if vertices.is_empty() {
-            return;
+        // Render debug overlay first (if any vertices)
+        if !vertices.is_empty() {
+            let vertex_count = vertices.len().min(self.max_chars * 6);
+            queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&vertices[..vertex_count]));
+
+            render_pass.set_pipeline(&self.pipeline);
+            render_pass.set_bind_group(0, &self.font_bind_group, &[]);
+            render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+            render_pass.draw(0..vertex_count as u32, 0..1);
         }
 
-        // Upload vertices
-        let vertex_count = vertices.len().min(self.max_chars * 6);
-        queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&vertices[..vertex_count]));
+        // Render settings menu if provided
+        if let Some(lines) = menu_lines {
+            // Render dimmer overlay first
+            if let Some(dimmer) = dimmer_pipeline {
+                render_pass.set_pipeline(dimmer);
+                render_pass.draw(0..3, 0..1);
+            }
 
-        // Render
-        render_pass.set_pipeline(&self.pipeline);
-        render_pass.set_bind_group(0, &self.font_bind_group, &[]);
-        render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-        render_pass.draw(0..vertex_count as u32, 0..1);
+            // Generate menu vertices
+            let mut menu_vertices = Vec::new();
+            let line_height = char_h * 1.4; // Slightly more spacing for menu
+
+            // Calculate total menu height
+            let total_height = lines.len() as f32 * line_height;
+
+            // Start from center
+            let mut y = total_height / 2.0 - char_h / 2.0;
+
+            for (line, _is_hovered) in lines {
+                // Calculate line width and center it
+                let line_width = line.len() as f32 * char_w;
+                let mut x = -line_width / 2.0;
+
+                for ch in line.chars() {
+                    if let Some((u0, v0, u1, v1)) = self.char_uvs(ch) {
+                        menu_vertices.push(TextVertex { position: [x, y - char_h], uv: [u0, v1] });
+                        menu_vertices.push(TextVertex { position: [x + char_w, y - char_h], uv: [u1, v1] });
+                        menu_vertices.push(TextVertex { position: [x + char_w, y], uv: [u1, v0] });
+                        menu_vertices.push(TextVertex { position: [x, y - char_h], uv: [u0, v1] });
+                        menu_vertices.push(TextVertex { position: [x + char_w, y], uv: [u1, v0] });
+                        menu_vertices.push(TextVertex { position: [x, y], uv: [u0, v0] });
+                    }
+                    x += char_w;
+                }
+                y -= line_height;
+            }
+
+            if !menu_vertices.is_empty() {
+                let vertex_count = menu_vertices.len().min(self.max_chars * 6);
+                queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&menu_vertices[..vertex_count]));
+
+                render_pass.set_pipeline(&self.pipeline);
+                render_pass.set_bind_group(0, &self.font_bind_group, &[]);
+                render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+                render_pass.draw(0..vertex_count as u32, 0..1);
+            }
+        }
     }
 
     fn char_uvs(&self, ch: char) -> Option<(f32, f32, f32, f32)> {

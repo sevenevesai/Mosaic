@@ -14,6 +14,7 @@ use winit::{
 use crate::audio::AudioManager;
 use crate::player::{Player, BlockInteraction};
 use crate::renderer::{Renderer, DebugMetrics};
+use crate::settings_menu::SettingsMenu;
 use crate::utils::profiler::FrameProfiler;
 use crate::world::{WorldManager, ChunkPos, MESH_STATS};
 
@@ -27,6 +28,7 @@ pub struct App {
     last_frame: Instant,
     cursor_grabbed: bool,
     audio: Option<AudioManager>,
+    settings_menu: SettingsMenu,
 }
 
 impl App {
@@ -72,6 +74,11 @@ impl App {
         // Initialize audio system
         let audio = AudioManager::new();
 
+        // Initialize settings menu with screen size
+        let window_size = window.inner_size();
+        let mut settings_menu = SettingsMenu::new();
+        settings_menu.update_screen_size(window_size.width as f32, window_size.height as f32);
+
         let mut app = App {
             window,
             renderer,
@@ -81,6 +88,7 @@ impl App {
             last_frame: Instant::now(),
             cursor_grabbed: false,
             audio,
+            settings_menu,
         };
 
         tracing::info!("Engine initialized successfully");
@@ -131,6 +139,7 @@ impl App {
                 self.player
                     .camera
                     .update_aspect(new_size.width as f32 / new_size.height as f32);
+                self.settings_menu.update_screen_size(new_size.width as f32, new_size.height as f32);
             }
 
             WindowEvent::KeyboardInput { event, .. } => {
@@ -139,7 +148,19 @@ impl App {
 
                     match key_code {
                         KeyCode::Escape if pressed => {
-                            self.toggle_cursor_grab();
+                            if self.settings_menu.is_open {
+                                // Close menu and resume gameplay
+                                self.settings_menu.is_open = false;
+                                if !self.cursor_grabbed {
+                                    self.toggle_cursor_grab();
+                                }
+                            } else {
+                                // Open menu and release cursor
+                                self.settings_menu.is_open = true;
+                                if self.cursor_grabbed {
+                                    self.toggle_cursor_grab();
+                                }
+                            }
                         }
                         KeyCode::F3 if pressed => {
                             self.renderer.toggle_debug_overlay();
@@ -203,13 +224,25 @@ impl App {
             }
 
             WindowEvent::MouseInput { state, button, .. } => {
-                if !self.cursor_grabbed {
+                use winit::event::MouseButton;
+                if self.settings_menu.is_open {
+                    // Handle menu clicks
+                    if state == ElementState::Pressed && button == MouseButton::Left {
+                        self.settings_menu.click(&mut self.renderer);
+                    }
+                } else if !self.cursor_grabbed {
                     if state == ElementState::Pressed {
                         self.toggle_cursor_grab();
                     }
                 } else {
                     self.player
                         .handle_mouse_button(button, state == ElementState::Pressed);
+                }
+            }
+
+            WindowEvent::CursorMoved { position, .. } => {
+                if self.settings_menu.is_open {
+                    self.settings_menu.update_mouse(position.x as f32, position.y as f32);
                 }
             }
 
@@ -347,7 +380,7 @@ impl App {
         // Render
         self.profiler.begin_section("render");
         let held_light = self.player.selected_block().light_emission();
-        match self.renderer.render(&self.player.camera, &mut self.world, &self.profiler, target_block, &debug_metrics, held_light) {
+        match self.renderer.render(&self.player.camera, &mut self.world, &self.profiler, target_block, &debug_metrics, held_light, &self.settings_menu) {
             Ok(_) => {
                 // Update profiler with render stats
                 self.profiler.update_render_stats(self.renderer.stats.clone());

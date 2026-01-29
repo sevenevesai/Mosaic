@@ -5,6 +5,7 @@
 pub mod app;
 pub mod audio;
 pub mod renderer;
+pub mod settings_menu;
 pub mod world;
 pub mod player;
 pub mod utils;

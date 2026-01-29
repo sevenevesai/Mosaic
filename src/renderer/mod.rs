@@ -28,7 +28,7 @@ use crate::utils::gpu_profiler::GpuProfiler;
 use crate::utils::profiler::FrameProfiler;
 use crate::world::WorldManager;
 
-use pipeline::{UiVertex, LineVertex, WaterUniform, create_water_bind_group_layout, create_water_pipeline, create_voxel_lit_chunk_pipeline};
+use pipeline::{UiVertex, LineVertex, WaterUniform, create_water_bind_group_layout, create_water_pipeline, create_voxel_lit_chunk_pipeline, create_dimmer_pipeline};
 use glam::{Vec3, Mat4};
 
 /// Render statistics for the current frame
@@ -139,6 +139,9 @@ pub struct Renderer {
     // Volumetric light shafts (god rays)
     volumetrics: VolumetricLighting,
     volumetric_uniform_buffer: wgpu::Buffer,
+
+    // Settings menu dimmer overlay
+    dimmer_pipeline: wgpu::RenderPipeline,
 }
 
 impl Renderer {
@@ -413,6 +416,9 @@ impl Renderer {
         // Create line pipeline for block outline
         let line_pipeline = pipeline::create_line_pipeline(&device, surface_format, &camera_bind_group_layout);
 
+        // Create dimmer pipeline for settings menu overlay
+        let dimmer_pipeline = create_dimmer_pipeline(&device, surface_format);
+
         // Create outline vertex buffer (will be updated each frame)
         // 12 edges * 2 vertices = 24 vertices for a cube wireframe
         let outline_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -582,6 +588,7 @@ impl Renderer {
             scene_texture_view,
             volumetrics,
             volumetric_uniform_buffer,
+            dimmer_pipeline,
         }
     }
 
@@ -752,6 +759,7 @@ impl Renderer {
         target_block: Option<[i32; 3]>,
         debug_metrics: &DebugMetrics,
         held_light_emission: u8,  // Light emission of held item (0 = none, 14 = torch)
+        settings_menu: &crate::settings_menu::SettingsMenu,
     ) -> Result<(), wgpu::SurfaceError> {
         let render_start = std::time::Instant::now();
 
@@ -911,6 +919,13 @@ impl Renderer {
                 crate::constants::CHUNK_SIZE_F32,
             );
         }
+
+        // Pre-generate menu lines if menu is open (before render pass borrow)
+        let menu_lines = if settings_menu.is_open {
+            Some(settings_menu.generate_lines(self))
+        } else {
+            None
+        };
 
         // === MAIN RENDER PASS (render to scene texture for bloom) ===
         {
@@ -1141,8 +1156,14 @@ impl Renderer {
             render_pass.set_vertex_buffer(0, self.crosshair_vertex_buffer.slice(..));
             render_pass.draw(0..12, 0..1);
 
-            // Render debug overlay
-            self.debug_overlay.render(&mut render_pass, &self.queue, debug_metrics);
+            // Render debug overlay and optionally settings menu
+            self.debug_overlay.render(
+                &mut render_pass,
+                &self.queue,
+                debug_metrics,
+                menu_lines.as_deref(),
+                if menu_lines.is_some() { Some(&self.dimmer_pipeline) } else { None },
+            );
         }
 
         // === VOLUMETRIC LIGHT SHAFTS ===
