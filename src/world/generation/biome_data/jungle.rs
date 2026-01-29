@@ -41,7 +41,7 @@ impl Biome for JungleBiome {
 
     fn surface_params(&self) -> SurfaceParams {
         SurfaceParams {
-            tree_density: 2.5,      // Very dense vegetation
+            tree_density: 1.8,      // Dense but navigable - canopy connects, ground walkable
             formations_enabled: false,
             surface_block: Block::JungleGrass,
             subsurface_block: Block::Dirt,
