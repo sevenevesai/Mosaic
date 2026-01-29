@@ -90,6 +90,8 @@ pub struct VoxelVolumeUniform {
     pub time_of_day: [f32; 4],
     /// Player held light: [x, y, z, intensity (0-15 normalized to 0-1)]
     pub player_light: [f32; 4],
+    /// Volume origin for toroidal wrapping (world position of voxel [0,0,0])
+    pub volume_origin: [i32; 4],
 }
 
 impl Default for VoxelVolumeUniform {
@@ -103,6 +105,7 @@ impl Default for VoxelVolumeUniform {
             ambient_color: [0.3, 0.35, 0.4, 1.0],
             time_of_day: [0.5, 0.0, 0.0, 0.0],
             player_light: [0.0; 4],  // No held light by default
+            volume_origin: [0; 4],   // Toroidal origin
         }
     }
 }
@@ -122,7 +125,7 @@ const MAX_DIRTY_BLOCKS: usize = 64;
 
 /// Maximum chunks that can overlap the 256^3 voxel volume
 /// Volume spans 16 chunks per axis, but can straddle boundaries → 17 max
-const MAX_OVERLAPPING_CHUNKS: u32 = 512;
+const MAX_OVERLAPPING_CHUNKS: u32 = 2048; // Increased to capture more Y levels (~7 levels vs ~1.7)
 
 /// GPU-side chunk metadata for voxel filling
 #[repr(C)]
@@ -195,6 +198,9 @@ pub struct VoxelGI {
     /// Last update position (to detect when re-upload needed)
     /// Starts at origin, will update on first frame
     last_update_center: Vec3,
+    /// Volume origin for toroidal wrapping (world position of voxel [0,0,0])
+    /// This is volume_center - 128, snapped to chunk boundaries for efficiency
+    volume_origin: glam::IVec3,
     /// Whether we've done the initial voxel fill
     initialized: bool,
     /// Force full update on next frame
@@ -219,6 +225,7 @@ pub struct VoxelGI {
 impl VoxelGI {
     pub fn new(device: &wgpu::Device) -> Self {
         // Create 3D voxel texture (RGBA8)
+        // Note: view_formats includes Rgba8Unorm to ensure compatibility with storage texture use
         let voxel_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Voxel Volume Texture"),
             size: wgpu::Extent3d {
@@ -233,9 +240,19 @@ impl VoxelGI {
             usage: wgpu::TextureUsages::TEXTURE_BINDING
                 | wgpu::TextureUsages::STORAGE_BINDING
                 | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
+            view_formats: &[wgpu::TextureFormat::Rgba8Unorm],
         });
-        let voxel_texture_view = voxel_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        // Create view with explicit format for storage texture compatibility
+        let voxel_texture_view = voxel_texture.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("Voxel Volume View"),
+            format: Some(wgpu::TextureFormat::Rgba8Unorm),
+            dimension: Some(wgpu::TextureViewDimension::D3),
+            aspect: wgpu::TextureAspect::All,
+            base_mip_level: 0,
+            mip_level_count: Some(1),
+            base_array_layer: 0,
+            array_layer_count: None,
+        });
 
         // Create radiance texture with mipmaps for cone tracing
         let radiance_texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -390,6 +407,7 @@ impl VoxelGI {
             mipmap_pipeline,
             volume_center: Vec3::ZERO,
             last_update_center: Vec3::ZERO,
+            volume_origin: glam::IVec3::ZERO,
             initialized: false,
             force_full_update: false,
             dirty_blocks: Vec::with_capacity(MAX_DIRTY_BLOCKS),
@@ -713,7 +731,8 @@ impl VoxelGI {
         }
 
         // Handle INCREMENTAL updates (dirty blocks) - much faster path
-        if has_dirty_blocks && !needs_full_refresh {
+        // Skip incremental updates in GPU mode - CPU cache is not maintained
+        if has_dirty_blocks && !needs_full_refresh && !self.use_gpu_fill {
             let dirty_blocks: Vec<DirtyBlock> = self.dirty_blocks.drain(..).collect();
             let update_start = std::time::Instant::now();
 
@@ -734,6 +753,29 @@ impl VoxelGI {
         }
 
         // Handle FULL refresh (camera moved or initialization)
+        // Skip CPU fill if GPU fill mode is enabled - GPU handles full refreshes
+        if self.use_gpu_fill {
+            self.force_full_update = false;
+            self.dirty_blocks.clear(); // GPU mode doesn't support incremental updates
+
+            // Only update tracking state if GPU fill actually happened this frame
+            // (needs_full_refresh was true when gpu_fill_volume was called)
+            if needs_full_refresh {
+                if !self.initialized {
+                    tracing::info!("Initial GPU voxel volume fill at {:?}", snapped_center);
+                    self.initialized = true;
+                }
+                self.volume_center = snapped_center;
+                self.last_update_center = snapped_center;
+            }
+            // else: We're here because of dirty blocks only - no GPU fill happened,
+            //       so keep using the existing volume center
+
+            // Always use the actual volume center for uniforms (where the voxel data is)
+            self.update_uniform(queue, self.last_update_center, sun_direction, sun_color, ambient_color, time_of_day, shadow_mode, shadow_debug, camera_pos, held_light_emission);
+            return;
+        }
+
         self.force_full_update = false;
         self.dirty_blocks.clear(); // Clear any pending dirty blocks
 
@@ -778,16 +820,14 @@ impl VoxelGI {
         );
         let upload_time = upload_start.elapsed();
 
-        // Log timing if significant (> 1ms total)
+        // Always log CPU fill timing for comparison with GPU
         let total_ms = fill_time.as_secs_f64() * 1000.0 + upload_time.as_secs_f64() * 1000.0;
-        if total_ms > 1.0 {
-            tracing::info!(
-                "Voxel update: fill={:.2}ms, upload={:.2}ms, total={:.2}ms",
-                fill_time.as_secs_f64() * 1000.0,
-                upload_time.as_secs_f64() * 1000.0,
-                total_ms
-            );
-        }
+        tracing::info!(
+            "CPU voxel fill: fill={:.2}ms, upload={:.2}ms, total={:.2}ms",
+            fill_time.as_secs_f64() * 1000.0,
+            upload_time.as_secs_f64() * 1000.0,
+            total_ms
+        );
     }
 
     fn update_uniform(
@@ -803,6 +843,15 @@ impl VoxelGI {
         player_pos: Vec3,
         held_light_emission: u8,
     ) {
+        // Volume origin is the world position of voxel [0,0,0]
+        // For toroidal wrapping: origin = center - half_size
+        let half_size = (VOXEL_VOLUME_SIZE / 2) as i32;
+        let origin = glam::IVec3::new(
+            center.x.floor() as i32 - half_size,
+            center.y.floor() as i32 - half_size,
+            center.z.floor() as i32 - half_size,
+        );
+
         let uniform = VoxelVolumeUniform {
             volume_center: [center.x, center.y, center.z, 0.0],
             volume_size: [VOXEL_VOLUME_SIZE as f32; 4],
@@ -813,6 +862,7 @@ impl VoxelGI {
             ambient_color: [ambient_color.x, ambient_color.y, ambient_color.z, 1.0],
             time_of_day: [time_of_day, shadow_mode, shadow_debug, 0.0],
             player_light: [player_pos.x, player_pos.y, player_pos.z, held_light_emission as f32 / 15.0],
+            volume_origin: [origin.x, origin.y, origin.z, 0],
         };
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniform]));
     }
@@ -876,14 +926,25 @@ impl VoxelGI {
             ],
         });
 
-        // Clear pass first
+        // Clear pass - create bind group at runtime to ensure we're using the current texture
+        let clear_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Voxel Clear Bind Group Runtime"),
+            layout: &self.clear_pipeline.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&self.voxel_texture_view),
+                },
+            ],
+        });
+
         {
             let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Voxel Clear Pass"),
                 timestamp_writes: None,
             });
             compute_pass.set_pipeline(&self.clear_pipeline.pipeline);
-            compute_pass.set_bind_group(0, &self.clear_pipeline.bind_group, &[]);
+            compute_pass.set_bind_group(0, &clear_bind_group, &[]);
             // 256 / 4 = 64 workgroups per dimension
             compute_pass.dispatch_workgroups(64, 64, 64);
         }
@@ -909,11 +970,12 @@ impl VoxelGI {
 
         let fill_time = fill_start.elapsed();
         tracing::info!(
-            "GPU voxel fill: upload={:.2}ms, total={:.2}ms | {} chunks, center=({},{},{})",
+            "GPU voxel fill: upload={:.2}ms, total={:.2}ms | {} chunks, center=({},{},{}), min_chunk=({},{},{})",
             upload_time.as_secs_f64() * 1000.0,
             fill_time.as_secs_f64() * 1000.0,
             num_chunks,
-            volume_center.x, volume_center.y, volume_center.z
+            volume_center.x, volume_center.y, volume_center.z,
+            min_chunk_pos.x, min_chunk_pos.y, min_chunk_pos.z
         );
     }
 
@@ -954,7 +1016,33 @@ impl VoxelGI {
         let chunks_read = chunks.read();
         let mut chunk_index = 0u32;
 
-        for cy in min_chunk.y..=max_chunk.y {
+        // Calculate center chunk position for prioritized iteration
+        let center_chunk = IVec3::new(
+            volume_center.x.div_euclid(CHUNK_SIZE_I32),
+            volume_center.y.div_euclid(CHUNK_SIZE_I32),
+            volume_center.z.div_euclid(CHUNK_SIZE_I32),
+        );
+
+        // Iterate from center outward in Y to prioritize chunks near the player
+        // This ensures we capture the most important chunks even if we hit the limit
+        let y_range = max_chunk.y - min_chunk.y + 1;
+        let mut y_offsets: Vec<i32> = Vec::with_capacity(y_range as usize);
+        for d in 0..=y_range {
+            if d == 0 {
+                y_offsets.push(0);
+            } else {
+                // Alternate positive and negative offsets from center
+                y_offsets.push(d);
+                y_offsets.push(-d);
+            }
+        }
+
+        'outer: for dy in y_offsets {
+            let cy = center_chunk.y + dy;
+            if cy < min_chunk.y || cy > max_chunk.y {
+                continue;
+            }
+
             for cz in min_chunk.z..=max_chunk.z {
                 for cx in min_chunk.x..=max_chunk.x {
                     let pos = ChunkPos { x: cx, y: cy, z: cz };
@@ -989,17 +1077,46 @@ impl VoxelGI {
                         chunk_index += 1;
 
                         if chunk_index >= MAX_OVERLAPPING_CHUNKS {
-                            break;
+                            break 'outer;
                         }
                     }
                 }
-                if chunk_index >= MAX_OVERLAPPING_CHUNKS { break; }
             }
-            if chunk_index >= MAX_OVERLAPPING_CHUNKS { break; }
         }
         drop(chunks_read);
 
         let num_chunks = metadata_vec.len() as u32;
+
+        // Debug: find the RANGE of filled positions in lookup texture
+        let mut min_x = 17i32;
+        let mut max_x = -1i32;
+        let mut min_y = 17i32;
+        let mut max_y = -1i32;
+        let mut min_z = 17i32;
+        let mut max_z = -1i32;
+        let mut num_filled = 0;
+
+        for z in 0..17 {
+            for y in 0..17 {
+                for x in 0..17 {
+                    let idx = x + y * 17 + z * 17 * 17;
+                    if lookup_data[idx] != 0xFFFFFFFF {
+                        num_filled += 1;
+                        min_x = min_x.min(x as i32);
+                        max_x = max_x.max(x as i32);
+                        min_y = min_y.min(y as i32);
+                        max_y = max_y.max(y as i32);
+                        min_z = min_z.min(z as i32);
+                        max_z = max_z.max(z as i32);
+                    }
+                }
+            }
+        }
+
+        tracing::info!(
+            "Lookup texture: {} filled, X=[{},{}], Y=[{},{}], Z=[{},{}]",
+            num_filled, min_x, max_x, min_y, max_y, min_z, max_z
+        );
 
         // Upload uniforms
         let uniforms = VoxelFillUniforms {
@@ -1055,6 +1172,7 @@ impl VoxelGI {
     }
 
     /// Check if GPU fill is needed based on camera movement
+    /// Uses same calculation as update_from_chunks() for consistency
     pub fn needs_gpu_refresh(&self, camera_pos: Vec3) -> bool {
         let current_center = Vec3::new(
             camera_pos.x.floor(),
@@ -1062,8 +1180,9 @@ impl VoxelGI {
             camera_pos.z.floor(),
         );
 
-        let delta = (current_center - self.last_update_center).abs();
-        !self.initialized || delta.x >= 48.0 || delta.y >= 48.0 || delta.z >= 48.0 || self.force_full_update
+        // Use total distance (same as update_from_chunks) - not per-axis check
+        let distance_moved = (current_center - self.last_update_center).length();
+        !self.initialized || distance_moved >= 48.0 || self.force_full_update
     }
 
     /// Toggle between GPU and CPU fill modes
@@ -1730,11 +1849,15 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         return;
     }
 
-    // Convert voxel coords to world coords
-    // Volume extends from (center - 128) to (center + 127)
-    let world_pos = voxel_coords + uniforms.volume_center.xyz - vec3<i32>(128);
+    // Convert voxel coordinates to world coordinates
+    let half_size = 128;
+    let world_pos = vec3<i32>(
+        voxel_coords.x + uniforms.volume_center.x - half_size,
+        voxel_coords.y + uniforms.volume_center.y - half_size,
+        voxel_coords.z + uniforms.volume_center.z - half_size
+    );
 
-    // Calculate which chunk contains this world position
+    // Find which chunk contains this world position
     let chunk_pos = vec3<i32>(
         div_floor(world_pos.x, 16),
         div_floor(world_pos.y, 16),
@@ -1742,35 +1865,35 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     );
 
     // Convert to lookup texture coordinates
-    let lookup_coords = chunk_pos - uniforms.min_chunk_pos.xyz;
+    let lookup_pos = chunk_pos - uniforms.min_chunk_pos.xyz;
 
     // Bounds check for lookup texture (17x17x17)
-    if (lookup_coords.x < 0 || lookup_coords.x >= 17 ||
-        lookup_coords.y < 0 || lookup_coords.y >= 17 ||
-        lookup_coords.z < 0 || lookup_coords.z >= 17) {
+    if (lookup_pos.x < 0 || lookup_pos.x >= 17 ||
+        lookup_pos.y < 0 || lookup_pos.y >= 17 ||
+        lookup_pos.z < 0 || lookup_pos.z >= 17) {
+        // Outside lookup range - no shadow (air)
         textureStore(voxel_volume, voxel_coords, vec4<f32>(0.0, 0.0, 0.0, 0.0));
         return;
     }
 
-    // Look up chunk index
-    let chunk_index = textureLoad(chunk_lookup, lookup_coords, 0).r;
+    // Read from lookup texture
+    let chunk_index = textureLoad(chunk_lookup, lookup_pos, 0).r;
 
-    // 0xFFFFFFFF means no chunk at this position
     if (chunk_index == 0xFFFFFFFFu) {
+        // No chunk at this position - air
         textureStore(voxel_volume, voxel_coords, vec4<f32>(0.0, 0.0, 0.0, 0.0));
         return;
     }
 
     // Calculate local position within chunk (0-15)
-    let chunk_origin = chunk_pos * 16;
-    let local_pos = vec3<u32>(
-        u32(world_pos.x - chunk_origin.x),
-        u32(world_pos.y - chunk_origin.y),
-        u32(world_pos.z - chunk_origin.z)
+    let local_pos = vec3<i32>(
+        world_pos.x - chunk_pos.x * 16,
+        world_pos.y - chunk_pos.y * 16,
+        world_pos.z - chunk_pos.z * 16
     );
 
     // Read block type from chunk data
-    let block_type = read_block(chunk_index, local_pos.x, local_pos.y, local_pos.z);
+    let block_type = read_block(chunk_index, u32(local_pos.x), u32(local_pos.y), u32(local_pos.z));
 
     // Convert to voxel data and store
     let voxel_data = get_voxel_data(block_type);

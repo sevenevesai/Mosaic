@@ -274,7 +274,7 @@ struct LightUniform {
     ambient_color: vec4<f32>,
 };
 
-// Voxel volume uniform (128 bytes for proper WGSL alignment)
+// Voxel volume uniform (144 bytes for proper WGSL alignment)
 struct VoxelVolumeUniform {
     volume_center: vec4<f32>,
     volume_size: vec4<f32>,
@@ -284,6 +284,7 @@ struct VoxelVolumeUniform {
     ambient_color: vec4<f32>,
     time_of_day: vec4<f32>,  // x = time, y = shadow_mode (0=hard, 1=soft), z = shadow_debug, w = padding
     player_light: vec4<f32>, // xyz = position, w = intensity (0-1, where 1 = 15 emission)
+    volume_origin: vec4<i32>, // xyz = world position of voxel [0,0,0] for toroidal wrapping
 };
 
 @group(0) @binding(0)
@@ -396,14 +397,24 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 // DDA RAY MARCHING FOR SHADOWS
 // ═══════════════════════════════════════════════════════════════════════════
 
+// Convert world position to voxel UV using toroidal wrapping
+// The volume wraps around, so coordinates outside [0,256) map back into the volume
 fn world_to_voxel_uv(world_pos: vec3<f32>) -> vec3<f32> {
-    let half_size = voxel_volume.volume_size.x * 0.5;
-    let local_pos = world_pos - voxel_volume.volume_center.xyz + vec3<f32>(half_size);
-    return local_pos / voxel_volume.volume_size.x;
+    // Compute local position relative to origin (floating point for smooth sampling)
+    let origin = vec3<f32>(voxel_volume.volume_origin.xyz);
+    let local = world_pos - origin;
+
+    // Toroidal wrap using floating-point modulo
+    // ((x % 256) + 256) % 256 handles negative values correctly
+    let wrapped = ((local % 256.0) + 256.0) % 256.0;
+
+    // Convert to UV (0-1 range)
+    return wrapped / 256.0;
 }
 
+// With toroidal wrapping, UV is always in valid range
 fn is_in_volume(uv: vec3<f32>) -> bool {
-    return all(uv >= vec3<f32>(0.0)) && all(uv <= vec3<f32>(1.0));
+    return all(uv >= vec3<f32>(0.0)) && all(uv < vec3<f32>(1.0));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -435,15 +446,15 @@ fn ray_march_shadow_hard(world_pos: vec3<f32>, light_dir: vec3<f32>) -> f32 {
         pos += light_dir * current_step;
         total_distance += current_step;
 
+        // With toroidal wrapping, check WORLD distance from volume center (not UV bounds)
+        // Valid data is within ~120 blocks of center (half of 256, with margin)
+        let center_dist = length(pos - voxel_volume.volume_center.xyz);
+        if (center_dist > 120.0) { break; }
+
+        // Fade near edge of valid region (100-120 blocks from center)
+        let edge_fade = 1.0 - smoothstep(100.0, 120.0, center_dist);
+
         let uv = world_to_voxel_uv(pos);
-        let edge_dist = min(
-            min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y)),
-            min(uv.z, 1.0 - uv.z)
-        );
-
-        if (edge_dist < 0.0) { break; }
-
-        let edge_fade = smoothstep(0.0, 0.05, edge_dist);
         let voxel = textureSampleLevel(t_voxel, s_voxel, uv, 0.0);
         let opacity = voxel.r * edge_fade;
 
@@ -505,15 +516,13 @@ fn ray_march_shadow_soft_core(world_pos: vec3<f32>, light_dir: vec3<f32>) -> f32
         pos += light_dir * step_size;
         total_distance += step_size;
 
+        // With toroidal wrapping, check WORLD distance from volume center
+        let center_dist = length(pos - voxel_volume.volume_center.xyz);
+        if (center_dist > 120.0) { break; }
+
+        let edge_fade = 1.0 - smoothstep(100.0, 120.0, center_dist);
+
         let uv = world_to_voxel_uv(pos);
-        let edge_dist = min(
-            min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y)),
-            min(uv.z, 1.0 - uv.z)
-        );
-
-        if (edge_dist < 0.0) { break; }
-
-        let edge_fade = smoothstep(0.0, 0.05, edge_dist);
         let voxel = textureSampleLevel(t_voxel, s_voxel, uv, 0.0);
         let opacity = voxel.r * edge_fade;
 
