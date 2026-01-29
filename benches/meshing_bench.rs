@@ -58,11 +58,53 @@ fn create_checkerboard_chunk() -> Arc<Chunk> {
     Arc::new(chunk)
 }
 
+/// Create a realistic terrain surface chunk (solid below, air above, some variation)
+/// This simulates a typical surface terrain chunk with 60-70% fill
+fn create_terrain_surface_chunk(seed: u64) -> Arc<Chunk> {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut chunk = Chunk::new();
+
+    for z in 0..CHUNK_SIZE {
+        for x in 0..CHUNK_SIZE {
+            // Compute height variation for this column (8-12 blocks high)
+            let mut hasher = DefaultHasher::new();
+            (seed, x, z).hash(&mut hasher);
+            let height = 8 + (hasher.finish() % 5) as usize;
+
+            for y in 0..height.min(CHUNK_SIZE) {
+                // Mix of stone, dirt, and grass
+                let mut hasher2 = DefaultHasher::new();
+                (seed, x, y, z).hash(&mut hasher2);
+                let block = if y == height - 1 {
+                    Block::Grass
+                } else if y >= height.saturating_sub(4) {
+                    Block::Dirt
+                } else {
+                    Block::Stone
+                };
+                chunk.set_block(x, y, z, block);
+            }
+        }
+    }
+    Arc::new(chunk)
+}
+
 fn meshing_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("meshing");
 
     let pos = ChunkPos { x: 0, y: 0, z: 0 };
     let no_neighbors: [Option<Arc<Chunk>>; 6] = [None, None, None, None, None, None];
+
+    // Benchmark empty chunk (all air - tests early exit optimization)
+    // This should be extremely fast due to solid_count == 0 early exit
+    let empty_chunk = Arc::new(Chunk::new());
+    group.bench_function("empty_air", |b| {
+        b.iter(|| {
+            build_chunk_mesh(black_box(pos), black_box(&empty_chunk), black_box(&no_neighbors))
+        });
+    });
 
     // Benchmark solid chunk (minimal internal faces, all external)
     let solid_chunk = create_solid_chunk(Block::Stone);
@@ -88,7 +130,15 @@ fn meshing_benchmarks(c: &mut Criterion) {
         });
     });
 
-    // Benchmark different LOD levels
+    // Benchmark realistic terrain surface (typical gameplay scenario)
+    let terrain_chunk = create_terrain_surface_chunk(42);
+    group.bench_function("terrain_surface", |b| {
+        b.iter(|| {
+            build_chunk_mesh(black_box(pos), black_box(&terrain_chunk), black_box(&no_neighbors))
+        });
+    });
+
+    // Benchmark different LOD levels on sparse chunk
     for lod in [LodLevel::Full, LodLevel::Half, LodLevel::Quarter] {
         group.bench_with_input(
             BenchmarkId::new("lod_sparse", format!("{:?}", lod)),
@@ -98,6 +148,24 @@ fn meshing_benchmarks(c: &mut Criterion) {
                     build_chunk_mesh_lod(
                         black_box(pos),
                         black_box(&sparse_chunk),
+                        black_box(&no_neighbors),
+                        black_box(lod),
+                    )
+                });
+            },
+        );
+    }
+
+    // Benchmark different LOD levels on terrain surface chunk
+    for lod in [LodLevel::Full, LodLevel::Half, LodLevel::Quarter] {
+        group.bench_with_input(
+            BenchmarkId::new("lod_terrain", format!("{:?}", lod)),
+            &lod,
+            |b, &lod| {
+                b.iter(|| {
+                    build_chunk_mesh_lod(
+                        black_box(pos),
+                        black_box(&terrain_chunk),
                         black_box(&no_neighbors),
                         black_box(lod),
                     )

@@ -162,4 +162,16 @@ impl Frustum {
         }
         true
     }
+
+    /// Get frustum planes as array of [f32; 4] for GPU upload
+    pub fn planes_as_array(&self) -> [[f32; 4]; 6] {
+        [
+            self.planes[0].to_array(),
+            self.planes[1].to_array(),
+            self.planes[2].to_array(),
+            self.planes[3].to_array(),
+            self.planes[4].to_array(),
+            self.planes[5].to_array(),
+        ]
+    }
 }

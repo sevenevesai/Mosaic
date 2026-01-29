@@ -953,33 +953,43 @@ pub fn build_chunk_mesh_lod(
     let world_origin = pos.world_origin();
     let step = lod as usize;
 
-    // Process each axis
-    for axis in [Axis::X, Axis::Y, Axis::Z] {
-        // Process both directions (negative and positive facing)
-        for positive in [false, true] {
-            if step == 1 {
-                // Use optimized binary meshing for full detail
-                binary_greedy_mesh_axis(
-                    chunk,
-                    neighbors,
-                    axis,
-                    positive,
-                    world_origin,
-                    &mut vertices,
-                    &mut indices,
-                );
-            } else {
-                // Use LOD-aware meshing for reduced detail
-                greedy_mesh_axis_lod(
-                    chunk,
-                    neighbors,
-                    axis,
-                    positive,
-                    world_origin,
-                    step,
-                    &mut vertices,
-                    &mut indices,
-                );
+    // ═══════════════════════════════════════════════════════════════════════════
+    // EARLY EXIT: Skip main meshing for chunks with no solid blocks
+    // The binary greedy mesher only processes solid non-foliage blocks, so if
+    // solid_count == 0 we can skip that expensive loop entirely.
+    // Foliage and emissive handlers still run (they check their own conditions).
+    // ═══════════════════════════════════════════════════════════════════════════
+    let has_solid_blocks = chunk.solid_count() > 0;
+
+    if has_solid_blocks {
+        // Process each axis
+        for axis in [Axis::X, Axis::Y, Axis::Z] {
+            // Process both directions (negative and positive facing)
+            for positive in [false, true] {
+                if step == 1 {
+                    // Use optimized binary meshing for full detail
+                    binary_greedy_mesh_axis(
+                        chunk,
+                        neighbors,
+                        axis,
+                        positive,
+                        world_origin,
+                        &mut vertices,
+                        &mut indices,
+                    );
+                } else {
+                    // Use LOD-aware meshing for reduced detail
+                    greedy_mesh_axis_lod(
+                        chunk,
+                        neighbors,
+                        axis,
+                        positive,
+                        world_origin,
+                        step,
+                        &mut vertices,
+                        &mut indices,
+                    );
+                }
             }
         }
     }
@@ -1070,6 +1080,15 @@ fn binary_greedy_mesh_axis(
                     block_types[v][u] = block;
                 }
             }
+        }
+
+        // ═══════════════════════════════════════════════════════════════════
+        // EARLY EXIT: Skip this slice if no solid blocks (all occupancy is 0)
+        // This avoids building neighbor occupancy and visibility masks
+        // ═══════════════════════════════════════════════════════════════════
+        let slice_has_blocks = current_occupancy.iter().any(|&row| row != 0);
+        if !slice_has_blocks {
+            continue;
         }
 
         // Build neighbor occupancy (blocks that would occlude our faces)

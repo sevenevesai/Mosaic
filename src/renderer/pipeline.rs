@@ -1016,12 +1016,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let total_light = (natural_lit + block_light_contribution) * combined_ao;
     var final_color = tex_color.rgb * total_light;
 
-    // === FOG ===
+    // === FOG AND DISTANCE FADE ===
     let dist = length(camera.view_pos.xyz - in.world_position);
     let is_underwater = camera.anim_data.w > 0.5;
 
     var fog_factor: f32;
     var fog_color: vec3<f32>;
+    var alpha_fade: f32 = 1.0;
 
     if (is_underwater) {
         let underwater_density = 0.08;
@@ -1050,29 +1051,44 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         fog_factor = clamp(fog_factor, 0.0, max_fog);
 
         // === RENDER DISTANCE FADE ===
-        // Smoothly fade chunks to sky color before they pop out at render edge
+        // Fade chunks out at render distance - use alpha fade, not bright fog
         // Render distance: 24 chunks = 384 blocks
-        // Start fade 3 chunks early (48 blocks), full fade at edge
-        let render_dist = 384.0;  // 24 chunks * 16 blocks
-        let fade_start = render_dist - 48.0;  // Start fading 3 chunks before edge
+        let render_dist = 384.0;
+        let fade_start = render_dist - 64.0;  // Start fading 4 chunks before edge
         let edge_fade = smoothstep(fade_start, render_dist, dist);
 
-        // Blend atmospheric fog with stronger edge fade
-        fog_factor = max(fog_factor, edge_fade);
+        // Calculate fog color based on actual scene lighting (time-aware)
+        // Use ambient color as base - it's already dark at night
+        let ambient = voxel_volume.ambient_color.rgb;
+        let sun_contribution = voxel_volume.sun_color.rgb * max(0.0, voxel_volume.sun_direction.w);
 
-        let mist_color = vec3<f32>(0.78, 0.83, 0.90);
-        let haze_color = vec3<f32>(0.82, 0.85, 0.90);
-        fog_color = mix(haze_color, mist_color, height_influence);
+        // Fog color is a desaturated, slightly brighter version of ambient
+        // At night this will be very dark, during day it will be light
+        let scene_brightness = (ambient.r + ambient.g + ambient.b) / 3.0 +
+                               (sun_contribution.r + sun_contribution.g + sun_contribution.b) * 0.1;
 
-        // At render edge, blend fog color towards sky for seamless horizon
-        let sky_blend = smoothstep(fade_start + 24.0, render_dist, dist);
-        let horizon_color = mix(vec3<f32>(0.7, 0.8, 0.95), vec3<f32>(0.4, 0.45, 0.6), is_night);
-        fog_color = mix(fog_color, horizon_color, sky_blend);
+        // Base fog is tinted based on time of day
+        let day_fog = vec3<f32>(0.75, 0.82, 0.92);   // Light blue-gray for day
+        let night_fog = vec3<f32>(0.08, 0.10, 0.15); // Very dark blue for night
+        let base_fog = mix(day_fog, night_fog, is_night);
+
+        // Blend fog color with ambient to match scene
+        fog_color = mix(base_fog, ambient * 1.5, 0.3);
+        fog_color = fog_color * (0.3 + scene_brightness * 0.7);
+
+        // For distant chunks, use alpha fadeout instead of fog color blend
+        // This makes chunks disappear rather than turn bright
+        alpha_fade = 1.0 - edge_fade * edge_fade; // Quadratic for smoother fade
+
+        // Only apply minimal atmospheric fog at distance (not the edge fade)
+        // The alpha fade handles the render distance transition
+        fog_factor = fog_factor * (1.0 - edge_fade * 0.8);
     }
 
+    // Apply atmospheric fog (subtle, distance-based)
     final_color = mix(final_color, fog_color, fog_factor);
 
-    return vec4<f32>(final_color, tex_color.a * in.fade_alpha);
+    return vec4<f32>(final_color, tex_color.a * in.fade_alpha * alpha_fade);
 }
 "#;
 
@@ -1674,9 +1690,9 @@ impl Default for WaterUniform {
     fn default() -> Self {
         Self {
             time: 0.0,
-            wave_speed: 0.45,           // Slightly faster for more life
+            wave_speed: 0.45,           // Gentle wave speed
             wave_scale: 8.0,
-            wave_strength: 0.09,        // Balanced - visible but won't clip terrain
+            wave_strength: 0.09,        // Subtle - visible but won't clip terrain
             // Natural water palette - desaturated blue-gray
             shallow_color: [0.38, 0.42, 0.44, 0.30],  // Near-neutral gray
             deep_color: [0.08, 0.14, 0.22, 0.70],     // Deep muted blue-gray

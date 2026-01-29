@@ -635,6 +635,9 @@ pub struct Chunk {
     light: Box<[u8; CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE]>,
     /// Optional water heightfield data - only allocated if chunk contains water
     water: Option<Box<ChunkWaterData>>,
+    /// Count of solid blocks for fast empty/full detection
+    /// Used to skip meshing for air-only chunks (solid_count == 0)
+    solid_count: u16,
 }
 
 impl Chunk {
@@ -643,6 +646,7 @@ impl Chunk {
             blocks: Box::new([Block::Air; CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE]),
             light: Box::new([0u8; CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE]),
             water: None,
+            solid_count: 0,
         }
     }
 
@@ -658,7 +662,19 @@ impl Chunk {
 
     #[inline]
     pub fn set_block(&mut self, x: usize, y: usize, z: usize, block: Block) {
-        self.blocks[Self::index(x, y, z)] = block;
+        let idx = Self::index(x, y, z);
+        let old_block = self.blocks[idx];
+
+        // Update solid count when solidity changes
+        let was_solid = old_block.is_solid();
+        let is_solid = block.is_solid();
+        if was_solid && !is_solid {
+            self.solid_count = self.solid_count.saturating_sub(1);
+        } else if !was_solid && is_solid {
+            self.solid_count = self.solid_count.saturating_add(1);
+        }
+
+        self.blocks[idx] = block;
     }
 
     /// Check if a block position is within chunk bounds
@@ -679,6 +695,35 @@ impl Chunk {
         } else {
             None
         }
+    }
+
+    // ============ SOLID COUNT METHODS (for mesh optimization) ============
+
+    /// Get count of solid blocks in this chunk
+    /// Used for fast empty chunk detection to skip meshing
+    #[inline]
+    pub fn solid_count(&self) -> u16 {
+        self.solid_count
+    }
+
+    /// Check if chunk is all air (no solid blocks)
+    /// When true, meshing can be skipped entirely
+    #[inline]
+    pub fn is_all_air(&self) -> bool {
+        self.solid_count == 0
+    }
+
+    /// Check if chunk is completely solid (all 4096 blocks solid)
+    /// Useful for detecting interior underground chunks
+    #[inline]
+    pub fn is_all_solid(&self) -> bool {
+        self.solid_count == (CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE) as u16
+    }
+
+    /// Recalculate solid count by scanning all blocks
+    /// Call after bulk operations that bypass set_block tracking
+    pub fn recalculate_solid_count(&mut self) {
+        self.solid_count = self.blocks.iter().filter(|b| b.is_solid()).count() as u16;
     }
 
     /// Iterator over all blocks with their positions

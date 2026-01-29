@@ -9,17 +9,17 @@ use crate::world::{ChunkMesh, ChunkPos, ChunkVertex};
 
 /// Size of a single chunk slot in vertices (max vertices per chunk)
 /// With greedy meshing, typical is ~1500 but complex terrain can hit ~4000
-const MAX_VERTICES_PER_CHUNK: u32 = 4096;
+pub const MAX_VERTICES_PER_CHUNK: u32 = 4096;
 
 /// Size of a single chunk slot in indices (max indices per chunk)
 /// Typically 6 indices per 4 vertices (quad), max ~6144
-const MAX_INDICES_PER_CHUNK: u32 = 8192;
+pub const MAX_INDICES_PER_CHUNK: u32 = 8192;
 
 /// Maximum number of chunk slots in the pool
 /// 2200 slots * 4096 verts * 28 bytes = 252MB vertex (under 256MB limit)
 /// 2200 slots * 8192 indices * 4 bytes = 72MB index
 /// (28-byte vertex now includes emergence_data field)
-const MAX_CHUNK_SLOTS: u32 = 2200;
+pub const MAX_CHUNK_SLOTS: u32 = 2200;
 
 /// Information about a chunk's location in the mega-buffer
 #[derive(Clone, Copy, Debug)]
@@ -87,6 +87,10 @@ pub struct ChunkPool {
 
     /// Number of draw commands in the indirect buffer (updated each frame)
     pub draw_count: u32,
+
+    /// Dirty flag for GPU culling - set when chunks added/removed
+    /// GPU culler checks this to know when to rebuild bounds buffer
+    bounds_dirty: bool,
 }
 
 impl ChunkPool {
@@ -127,7 +131,8 @@ impl ChunkPool {
         let indirect_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Chunk Pool Indirect Buffer"),
             size: indirect_buffer_size,
-            usage: wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_DST,
+            // STORAGE added for GPU culling compute shader to write draw commands
+            usage: wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
 
@@ -140,6 +145,7 @@ impl ChunkPool {
             next_slot: 0,
             mdi_available,
             draw_count: 0,
+            bounds_dirty: true, // Start dirty to force initial build
         }
     }
 
@@ -169,6 +175,7 @@ impl ChunkPool {
             // Remove from pool if it existed
             if let Some(slot) = self.chunk_slots.remove(&mesh.pos) {
                 self.free_slot(slot.slot_index);
+                self.bounds_dirty = true; // Chunk removed
             }
             return;
         }
@@ -209,12 +216,14 @@ impl ChunkPool {
             vertex_count: mesh.vertices.len() as u32,
             index_count: mesh.indices.len() as u32,
         });
+        self.bounds_dirty = true; // Chunk added/updated
     }
 
     /// Remove a chunk from the pool
     pub fn remove_chunk(&mut self, pos: ChunkPos) {
         if let Some(slot) = self.chunk_slots.remove(&pos) {
             self.free_slot(slot.slot_index);
+            self.bounds_dirty = true; // Chunk removed
         }
     }
 
@@ -290,5 +299,20 @@ impl ChunkPool {
     /// Check if pool is nearly full
     pub fn is_nearly_full(&self) -> bool {
         self.chunk_slots.len() >= (MAX_CHUNK_SLOTS as usize * 9 / 10)
+    }
+
+    /// Get reference to chunk slots map (for GPU culling)
+    pub fn slots(&self) -> &AHashMap<ChunkPos, ChunkSlot> {
+        &self.chunk_slots
+    }
+
+    /// Check if bounds buffer needs rebuild (chunks added/removed)
+    pub fn is_bounds_dirty(&self) -> bool {
+        self.bounds_dirty
+    }
+
+    /// Clear the bounds dirty flag after rebuilding
+    pub fn clear_bounds_dirty(&mut self) {
+        self.bounds_dirty = false;
     }
 }

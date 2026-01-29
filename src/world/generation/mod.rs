@@ -30,6 +30,14 @@ use ruins::RuinGenerator;
 use trees::{TreeGenerator, TreeNoise};
 use util::fast_hash_3d;
 
+use std::cell::RefCell;
+
+/// Thread-local cached TerrainGenerator to avoid recreating noise objects per-chunk
+/// Each worker thread maintains its own generator instance, reused across all chunk generations
+thread_local! {
+    static CACHED_GENERATOR: RefCell<Option<(u32, TerrainGenerator)>> = const { RefCell::new(None) };
+}
+
 /// Cached data for a single terrain column (x, z)
 /// Pre-computed once per column to avoid redundant noise calculations
 #[derive(Clone, Copy)]
@@ -44,8 +52,25 @@ struct ColumnCache {
 
 /// Generate a chunk at the given position with the specified seed
 pub fn generate_chunk_with_seed(pos: ChunkPos, seed: u64) -> Chunk {
+    // Use thread-local cached generator to avoid recreating noise objects per-chunk
+    // This provides significant speedup since noise initialization is expensive
+    CACHED_GENERATOR.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let seed32 = seed as u32;
+
+        // Create generator if not cached or seed changed
+        if cache.as_ref().map(|(s, _)| *s) != Some(seed32) {
+            *cache = Some((seed32, TerrainGenerator::new(seed32)));
+        }
+
+        let generator = &cache.as_ref().unwrap().1;
+        generate_chunk_with_generator(pos, generator)
+    })
+}
+
+/// Internal function that generates a chunk using a pre-existing generator
+fn generate_chunk_with_generator(pos: ChunkPos, generator: &TerrainGenerator) -> Chunk {
     let mut chunk = Chunk::new();
-    let generator = TerrainGenerator::new(seed as u32);
 
     let world_x = pos.x * CHUNK_SIZE_I32;
     let world_y = pos.y * CHUNK_SIZE_I32;
@@ -67,6 +92,23 @@ pub fn generate_chunk_with_seed(pos: ChunkPos, seed: u64) -> Chunk {
             let wz = world_z + z as i32;
             columns[z][x] = generator.compute_column_cache(wx, wz);
         }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // EARLY EXIT: Skip block generation for chunks entirely above terrain
+    // If chunk bottom is above max terrain height + max tree height, it's all air
+    // ═══════════════════════════════════════════════════════════════════════════
+    let max_terrain = columns.iter().flatten().map(|c| c.height).max().unwrap_or(0);
+    const MAX_TREE_HEIGHT: i32 = 20; // Tallest trees + some margin
+    const MAX_STRUCTURE_HEIGHT: i32 = 30; // Formations, ruins, etc.
+
+    if world_y > max_terrain + MAX_TREE_HEIGHT + MAX_STRUCTURE_HEIGHT
+        && world_y >= WATER_SEA_LEVEL
+    {
+        // Chunk is entirely above terrain and water - return empty (all air)
+        // Sky light calculation will set full sky light for all blocks
+        calculate_sky_light(&mut chunk, pos, &columns);
+        return chunk;
     }
 
     // Generate blocks using cached column data
@@ -96,7 +138,43 @@ pub fn generate_chunk_with_seed(pos: ChunkPos, seed: u64) -> Chunk {
     // Generate water heightfield data
     generator.generate_water_heightfield(&mut chunk, pos);
 
+    // Calculate sky light for this chunk
+    calculate_sky_light(&mut chunk, pos, &columns);
+
     chunk
+}
+
+/// Calculate sky light for a chunk based on actual block opacity
+/// Sky light propagates downward, attenuating through transparent blocks and blocked by solid blocks
+fn calculate_sky_light(chunk: &mut Chunk, _pos: ChunkPos, _columns: &[[ColumnCache; CHUNK_SIZE]; CHUNK_SIZE]) {
+    for z in 0..CHUNK_SIZE {
+        for x in 0..CHUNK_SIZE {
+            // Process from top to bottom of chunk
+            // Start with full sky light at the top
+            let mut current_sky_light: u8 = 15;
+
+            for y in (0..CHUNK_SIZE).rev() {
+                let block = chunk.get_block(x, y, z);
+
+                if block.is_solid() {
+                    // Solid blocks always have 0 sky light and block all light below
+                    chunk.set_sky_light(x, y, z, 0);
+                    current_sky_light = 0;
+                } else if block.is_light_transparent() {
+                    // Transparent blocks (air, water, etc.) receive current sky light
+                    chunk.set_sky_light(x, y, z, current_sky_light);
+                    // Sky light attenuates by 1 when passing through any transparent block
+                    // except air which doesn't attenuate sky light
+                    if block != super::chunk::Block::Air {
+                        current_sky_light = current_sky_light.saturating_sub(1);
+                    }
+                } else {
+                    // Non-solid, non-transparent (shouldn't happen, but handle it)
+                    chunk.set_sky_light(x, y, z, current_sky_light);
+                }
+            }
+        }
+    }
 }
 
 /// Generate a chunk at the given position (uses default seed for backwards compatibility)

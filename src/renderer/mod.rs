@@ -6,6 +6,7 @@ mod bloom;
 mod camera;
 mod chunk_pool;
 mod debug_overlay;
+mod gpu_culling;
 mod pipeline;
 mod texture;
 pub mod voxel_gi;
@@ -97,6 +98,13 @@ pub struct Renderer {
 
     // Chunk buffer pool for multi-draw indirect
     chunk_pool: ChunkPool,
+
+    // GPU frustum culling (compute shader based)
+    gpu_culler: gpu_culling::GpuCuller,
+    /// Whether to use GPU culling (can be toggled for comparison)
+    use_gpu_culling: bool,
+    /// Whether multi_draw_indexed_indirect_count is available
+    mdi_count_available: bool,
 
     // Water rendering
     water_pipeline: wgpu::RenderPipeline,
@@ -426,6 +434,18 @@ impl Renderer {
         let mdi_available = features_to_use.contains(wgpu::Features::MULTI_DRAW_INDIRECT);
         let chunk_pool = ChunkPool::new(&device, mdi_available);
 
+        // Create GPU frustum culler (compute shader based)
+        let mut gpu_culler = gpu_culling::GpuCuller::new(&device, &chunk_pool.indirect_buffer);
+        gpu_culler.rebuild_bind_group(&device, &chunk_pool.indirect_buffer);
+        let mdi_count_available = features_to_use.contains(wgpu::Features::MULTI_DRAW_INDIRECT_COUNT);
+        let use_gpu_culling = mdi_available && mdi_count_available; // Need both for GPU culling
+
+        if use_gpu_culling {
+            tracing::info!("GPU frustum culling enabled (compute shader)");
+        } else {
+            tracing::info!("Using CPU frustum culling");
+        }
+
         // === WATER RENDERING SETUP ===
         // Water needs light uniform visible in both vertex and fragment shaders
         let water_light_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -543,6 +563,9 @@ impl Renderer {
             outline_vertex_buffer,
             debug_overlay,
             chunk_pool,
+            gpu_culler,
+            use_gpu_culling,
+            mdi_count_available,
             water_pipeline,
             water_buffer,
             water_bind_group,
@@ -677,6 +700,15 @@ impl Renderer {
     /// Toggle volumetric light shafts on/off
     pub fn toggle_volumetrics(&mut self) -> bool {
         self.volumetrics.toggle()
+    }
+
+    /// Toggle GPU frustum culling on/off for A/B testing
+    pub fn toggle_gpu_culling(&mut self) -> bool {
+        // Only toggle if MDI count is available (required for GPU culling)
+        if self.mdi_count_available {
+            self.use_gpu_culling = !self.use_gpu_culling;
+        }
+        self.use_gpu_culling
     }
 
     /// Check if volumetrics are enabled
@@ -831,6 +863,31 @@ impl Renderer {
         let mut cull_elapsed = std::time::Duration::ZERO;
         let mut mdi_prep_elapsed = std::time::Duration::ZERO;
 
+        // ═══════════════════════════════════════════════════════════════════════════
+        // GPU FRUSTUM CULLING (compute pass - runs before render pass)
+        // Updates bounds buffer only when chunks change, then dispatches cull shader
+        // ═══════════════════════════════════════════════════════════════════════════
+        if self.use_gpu_culling && self.chunk_pool.mdi_available {
+            // Only rebuild bounds buffer when chunks have been added/removed
+            // This eliminates per-frame CPU iteration over all chunks
+            if self.chunk_pool.is_bounds_dirty() {
+                self.gpu_culler.update_bounds(&self.queue, self.chunk_pool.slots());
+                self.chunk_pool.clear_bounds_dirty();
+            }
+
+            // Extract frustum planes for GPU
+            let frustum_planes = frustum.planes_as_array();
+
+            // Run GPU culling compute shader
+            self.gpu_culler.cull(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                &frustum_planes,
+                crate::constants::CHUNK_SIZE_F32,
+            );
+        }
+
         // === MAIN RENDER PASS (render to scene texture for bloom) ===
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -872,61 +929,105 @@ impl Renderer {
             render_pass.set_bind_group(2, &self.light_bind_group, &[]);
             render_pass.set_bind_group(3, self.voxel_gi.bind_group(), &[]);
 
-            // Build list of visible chunk positions (frustum culled)
-            // Separate chunks that are in the pool vs need individual draws
+            // ═══════════════════════════════════════════════════════════════════════════
+            // FRUSTUM CULLING: Either GPU (compute shader) or CPU path
+            // GPU path: compute shader tests AABBs and writes indirect commands
+            // CPU path: iterate chunks on CPU and build command list
+            // ═══════════════════════════════════════════════════════════════════════════
             let cull_start = std::time::Instant::now();
             let mut pool_chunks: Vec<crate::world::ChunkPos> = Vec::with_capacity(3000);
             let mut individual_chunks: Vec<&crate::world::ChunkMesh> = Vec::with_capacity(500);
 
-            for chunk_mesh in world.visible_meshes() {
-                // Early skip: check if chunk is renderable before expensive frustum test
-                let in_pool = self.chunk_pool.mdi_available && self.chunk_pool.get_slot(&chunk_mesh.pos).is_some();
-                let has_gpu_mesh = chunk_mesh.gpu_mesh.is_some();
-
-                // Skip frustum test for non-renderable chunks
-                if !in_pool && !has_gpu_mesh {
-                    continue;
+            if self.use_gpu_culling && self.chunk_pool.mdi_available {
+                // GPU MODE: Only need to find non-pool chunks for CPU fallback rendering
+                // Pool chunks are handled entirely by GPU compute shader
+                for chunk_mesh in world.visible_meshes() {
+                    // Quick check: is this chunk NOT in pool but has GPU mesh?
+                    if chunk_mesh.gpu_mesh.is_some() && !self.chunk_pool.has_chunk(&chunk_mesh.pos) {
+                        // Non-pool chunk needs CPU frustum test
+                        let chunk_min = chunk_mesh.pos.world_origin();
+                        let chunk_max = chunk_min + glam::Vec3::splat(crate::constants::CHUNK_SIZE_F32);
+                        if frustum.test_aabb(chunk_min, chunk_max) {
+                            individual_chunks.push(chunk_mesh);
+                        } else {
+                            chunks_culled += 1;
+                        }
+                    }
                 }
+            } else {
+                // CPU MODE: Test all chunks with CPU frustum culling
+                for chunk_mesh in world.visible_meshes() {
+                    let in_pool = self.chunk_pool.mdi_available && self.chunk_pool.get_slot(&chunk_mesh.pos).is_some();
+                    let has_gpu_mesh = chunk_mesh.gpu_mesh.is_some();
 
-                let chunk_min = chunk_mesh.pos.world_origin();
-                let chunk_max = chunk_min + glam::Vec3::splat(crate::constants::CHUNK_SIZE_F32);
+                    // Skip non-renderable chunks
+                    if !in_pool && !has_gpu_mesh {
+                        continue;
+                    }
 
-                if !frustum.test_aabb(chunk_min, chunk_max) {
-                    chunks_culled += 1;
-                    continue;
-                }
+                    // CPU frustum test
+                    let chunk_min = chunk_mesh.pos.world_origin();
+                    let chunk_max = chunk_min + glam::Vec3::splat(crate::constants::CHUNK_SIZE_F32);
 
-                // Chunk is visible - add to appropriate list
-                if in_pool {
-                    let slot = self.chunk_pool.get_slot(&chunk_mesh.pos).unwrap();
-                    pool_chunks.push(chunk_mesh.pos);
-                    triangles += slot.index_count / 3;
-                } else if has_gpu_mesh {
-                    individual_chunks.push(chunk_mesh);
+                    if !frustum.test_aabb(chunk_min, chunk_max) {
+                        chunks_culled += 1;
+                        continue;
+                    }
+
+                    // Chunk is visible
+                    if in_pool {
+                        if let Some(slot) = self.chunk_pool.get_slot(&chunk_mesh.pos) {
+                            pool_chunks.push(chunk_mesh.pos);
+                            triangles += slot.index_count / 3;
+                        }
+                    } else if has_gpu_mesh {
+                        individual_chunks.push(chunk_mesh);
+                    }
                 }
             }
             cull_elapsed = cull_start.elapsed();
 
-            // MDI pass: render all chunks that are in the pool
+            // MDI pass: render chunks from pool
             let mdi_prep_start = std::time::Instant::now();
-            if self.chunk_pool.mdi_available && !pool_chunks.is_empty() {
-                let draw_count = self.chunk_pool.prepare_indirect_draws(&self.queue, &pool_chunks);
 
-                if draw_count > 0 {
-                    render_pass.set_vertex_buffer(0, self.chunk_pool.vertex_buffer.slice(..));
-                    render_pass.set_index_buffer(
-                        self.chunk_pool.index_buffer.slice(..),
-                        wgpu::IndexFormat::Uint32,
-                    );
+            // CPU path: prepare indirect draws BEFORE setting render pass buffers (avoid borrow conflict)
+            let cpu_draw_count = if self.chunk_pool.mdi_available && !self.use_gpu_culling && !pool_chunks.is_empty() {
+                self.chunk_pool.prepare_indirect_draws(&self.queue, &pool_chunks)
+            } else {
+                0
+            };
+
+            if self.chunk_pool.mdi_available {
+                render_pass.set_vertex_buffer(0, self.chunk_pool.vertex_buffer.slice(..));
+                render_pass.set_index_buffer(
+                    self.chunk_pool.index_buffer.slice(..),
+                    wgpu::IndexFormat::Uint32,
+                );
+
+                if self.use_gpu_culling {
+                    // GPU path: use compute shader populated indirect buffer with count from GPU
+                    let max_draws = self.gpu_culler.chunk_count();
+                    if max_draws > 0 {
+                        render_pass.multi_draw_indexed_indirect_count(
+                            &self.chunk_pool.indirect_buffer,
+                            0,
+                            self.gpu_culler.count_buffer(),
+                            0,
+                            max_draws,
+                        );
+                        // Note: actual rendered count comes from GPU, we use max as estimate
+                        chunks_rendered = max_draws;
+                    }
+                } else if cpu_draw_count > 0 {
+                    // CPU path: use CPU-built command list
                     render_pass.multi_draw_indexed_indirect(
                         &self.chunk_pool.indirect_buffer,
                         0,
-                        draw_count,
+                        cpu_draw_count,
                     );
-                    chunks_rendered += draw_count;
+                    chunks_rendered += cpu_draw_count;
                 }
             }
-
             mdi_prep_elapsed = mdi_prep_start.elapsed();
 
             // Individual pass: render chunks not in pool (overflow, oversized, etc.)

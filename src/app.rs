@@ -176,6 +176,14 @@ impl App {
                                 tracing::info!("Volumetric light shafts: OFF");
                             }
                         }
+                        KeyCode::KeyG if pressed => {
+                            let enabled = self.renderer.toggle_gpu_culling();
+                            if enabled {
+                                tracing::info!("GPU frustum culling: ON (compute shader)");
+                            } else {
+                                tracing::info!("GPU frustum culling: OFF (CPU fallback)");
+                            }
+                        }
                         KeyCode::KeyP if pressed => {
                             self.profiler.toggle_verbose();
                         }
