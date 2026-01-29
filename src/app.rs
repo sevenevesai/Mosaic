@@ -184,6 +184,14 @@ impl App {
                                 tracing::info!("GPU frustum culling: OFF (CPU fallback)");
                             }
                         }
+                        KeyCode::KeyB if pressed => {
+                            let enabled = self.renderer.toggle_gpu_voxel_fill();
+                            if enabled {
+                                tracing::info!("GPU voxel fill: ON (compute shader)");
+                            } else {
+                                tracing::info!("GPU voxel fill: OFF (CPU fallback)");
+                            }
+                        }
                         KeyCode::KeyP if pressed => {
                             self.profiler.toggle_verbose();
                         }

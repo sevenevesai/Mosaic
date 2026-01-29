@@ -711,6 +711,13 @@ impl Renderer {
         self.use_gpu_culling
     }
 
+    /// Toggle GPU voxel fill on/off for A/B testing
+    pub fn toggle_gpu_voxel_fill(&mut self) -> bool {
+        let new_state = !self.voxel_gi.is_gpu_fill_enabled();
+        self.voxel_gi.set_use_gpu_fill(new_state);
+        new_state
+    }
+
     /// Check if volumetrics are enabled
     pub fn volumetrics_enabled(&self) -> bool {
         self.volumetrics.enabled
@@ -808,24 +815,6 @@ impl Renderer {
 
         let uniforms_elapsed = uniforms_start.elapsed();
 
-        // === VOXEL GI UPDATE ===
-        // Update the voxel volume texture from chunk data
-        let voxel_gi_start = std::time::Instant::now();
-        let chunks = world.chunks();
-        self.voxel_gi.update_from_chunks(
-            &self.queue,
-            camera.position,
-            &chunks,
-            cycle.sun_direction,
-            cycle.sun_color,
-            cycle.ambient,
-            self.time_of_day,
-            self.shadow_mode,
-            self.shadow_debug,
-            held_light_emission,  // Player's held torch light
-        );
-        let voxel_gi_elapsed = voxel_gi_start.elapsed();
-
         // Build frustum for culling
         let frustum = Frustum::from_view_proj(camera.view_projection_matrix());
 
@@ -840,6 +829,41 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("Render Encoder"),
             });
+
+        // === VOXEL GI UPDATE ===
+        // Update the voxel volume texture from chunk data
+        let voxel_gi_start = std::time::Instant::now();
+        let chunks = world.chunks();
+
+        // Use GPU fill for full refresh if enabled, CPU for incremental/fallback
+        if self.voxel_gi.is_gpu_fill_enabled() && self.voxel_gi.needs_gpu_refresh(camera.position) {
+            // GPU compute path - clears and fills voxel volume via compute shaders
+            self.voxel_gi.gpu_fill_volume(
+                &self.device,
+                &mut encoder,
+                &self.queue,
+                &chunks,
+                camera.position,
+            );
+        }
+
+        // Always call update_from_chunks for:
+        // - Uniform updates (sun direction, colors, time of day)
+        // - Incremental dirty block updates
+        // - Full CPU refresh if GPU fill is disabled
+        self.voxel_gi.update_from_chunks(
+            &self.queue,
+            camera.position,
+            &chunks,
+            cycle.sun_direction,
+            cycle.sun_color,
+            cycle.ambient,
+            self.time_of_day,
+            self.shadow_mode,
+            self.shadow_debug,
+            held_light_emission,
+        );
+        let voxel_gi_elapsed = voxel_gi_start.elapsed();
 
         // Prepare timestamp writes for GPU profiling
         let timestamp_writes = self.gpu_profiler.query_set().map(|qs| {

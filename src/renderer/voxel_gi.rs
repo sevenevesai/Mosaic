@@ -120,6 +120,49 @@ struct DirtyBlock {
 /// With incremental updates, each block only affects a small region
 const MAX_DIRTY_BLOCKS: usize = 64;
 
+/// Maximum chunks that can overlap the 256^3 voxel volume
+/// Volume spans 16 chunks per axis, but can straddle boundaries → 17 max
+const MAX_OVERLAPPING_CHUNKS: u32 = 512;
+
+/// GPU-side chunk metadata for voxel filling
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct GpuChunkMetadata {
+    /// World origin of chunk (chunk_pos * 16)
+    world_origin: [i32; 3],
+    /// Index into block data buffer (chunk_index * 4096)
+    chunk_index: u32,
+}
+
+/// Uniforms for voxel fill compute shader
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct VoxelFillUniforms {
+    /// Center of the voxel volume in world coordinates
+    volume_center: [i32; 4],  // w unused, for alignment
+    /// Minimum chunk position (for lookup texture indexing)
+    min_chunk_pos: [i32; 4],  // w = num_chunks
+}
+
+/// GPU Clear pipeline resources
+struct VoxelClearPipeline {
+    pipeline: wgpu::ComputePipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+    bind_group: wgpu::BindGroup,
+}
+
+/// GPU Voxel Fill pipeline resources
+struct VoxelFillPipeline {
+    pipeline: wgpu::ComputePipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+    uniform_buffer: wgpu::Buffer,
+    chunk_metadata_buffer: wgpu::Buffer,
+    chunk_blocks_buffer: wgpu::Buffer,
+    chunk_lookup_texture: wgpu::Texture,
+    chunk_lookup_view: wgpu::TextureView,
+    bind_group: Option<wgpu::BindGroup>,
+}
+
 /// Manages the 3D voxel volume for GI calculations
 pub struct VoxelGI {
     /// 3D texture storing voxel opacity/emissive data
@@ -164,6 +207,13 @@ pub struct VoxelGI {
     staging_buffer: wgpu::Buffer,
     /// CPU-side voxel data cache
     voxel_cache: Vec<u8>,
+
+    /// GPU compute pipeline for clearing voxel volume
+    clear_pipeline: VoxelClearPipeline,
+    /// GPU compute pipeline for filling voxel volume from chunks
+    fill_pipeline: VoxelFillPipeline,
+    /// Whether to use GPU fill (true) or CPU fill (false) - for A/B testing
+    use_gpu_fill: bool,
 }
 
 impl VoxelGI {
@@ -308,10 +358,14 @@ impl VoxelGI {
             ],
         });
 
-        // Create compute pipelines
+        // Create compute pipelines (placeholders)
         let update_pipeline = Self::create_update_pipeline(device, &bind_group_layout);
         let propagate_pipeline = Self::create_propagate_pipeline(device, &bind_group_layout);
         let mipmap_pipeline = Self::create_mipmap_pipeline(device, &bind_group_layout);
+
+        // Create GPU clear and fill pipelines
+        let clear_pipeline = Self::create_clear_pipeline(device, &voxel_texture_view);
+        let fill_pipeline = Self::create_fill_pipeline(device, &voxel_texture_view);
 
         // Create staging buffer for CPU uploads
         let staging_size = (VOXEL_VOLUME_SIZE * VOXEL_VOLUME_SIZE * VOXEL_VOLUME_SIZE * 4) as usize;
@@ -341,6 +395,9 @@ impl VoxelGI {
             dirty_blocks: Vec::with_capacity(MAX_DIRTY_BLOCKS),
             staging_buffer,
             voxel_cache: vec![0u8; staging_size],
+            clear_pipeline,
+            fill_pipeline,
+            use_gpu_fill: true, // Enable GPU fill by default
         }
     }
 
@@ -420,6 +477,198 @@ impl VoxelGI {
             module: &shader,
             entry_point: "main",
         })
+    }
+
+    /// Create the GPU clear pipeline
+    fn create_clear_pipeline(device: &wgpu::Device, voxel_texture_view: &wgpu::TextureView) -> VoxelClearPipeline {
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Voxel Clear Bind Group Layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Voxel Clear Bind Group"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(voxel_texture_view),
+                },
+            ],
+        });
+
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Voxel Clear Shader"),
+            source: wgpu::ShaderSource::Wgsl(VOXEL_CLEAR_SHADER.into()),
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Voxel Clear Pipeline Layout"),
+            bind_group_layouts: &[&bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Voxel Clear Pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &shader,
+            entry_point: "main",
+        });
+
+        VoxelClearPipeline {
+            pipeline,
+            bind_group_layout,
+            bind_group,
+        }
+    }
+
+    /// Create the GPU voxel fill pipeline
+    fn create_fill_pipeline(device: &wgpu::Device, voxel_texture_view: &wgpu::TextureView) -> VoxelFillPipeline {
+        use std::num::NonZeroU64;
+
+        // Create bind group layout
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Voxel Fill Bind Group Layout"),
+            entries: &[
+                // Binding 0: Output voxel volume (write)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                    },
+                    count: None,
+                },
+                // Binding 1: Uniforms
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(std::mem::size_of::<VoxelFillUniforms>() as u64),
+                    },
+                    count: None,
+                },
+                // Binding 2: Chunk metadata array (read)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // Binding 3: Chunk block data (read)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // Binding 4: Chunk lookup texture (17x17x17)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Uint,
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        // Create uniform buffer
+        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Voxel Fill Uniforms"),
+            size: std::mem::size_of::<VoxelFillUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // Create chunk metadata buffer (512 chunks * 16 bytes = 8KB)
+        let chunk_metadata_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Chunk Metadata Buffer"),
+            size: (MAX_OVERLAPPING_CHUNKS as usize * std::mem::size_of::<GpuChunkMetadata>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // Create chunk blocks buffer (512 chunks * 4096 bytes = 2MB)
+        let chunk_blocks_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Chunk Blocks Buffer"),
+            size: (MAX_OVERLAPPING_CHUNKS as usize * 4096) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // Create 17x17x17 chunk lookup texture (R32Uint)
+        let chunk_lookup_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Chunk Lookup Texture"),
+            size: wgpu::Extent3d {
+                width: 17,
+                height: 17,
+                depth_or_array_layers: 17,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D3,
+            format: wgpu::TextureFormat::R32Uint,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let chunk_lookup_view = chunk_lookup_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Create shader and pipeline
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Voxel Fill Shader"),
+            source: wgpu::ShaderSource::Wgsl(VOXEL_FILL_SHADER.into()),
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Voxel Fill Pipeline Layout"),
+            bind_group_layouts: &[&bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Voxel Fill Pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &shader,
+            entry_point: "main",
+        });
+
+        VoxelFillPipeline {
+            pipeline,
+            bind_group_layout,
+            uniform_buffer,
+            chunk_metadata_buffer,
+            chunk_blocks_buffer,
+            chunk_lookup_texture,
+            chunk_lookup_view,
+            bind_group: None, // Created when we have all resources bound
+        }
     }
 
     /// Update the voxel volume from chunk data
@@ -566,6 +815,266 @@ impl VoxelGI {
             player_light: [player_pos.x, player_pos.y, player_pos.z, held_light_emission as f32 / 15.0],
         };
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniform]));
+    }
+
+    /// Execute GPU voxel fill using compute shaders
+    /// This replaces the CPU fill_voxel_cache path for better performance
+    pub fn gpu_fill_volume(
+        &mut self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        queue: &wgpu::Queue,
+        chunks: &Arc<RwLock<AHashMap<ChunkPos, Arc<Chunk>>>>,
+        camera_pos: Vec3,
+    ) {
+        use glam::IVec3;
+
+        let fill_start = std::time::Instant::now();
+
+        // Snap camera to block coordinates for volume center
+        let volume_center = IVec3::new(
+            camera_pos.x.floor() as i32,
+            camera_pos.y.floor() as i32,
+            camera_pos.z.floor() as i32,
+        );
+
+        // Upload chunk data to GPU
+        let upload_start = std::time::Instant::now();
+        let (num_chunks, min_chunk_pos) = self.upload_chunk_data_for_gpu(device, queue, chunks, volume_center);
+        let upload_time = upload_start.elapsed();
+
+        if num_chunks == 0 {
+            tracing::warn!("GPU voxel fill: no chunks to process");
+            return;
+        }
+
+        // Create bind group with all resources
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Voxel Fill Bind Group"),
+            layout: &self.fill_pipeline.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&self.voxel_texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.fill_pipeline.uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.fill_pipeline.chunk_metadata_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.fill_pipeline.chunk_blocks_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&self.fill_pipeline.chunk_lookup_view),
+                },
+            ],
+        });
+
+        // Clear pass first
+        {
+            let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Voxel Clear Pass"),
+                timestamp_writes: None,
+            });
+            compute_pass.set_pipeline(&self.clear_pipeline.pipeline);
+            compute_pass.set_bind_group(0, &self.clear_pipeline.bind_group, &[]);
+            // 256 / 4 = 64 workgroups per dimension
+            compute_pass.dispatch_workgroups(64, 64, 64);
+        }
+
+        // Fill pass
+        {
+            let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Voxel Fill Pass"),
+                timestamp_writes: None,
+            });
+            compute_pass.set_pipeline(&self.fill_pipeline.pipeline);
+            compute_pass.set_bind_group(0, &bind_group, &[]);
+            // 256 / 4 = 64 workgroups per dimension
+            compute_pass.dispatch_workgroups(64, 64, 64);
+        }
+
+        // Update tracking
+        self.volume_center = Vec3::new(volume_center.x as f32, volume_center.y as f32, volume_center.z as f32);
+        self.last_update_center = self.volume_center;
+        self.initialized = true;
+        self.force_full_update = false;
+        self.dirty_blocks.clear();
+
+        let fill_time = fill_start.elapsed();
+        tracing::info!(
+            "GPU voxel fill: upload={:.2}ms, total={:.2}ms | {} chunks, center=({},{},{})",
+            upload_time.as_secs_f64() * 1000.0,
+            fill_time.as_secs_f64() * 1000.0,
+            num_chunks,
+            volume_center.x, volume_center.y, volume_center.z
+        );
+    }
+
+    /// Upload chunk data to GPU buffers for compute shader processing
+    /// Returns (num_chunks, min_chunk_pos)
+    fn upload_chunk_data_for_gpu(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        chunks: &Arc<RwLock<AHashMap<ChunkPos, Arc<Chunk>>>>,
+        volume_center: glam::IVec3,
+    ) -> (u32, glam::IVec3) {
+        use glam::IVec3;
+
+        let half_size = 128i32;
+        let min_block = volume_center - IVec3::splat(half_size);
+        let max_block = volume_center + IVec3::splat(half_size - 1);
+
+        // Calculate chunk range that overlaps the volume
+        let min_chunk = IVec3::new(
+            min_block.x.div_euclid(CHUNK_SIZE_I32),
+            min_block.y.div_euclid(CHUNK_SIZE_I32),
+            min_block.z.div_euclid(CHUNK_SIZE_I32),
+        );
+        let max_chunk = IVec3::new(
+            max_block.x.div_euclid(CHUNK_SIZE_I32),
+            max_block.y.div_euclid(CHUNK_SIZE_I32),
+            max_block.z.div_euclid(CHUNK_SIZE_I32),
+        );
+
+        let mut metadata_vec: Vec<GpuChunkMetadata> = Vec::with_capacity(MAX_OVERLAPPING_CHUNKS as usize);
+        let mut blocks_vec: Vec<u8> = Vec::with_capacity(MAX_OVERLAPPING_CHUNKS as usize * 4096);
+
+        // 17x17x17 lookup texture data (filled with 0xFFFFFFFF = no chunk)
+        let lookup_size = 17 * 17 * 17;
+        let mut lookup_data: Vec<u32> = vec![0xFFFFFFFF; lookup_size];
+
+        let chunks_read = chunks.read();
+        let mut chunk_index = 0u32;
+
+        for cy in min_chunk.y..=max_chunk.y {
+            for cz in min_chunk.z..=max_chunk.z {
+                for cx in min_chunk.x..=max_chunk.x {
+                    let pos = ChunkPos { x: cx, y: cy, z: cz };
+
+                    if let Some(chunk) = chunks_read.get(&pos) {
+                        // Add metadata
+                        let world_origin = [cx * CHUNK_SIZE_I32, cy * CHUNK_SIZE_I32, cz * CHUNK_SIZE_I32];
+                        metadata_vec.push(GpuChunkMetadata {
+                            world_origin,
+                            chunk_index,
+                        });
+
+                        // Add block data (copy raw bytes in correct order)
+                        for lz in 0..16 {
+                            for ly in 0..16 {
+                                for lx in 0..16 {
+                                    let block = chunk.get_block(lx, ly, lz);
+                                    blocks_vec.push(block as u8);
+                                }
+                            }
+                        }
+
+                        // Update lookup texture
+                        let lx = (cx - min_chunk.x) as usize;
+                        let ly = (cy - min_chunk.y) as usize;
+                        let lz = (cz - min_chunk.z) as usize;
+                        if lx < 17 && ly < 17 && lz < 17 {
+                            let lookup_idx = lx + ly * 17 + lz * 17 * 17;
+                            lookup_data[lookup_idx] = chunk_index;
+                        }
+
+                        chunk_index += 1;
+
+                        if chunk_index >= MAX_OVERLAPPING_CHUNKS {
+                            break;
+                        }
+                    }
+                }
+                if chunk_index >= MAX_OVERLAPPING_CHUNKS { break; }
+            }
+            if chunk_index >= MAX_OVERLAPPING_CHUNKS { break; }
+        }
+        drop(chunks_read);
+
+        let num_chunks = metadata_vec.len() as u32;
+
+        // Upload uniforms
+        let uniforms = VoxelFillUniforms {
+            volume_center: [volume_center.x, volume_center.y, volume_center.z, 0],
+            min_chunk_pos: [min_chunk.x, min_chunk.y, min_chunk.z, num_chunks as i32],
+        };
+        queue.write_buffer(
+            &self.fill_pipeline.uniform_buffer,
+            0,
+            bytemuck::cast_slice(&[uniforms]),
+        );
+
+        // Upload metadata
+        if !metadata_vec.is_empty() {
+            queue.write_buffer(
+                &self.fill_pipeline.chunk_metadata_buffer,
+                0,
+                bytemuck::cast_slice(&metadata_vec),
+            );
+        }
+
+        // Upload block data
+        if !blocks_vec.is_empty() {
+            queue.write_buffer(
+                &self.fill_pipeline.chunk_blocks_buffer,
+                0,
+                &blocks_vec,
+            );
+        }
+
+        // Upload lookup texture
+        queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &self.fill_pipeline.chunk_lookup_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytemuck::cast_slice(&lookup_data),
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(17 * 4), // 17 pixels * 4 bytes per R32Uint
+                rows_per_image: Some(17),
+            },
+            wgpu::Extent3d {
+                width: 17,
+                height: 17,
+                depth_or_array_layers: 17,
+            },
+        );
+
+        (num_chunks, min_chunk)
+    }
+
+    /// Check if GPU fill is needed based on camera movement
+    pub fn needs_gpu_refresh(&self, camera_pos: Vec3) -> bool {
+        let current_center = Vec3::new(
+            camera_pos.x.floor(),
+            camera_pos.y.floor(),
+            camera_pos.z.floor(),
+        );
+
+        let delta = (current_center - self.last_update_center).abs();
+        !self.initialized || delta.x >= 48.0 || delta.y >= 48.0 || delta.z >= 48.0 || self.force_full_update
+    }
+
+    /// Toggle between GPU and CPU fill modes
+    pub fn set_use_gpu_fill(&mut self, use_gpu: bool) {
+        self.use_gpu_fill = use_gpu;
+        tracing::info!("Voxel fill mode: {}", if use_gpu { "GPU" } else { "CPU" });
+    }
+
+    /// Get current fill mode
+    pub fn is_gpu_fill_enabled(&self) -> bool {
+        self.use_gpu_fill
     }
 
     fn fill_voxel_cache(&mut self, chunks: &Arc<RwLock<AHashMap<ChunkPos, Arc<Chunk>>>>, time_of_day: f32, center: Vec3) {
@@ -1100,5 +1609,171 @@ const VOXEL_MIPMAP_SHADER: &str = r#"
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // Placeholder for mipmap generation
     // Will be needed for cone tracing
+}
+"#;
+
+// Compute shader for clearing voxel volume to zero
+const VOXEL_CLEAR_SHADER: &str = r#"
+@group(0) @binding(0) var voxel_volume: texture_storage_3d<rgba8unorm, write>;
+
+@compute @workgroup_size(4, 4, 4)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    // Bounds check for 256^3 volume
+    if (global_id.x >= 256u || global_id.y >= 256u || global_id.z >= 256u) {
+        return;
+    }
+
+    textureStore(voxel_volume, vec3<i32>(global_id), vec4<f32>(0.0, 0.0, 0.0, 0.0));
+}
+"#;
+
+// Compute shader for filling voxel volume from chunk data
+const VOXEL_FILL_SHADER: &str = r#"
+struct VoxelFillUniforms {
+    volume_center: vec4<i32>,   // xyz = center, w unused
+    min_chunk_pos: vec4<i32>,   // xyz = min chunk pos, w = num_chunks
+}
+
+struct ChunkMetadata {
+    world_origin: vec3<i32>,
+    chunk_index: u32,
+}
+
+@group(0) @binding(0) var voxel_volume: texture_storage_3d<rgba8unorm, write>;
+@group(0) @binding(1) var<uniform> uniforms: VoxelFillUniforms;
+@group(0) @binding(2) var<storage, read> chunk_metadata: array<ChunkMetadata>;
+@group(0) @binding(3) var<storage, read> chunk_blocks: array<u32>;
+@group(0) @binding(4) var chunk_lookup: texture_3d<u32>;
+
+// Block type constants (matching Block enum in chunk.rs)
+const BLOCK_AIR: u32 = 0u;
+const BLOCK_WATER: u32 = 6u;
+const BLOCK_LEAVES: u32 = 8u;
+const BLOCK_TORCH: u32 = 15u;
+const BLOCK_URANIUM_ORE: u32 = 28u;
+const BLOCK_JUNGLE_LEAVES: u32 = 40u;
+const BLOCK_VINES: u32 = 41u;
+const BLOCK_CRYSTAL_AMETHYST: u32 = 48u;
+const BLOCK_CRYSTAL_QUARTZ: u32 = 49u;
+const BLOCK_DEAD_BUSH: u32 = 51u;
+const BLOCK_SPRUCE_LEAVES: u32 = 54u;
+
+// Read a single byte from the packed u32 array
+// Chunk blocks are packed as 4096 bytes = 1024 u32s per chunk
+fn read_block(chunk_index: u32, local_x: u32, local_y: u32, local_z: u32) -> u32 {
+    let block_index = local_x + local_y * 16u + local_z * 256u;
+    let buffer_offset = chunk_index * 1024u + block_index / 4u;
+    let byte_offset = block_index % 4u;
+
+    let packed = chunk_blocks[buffer_offset];
+    return (packed >> (byte_offset * 8u)) & 0xFFu;
+}
+
+// Convert block type to voxel data: (opacity, emissive, material, flags)
+fn get_voxel_data(block_type: u32) -> vec4<f32> {
+    var opacity: f32 = 0.0;
+    var emissive: f32 = 0.0;
+    var material: f32 = 0.0;
+
+    // Handle special cases using if-else chain (WGSL switch doesn't support multiple case values)
+    if (block_type == BLOCK_AIR) {
+        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    } else if (block_type == BLOCK_WATER) {
+        opacity = 64.0 / 255.0;
+        material = 2.0 / 255.0;
+    } else if (block_type == BLOCK_TORCH) {
+        emissive = 220.0 / 255.0;  // Light level 14
+        material = 3.0 / 255.0;
+    } else if (block_type == BLOCK_LEAVES || block_type == BLOCK_JUNGLE_LEAVES ||
+               block_type == BLOCK_SPRUCE_LEAVES || block_type == BLOCK_VINES ||
+               block_type == BLOCK_DEAD_BUSH) {
+        opacity = 192.0 / 255.0;  // Semi-transparent foliage
+        material = 4.0 / 255.0;
+    } else if (block_type == BLOCK_URANIUM_ORE) {
+        opacity = 1.0;
+        emissive = 125.0 / 255.0;  // Light level 8
+        material = 1.0 / 255.0;
+    } else if (block_type == BLOCK_CRYSTAL_AMETHYST) {
+        opacity = 192.0 / 255.0;
+        emissive = 157.0 / 255.0;  // Light level 10
+        material = 5.0 / 255.0;
+    } else if (block_type == BLOCK_CRYSTAL_QUARTZ) {
+        opacity = 192.0 / 255.0;
+        emissive = 188.0 / 255.0;  // Light level 12
+        material = 6.0 / 255.0;
+    } else {
+        // All other blocks are solid
+        opacity = 1.0;
+        material = 1.0 / 255.0;
+    }
+
+    return vec4<f32>(opacity, emissive, material, 0.0);
+}
+
+// Integer division that rounds toward negative infinity (like Rust's div_euclid)
+fn div_floor(a: i32, b: i32) -> i32 {
+    let d = a / b;
+    let r = a % b;
+    // If remainder is non-zero and signs differ, subtract 1
+    if (r != 0 && ((a < 0) != (b < 0))) {
+        return d - 1;
+    }
+    return d;
+}
+
+@compute @workgroup_size(4, 4, 4)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let voxel_coords = vec3<i32>(global_id);
+
+    // Bounds check for 256^3 volume
+    if (voxel_coords.x >= 256 || voxel_coords.y >= 256 || voxel_coords.z >= 256) {
+        return;
+    }
+
+    // Convert voxel coords to world coords
+    // Volume extends from (center - 128) to (center + 127)
+    let world_pos = voxel_coords + uniforms.volume_center.xyz - vec3<i32>(128);
+
+    // Calculate which chunk contains this world position
+    let chunk_pos = vec3<i32>(
+        div_floor(world_pos.x, 16),
+        div_floor(world_pos.y, 16),
+        div_floor(world_pos.z, 16)
+    );
+
+    // Convert to lookup texture coordinates
+    let lookup_coords = chunk_pos - uniforms.min_chunk_pos.xyz;
+
+    // Bounds check for lookup texture (17x17x17)
+    if (lookup_coords.x < 0 || lookup_coords.x >= 17 ||
+        lookup_coords.y < 0 || lookup_coords.y >= 17 ||
+        lookup_coords.z < 0 || lookup_coords.z >= 17) {
+        textureStore(voxel_volume, voxel_coords, vec4<f32>(0.0, 0.0, 0.0, 0.0));
+        return;
+    }
+
+    // Look up chunk index
+    let chunk_index = textureLoad(chunk_lookup, lookup_coords, 0).r;
+
+    // 0xFFFFFFFF means no chunk at this position
+    if (chunk_index == 0xFFFFFFFFu) {
+        textureStore(voxel_volume, voxel_coords, vec4<f32>(0.0, 0.0, 0.0, 0.0));
+        return;
+    }
+
+    // Calculate local position within chunk (0-15)
+    let chunk_origin = chunk_pos * 16;
+    let local_pos = vec3<u32>(
+        u32(world_pos.x - chunk_origin.x),
+        u32(world_pos.y - chunk_origin.y),
+        u32(world_pos.z - chunk_origin.z)
+    );
+
+    // Read block type from chunk data
+    let block_type = read_block(chunk_index, local_pos.x, local_pos.y, local_pos.z);
+
+    // Convert to voxel data and store
+    let voxel_data = get_voxel_data(block_type);
+    textureStore(voxel_volume, voxel_coords, voxel_data);
 }
 "#;
