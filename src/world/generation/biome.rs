@@ -228,20 +228,23 @@ impl BiomeRegistry {
     }
 
     /// Select biome based on temperature and humidity (Whittaker-style)
-    fn select_biome(&self, temp: f64, _humidity: f64, _is_mountain: bool) -> BiomeId {
-        // SIMPLIFIED: Grasslands, CavernousHighlands, and Tundra
-
-        // Cold regions -> Tundra (~20%)
+    fn select_biome(&self, temp: f64, humidity: f64, _is_mountain: bool) -> BiomeId {
+        // Cold regions -> Tundra (~15%)
         if temp < -0.3 {
             return BiomeId::Tundra;
         }
 
-        // Warm regions -> Cavernous Highlands (~20%)
+        // Hot + Humid -> Jungle (dense forest for testing shadows) (~20%)
+        if temp > 0.3 && humidity > 0.2 {
+            return BiomeId::Jungle;
+        }
+
+        // Warm/dry regions -> Cavernous Highlands (~15%)
         if temp > 0.4 {
             return BiomeId::CavernousHighlands;
         }
 
-        // Default -> Grasslands (~60%)
+        // Default -> Grasslands (~50%)
         BiomeId::Grasslands
     }
 

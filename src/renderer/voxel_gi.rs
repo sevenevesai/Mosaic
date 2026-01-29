@@ -423,8 +423,9 @@ impl VoxelGI {
     }
 
     /// Update the voxel volume from chunk data
-    /// Supports two modes:
+    /// Supports three modes:
     /// - Full update: When camera moves significantly or on initialization
+    /// - Scroll update: When camera moves moderately (only update new slabs)
     /// - Incremental update: When individual blocks change (much faster)
     pub fn update_from_chunks(
         &mut self,
@@ -447,7 +448,9 @@ impl VoxelGI {
         );
 
         // Check if we need a full refresh (camera moved or first time)
-        let move_threshold = 24.0;
+        // Increased threshold from 24 to 48 blocks - reduces full refresh frequency
+        // Volume is 256 wide (128 radius), so 48 blocks = 37% shift is acceptable
+        let move_threshold = 48.0;
         let distance_moved = (snapped_center - self.last_update_center).length();
         let needs_full_refresh = !self.initialized || distance_moved >= move_threshold || self.force_full_update;
 

@@ -410,7 +410,7 @@ fn is_in_volume(uv: vec3<f32>) -> bool {
 // SHADOW MODE: HARD (new style - solid fill, sharp edges)
 // ═══════════════════════════════════════════════════════════════════════════
 fn ray_march_shadow_hard(world_pos: vec3<f32>, light_dir: vec3<f32>) -> f32 {
-    let max_steps = 128;  // More steps for longer shadows
+    let max_steps = 112;  // Slightly reduced from 128, but not too aggressive
 
     var accumulated_opacity = 0.0;
     var solid_hits = 0;
@@ -420,16 +420,13 @@ fn ray_march_shadow_hard(world_pos: vec3<f32>, light_dir: vec3<f32>) -> f32 {
 
     for (var i = 0; i < max_steps; i++) {
         // Adaptive step size: small near (accuracy), larger far (range)
-        // First 8 steps: 0.25 (2 blocks total)
-        // Next 24 steps: 0.5 (12 blocks total = 14)
-        // Next 32 steps: 1.0 (32 blocks total = 46)
-        // Remaining 64 steps: 2.0 (128 blocks total = 174 max range)
+        // Optimized step progression while maintaining accuracy
         var current_step: f32;
-        if (i < 8) {
+        if (i < 6) {
             current_step = 0.25;  // Fine detail near surface
-        } else if (i < 32) {
+        } else if (i < 24) {
             current_step = 0.5;   // Medium detail
-        } else if (i < 64) {
+        } else if (i < 56) {
             current_step = 1.0;   // Coarse
         } else {
             current_step = 2.0;   // Very coarse for long shadows
@@ -453,11 +450,14 @@ fn ray_march_shadow_hard(world_pos: vec3<f32>, light_dir: vec3<f32>) -> f32 {
         if (opacity > 0.5) {
             solid_hits += 1;
             accumulated_opacity += 0.4;
+            // EARLY EXIT: Fully occluded after 3 solid hits (was continuing indefinitely)
+            if (solid_hits >= 3) { break; }
         } else if (opacity > 0.1) {
             accumulated_opacity += opacity * 0.2;
         }
 
-        if (accumulated_opacity >= 1.2) { break; }
+        // Early exit when clearly in shadow
+        if (accumulated_opacity >= 1.1) { break; }
     }
 
     var shadow: f32;
@@ -482,23 +482,24 @@ fn ray_march_shadow_hard(world_pos: vec3<f32>, light_dir: vec3<f32>) -> f32 {
 // SHADOW MODE: SOFT (old style - gradient, painterly)
 // ═══════════════════════════════════════════════════════════════════════════
 fn ray_march_shadow_soft_core(world_pos: vec3<f32>, light_dir: vec3<f32>) -> f32 {
-    let max_steps = 96;  // More steps for longer shadows
+    let max_steps = 64;  // Reduced from 96 - early termination handles dense scenes
 
     var accumulated_opacity = 0.0;
     var min_distance_to_occluder = 1000.0;
+    var solid_hits = 0;
 
     var pos = world_pos + light_dir * 0.5;
     var total_distance = 0.5;
 
     for (var i = 0; i < max_steps; i++) {
-        // Adaptive step size for longer range
+        // Optimized adaptive step size - faster progression
         var step_size: f32;
-        if (i < 16) {
+        if (i < 8) {
             step_size = 0.5;
-        } else if (i < 48) {
-            step_size = 1.0;
+        } else if (i < 32) {
+            step_size = 1.5;
         } else {
-            step_size = 2.0;
+            step_size = 3.0;
         }
 
         pos += light_dir * step_size;
@@ -516,13 +517,22 @@ fn ray_march_shadow_soft_core(world_pos: vec3<f32>, light_dir: vec3<f32>) -> f32
         let voxel = textureSampleLevel(t_voxel, s_voxel, uv, 0.0);
         let opacity = voxel.r * edge_fade;
 
-        if (opacity > 0.3 && min_distance_to_occluder > 999.0) {
-            min_distance_to_occluder = total_distance;
+        if (opacity > 0.3) {
+            if (min_distance_to_occluder > 999.0) {
+                min_distance_to_occluder = total_distance;
+            }
+            solid_hits += 1;
+            // EARLY EXIT: Fully occluded after hitting 3 solid voxels
+            if (solid_hits >= 3) {
+                accumulated_opacity = 1.0;
+                break;
+            }
         }
 
-        accumulated_opacity += opacity * 0.15;
+        accumulated_opacity += opacity * 0.2;  // Faster accumulation
 
-        if (accumulated_opacity >= 1.0) { break; }
+        // AGGRESSIVE EARLY EXIT
+        if (accumulated_opacity >= 0.85) { break; }
     }
 
     var shadow = 1.0 - clamp(accumulated_opacity, 0.0, 1.0);
@@ -535,7 +545,8 @@ fn ray_march_shadow_soft_core(world_pos: vec3<f32>, light_dir: vec3<f32>) -> f32
     return shadow;
 }
 
-// Multi-tap soft shadow (old style)
+// Multi-tap soft shadow - optimized 2-tap version (was 4-tap)
+// 2 taps provides good softness while halving the shadow ray cost
 fn ray_march_shadow_soft_multitap(world_pos: vec3<f32>, light_dir: vec3<f32>, softness: f32) -> f32 {
     var tangent: vec3<f32>;
     if (abs(light_dir.y) < 0.9) {
@@ -545,28 +556,23 @@ fn ray_march_shadow_soft_multitap(world_pos: vec3<f32>, light_dir: vec3<f32>, so
     }
     let bitangent = cross(light_dir, tangent);
 
-    let jitter_scale = softness * 1.5;
-
-    let o0 = vec2<f32>(-0.7, -0.3) * jitter_scale;
-    let o1 = vec2<f32>( 0.5, -0.6) * jitter_scale;
-    let o2 = vec2<f32>(-0.4,  0.7) * jitter_scale;
-    let o3 = vec2<f32>( 0.6,  0.4) * jitter_scale;
+    // Optimized 2-tap: diagonal offsets for best coverage
+    let jitter_scale = softness * 1.2;  // Slightly reduced for 2-tap
+    let o0 = vec2<f32>(-0.6, -0.4) * jitter_scale;
+    let o1 = vec2<f32>( 0.6,  0.4) * jitter_scale;
 
     let d0 = normalize(light_dir + tangent * o0.x + bitangent * o0.y);
     let d1 = normalize(light_dir + tangent * o1.x + bitangent * o1.y);
-    let d2 = normalize(light_dir + tangent * o2.x + bitangent * o2.y);
-    let d3 = normalize(light_dir + tangent * o3.x + bitangent * o3.y);
 
+    // 2 taps instead of 4 - still smooth, half the cost
     let shadow_sum = ray_march_shadow_soft_core(world_pos, d0)
-                   + ray_march_shadow_soft_core(world_pos, d1)
-                   + ray_march_shadow_soft_core(world_pos, d2)
-                   + ray_march_shadow_soft_core(world_pos, d3);
+                   + ray_march_shadow_soft_core(world_pos, d1);
 
-    return shadow_sum * 0.25;
+    return shadow_sum * 0.5;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// UNIFIED SHADOW FUNCTION - picks mode based on uniform
+// UNIFIED SHADOW FUNCTION - picks mode based on uniform + distance LOD
 // ═══════════════════════════════════════════════════════════════════════════
 fn ray_march_shadow(world_pos: vec3<f32>, light_dir: vec3<f32>, shadow_mode: f32) -> f32 {
     if (shadow_mode > 0.5) {
