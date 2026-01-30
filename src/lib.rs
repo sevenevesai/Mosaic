@@ -6,6 +6,7 @@ pub mod app;
 pub mod audio;
 pub mod inventory;
 pub mod renderer;
+pub mod settings;
 pub mod settings_menu;
 pub mod world;
 pub mod player;

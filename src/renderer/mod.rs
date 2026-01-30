@@ -20,6 +20,34 @@ pub use texture::TextureAtlas;
 pub use voxel_gi::VoxelGI;
 pub use volumetrics::VolumetricLighting;
 
+/// Display mode for the window
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisplayMode {
+    Windowed,
+    Borderless,
+    Fullscreen,
+}
+
+impl DisplayMode {
+    /// Get the display mode as a string
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DisplayMode::Windowed => "WINDOWED",
+            DisplayMode::Borderless => "BORDERLESS",
+            DisplayMode::Fullscreen => "FULLSCREEN",
+        }
+    }
+
+    /// Cycle to the next display mode
+    pub fn next(&self) -> DisplayMode {
+        match self {
+            DisplayMode::Windowed => DisplayMode::Borderless,
+            DisplayMode::Borderless => DisplayMode::Fullscreen,
+            DisplayMode::Fullscreen => DisplayMode::Windowed,
+        }
+    }
+}
+
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
 use winit::{dpi::PhysicalSize, window::Window};
@@ -122,10 +150,18 @@ pub struct Renderer {
     time_of_day: f32,      // 0.0 = midnight, 0.25 = dawn, 0.5 = noon, 0.75 = dusk
     cycle_speed: f32,      // Multiplier for cycle speed (1.0 = 10 min day, higher = faster)
 
-    // Shadow mode: 0.0 = hard shadows, 1.0 = soft shadows (old style)
+    // Shadow mode: -1.0 = off, 0.0 = hard shadows, 1.0 = soft shadows
     shadow_mode: f32,
     // Shadow debug mode: 0.0 = off, 1.0 = visualize shadow data
     shadow_debug: f32,
+
+    // Graphics settings
+    bloom_enabled: bool,
+    render_distance: i32,
+    shadow_distance: i32,
+    display_mode: DisplayMode,
+    /// Flag indicating display mode change is pending (app.rs applies it)
+    display_mode_pending: bool,
 
     // Voxel-based Global Illumination system
     // Uses DDA ray marching for shadows, VCT for indirect lighting
@@ -580,8 +616,13 @@ impl Renderer {
             start_time: std::time::Instant::now(),
             time_of_day: 0.35,   // Start at mid-morning
             cycle_speed: 10.0,   // 10x speed for testing (1 min = 1 day cycle)
-            shadow_mode: 0.0,    // Start with hard shadows (0=hard, 1=soft)
+            shadow_mode: 0.0,    // Start with hard shadows (-1=off, 0=hard, 1=soft)
             shadow_debug: 0.0,   // Shadow debug off by default
+            bloom_enabled: true,
+            render_distance: crate::constants::RENDER_DISTANCE,
+            shadow_distance: crate::constants::RENDER_DISTANCE,
+            display_mode: DisplayMode::Windowed,
+            display_mode_pending: false,
             voxel_gi,
             bloom,
             scene_texture,
@@ -594,6 +635,15 @@ impl Renderer {
 
     pub fn resize(&mut self, new_size: PhysicalSize<u32>) {
         if new_size.width > 0 && new_size.height > 0 {
+            // Wait for all GPU work to complete before resizing
+            // Poll multiple times to ensure all async callbacks complete
+            for _ in 0..3 {
+                self.device.poll(wgpu::Maintain::Wait);
+            }
+
+            // Force-unmap any pending GPU profiler buffers to avoid validation errors
+            self.gpu_profiler.force_unmap();
+
             self.size = new_size;
             self.config.width = new_size.width;
             self.config.height = new_size.height;
@@ -681,16 +731,33 @@ impl Renderer {
         self.cycle_speed
     }
 
-    /// Toggle shadow mode between hard (0) and soft (1)
+    /// Toggle shadow mode: SOFT (1) -> HARD (0) -> OFF (-1) -> SOFT
     /// Returns the new mode for display
     pub fn toggle_shadow_mode(&mut self) -> f32 {
-        self.shadow_mode = if self.shadow_mode < 0.5 { 1.0 } else { 0.0 };
+        self.shadow_mode = if self.shadow_mode > 0.5 {
+            0.0  // SOFT -> HARD
+        } else if self.shadow_mode > -0.5 {
+            -1.0 // HARD -> OFF
+        } else {
+            1.0  // OFF -> SOFT
+        };
         self.shadow_mode
     }
 
-    /// Get current shadow mode (0=hard, 1=soft)
+    /// Get current shadow mode (-1=off, 0=hard, 1=soft)
     pub fn shadow_mode(&self) -> f32 {
         self.shadow_mode
+    }
+
+    /// Get shadow mode as string
+    pub fn shadow_mode_str(&self) -> &'static str {
+        if self.shadow_mode < -0.5 {
+            "OFF"
+        } else if self.shadow_mode < 0.5 {
+            "HARD"
+        } else {
+            "SOFT"
+        }
     }
 
     /// Toggle shadow debug visualization
@@ -728,6 +795,119 @@ impl Renderer {
     /// Check if volumetrics are enabled
     pub fn volumetrics_enabled(&self) -> bool {
         self.volumetrics.enabled
+    }
+
+    /// Check if GPU culling is enabled
+    pub fn is_gpu_culling_enabled(&self) -> bool {
+        self.use_gpu_culling
+    }
+
+    /// Check if GPU voxel fill is enabled
+    pub fn is_gpu_voxel_fill_enabled(&self) -> bool {
+        self.voxel_gi.is_gpu_fill_enabled()
+    }
+
+    /// Check if bloom is enabled
+    pub fn is_bloom_enabled(&self) -> bool {
+        self.bloom_enabled
+    }
+
+    /// Toggle bloom on/off
+    pub fn toggle_bloom(&mut self) -> bool {
+        self.bloom_enabled = !self.bloom_enabled;
+        self.bloom_enabled
+    }
+
+    /// Get current render distance
+    pub fn render_distance(&self) -> i32 {
+        self.render_distance
+    }
+
+    /// Cycle render distance: 8 -> 12 -> 16 -> ... -> 32 -> 8
+    pub fn cycle_render_distance(&mut self) -> i32 {
+        self.render_distance = if self.render_distance >= 32 {
+            8
+        } else {
+            self.render_distance + 4
+        };
+        self.render_distance
+    }
+
+    /// Get current shadow distance
+    pub fn shadow_distance(&self) -> i32 {
+        self.shadow_distance
+    }
+
+    /// Increase shadow distance (max = render distance)
+    pub fn increase_shadow_distance(&mut self) -> i32 {
+        self.shadow_distance = (self.shadow_distance + 4).min(self.render_distance);
+        self.shadow_distance
+    }
+
+    /// Decrease shadow distance (min 4)
+    pub fn decrease_shadow_distance(&mut self) -> i32 {
+        self.shadow_distance = (self.shadow_distance - 4).max(4);
+        self.shadow_distance
+    }
+
+    /// Get current display mode
+    pub fn display_mode(&self) -> DisplayMode {
+        self.display_mode
+    }
+
+    /// Toggle display mode: Windowed -> Borderless -> Fullscreen -> Windowed
+    /// Sets pending flag for app.rs to apply to window
+    pub fn toggle_display_mode(&mut self) -> DisplayMode {
+        self.display_mode = self.display_mode.next();
+        self.display_mode_pending = true;
+        self.display_mode
+    }
+
+    /// Set display mode (used when applying mode from window)
+    pub fn set_display_mode(&mut self, mode: DisplayMode) {
+        self.display_mode = mode;
+    }
+
+    /// Check if display mode change is pending
+    pub fn is_display_mode_pending(&self) -> bool {
+        self.display_mode_pending
+    }
+
+    /// Clear the pending display mode flag
+    pub fn clear_display_mode_pending(&mut self) {
+        self.display_mode_pending = false;
+    }
+
+    /// Apply settings from a Settings struct
+    pub fn apply_settings(&mut self, settings: &crate::settings::Settings) {
+        self.render_distance = settings.render_distance;
+        self.shadow_mode = settings.shadow_mode;
+        self.bloom_enabled = settings.bloom_enabled;
+        self.volumetrics.set_enabled(settings.volumetrics_enabled);
+        if self.mdi_count_available {
+            self.use_gpu_culling = settings.gpu_culling;
+        }
+        self.voxel_gi.set_use_gpu_fill(settings.gpu_voxel_fill);
+        self.cycle_speed = settings.cycle_speed;
+        self.debug_overlay.set_enabled(settings.debug_overlay);
+        self.display_mode = settings.display_mode;
+    }
+
+    /// Collect current settings into a Settings struct
+    pub fn collect_settings(&self, windowed_size: (u32, u32)) -> crate::settings::Settings {
+        crate::settings::Settings {
+            render_distance: self.render_distance,
+            shadow_mode: self.shadow_mode,
+            bloom_enabled: self.bloom_enabled,
+            volumetrics_enabled: self.volumetrics.enabled,
+            gpu_culling: self.use_gpu_culling,
+            gpu_voxel_fill: self.voxel_gi.is_gpu_fill_enabled(),
+            cycle_speed: self.cycle_speed,
+            debug_overlay: self.debug_overlay.is_enabled(),
+            display_mode: self.display_mode,
+            windowed_width: windowed_size.0,
+            windowed_height: windowed_size.1,
+        }
     }
 
     fn create_depth_texture(
@@ -1182,7 +1362,8 @@ impl Renderer {
 
         // === BLOOM POST-PROCESSING ===
         // Apply bloom effect: extract bright pixels, blur, composite to output
-        self.bloom.render(&mut encoder, &view, &self.scene_texture_view, &self.device);
+        // If bloom disabled, just blits scene to output with tone mapping
+        self.bloom.render_or_blit(&mut encoder, &view, &self.scene_texture_view, &self.device, self.bloom_enabled);
 
         let main_elapsed = main_start.elapsed();
 

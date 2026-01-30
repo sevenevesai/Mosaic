@@ -283,4 +283,24 @@ impl GpuProfiler {
             .map(|&ns| ns as f64 / 1_000_000.0)
             .unwrap_or(0.0)
     }
+
+    /// Force-unmap any pending mapped buffers and reset state
+    /// Call this before resize or other operations that need unmapped buffers
+    pub fn force_unmap(&mut self) {
+        let Some(buffers) = &mut self.buffers else { return };
+
+        for buf in buffers.iter_mut() {
+            // Try to unmap if mapping completed
+            if buf.pending_readback && buf.mapping_complete.load(Ordering::SeqCst) {
+                buf.staging_buffer.unmap();
+            }
+            // Reset state regardless - this ensures next frame starts clean
+            buf.pending_readback = false;
+            buf.mapping_complete.store(false, Ordering::SeqCst);
+        }
+
+        // Reset frame count to skip copy-from-previous on next frame
+        // This avoids copying to a buffer that might have been in a bad state
+        self.frame_count = 0;
+    }
 }

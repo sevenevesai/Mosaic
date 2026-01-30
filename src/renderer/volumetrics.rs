@@ -462,6 +462,11 @@ impl VolumetricLighting {
         self.enabled = !self.enabled;
         self.enabled
     }
+
+    /// Set volumetrics enabled state
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+    }
 }
 
 // =============================================================================

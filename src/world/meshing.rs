@@ -2089,8 +2089,9 @@ fn emit_greedy_quad(
 
     // Epsilon to expand faces and prevent sub-pixel gaps at edges
     // This makes adjacent faces slightly overlap, eliminating white pixel artifacts
-    // Value must be large enough to cover gaps at all viewing angles
-    let e = 0.01;
+    // Value must be large enough to cover gaps at all viewing angles and distances
+    // 0.02 provides better coverage than 0.01 for terrain step edges
+    let e = 0.02;
 
     // Convert slice/u/v to world coordinates based on axis
     // Match vertex ordering exactly from simple meshing add_face_* functions

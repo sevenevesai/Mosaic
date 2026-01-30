@@ -9,10 +9,10 @@ use wgpu::util::DeviceExt;
 const BLOOM_BLUR_PASSES: u32 = 5;
 
 /// Bloom brightness threshold (pixels above this will glow)
-const BLOOM_THRESHOLD: f32 = 0.8;
+const BLOOM_THRESHOLD: f32 = 0.6;
 
 /// Bloom intensity multiplier
-const BLOOM_INTENSITY: f32 = 0.5;
+const BLOOM_INTENSITY: f32 = 0.8;
 
 /// Bloom effect manager
 pub struct Bloom {
@@ -505,6 +505,83 @@ impl Bloom {
             pass.set_pipeline(&self.composite_pipeline);
             pass.set_bind_group(0, &composite_bind_group, &[]);
             pass.draw(0..3, 0..1);
+        }
+    }
+
+    /// Render bloom effect or just copy scene to output (when bloom disabled)
+    pub fn render_or_blit(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        output_view: &wgpu::TextureView,
+        scene_view: &wgpu::TextureView,
+        device: &wgpu::Device,
+        bloom_enabled: bool,
+    ) {
+        if bloom_enabled {
+            self.render(encoder, output_view, scene_view, device);
+        } else {
+            // Just blit scene to output without bloom (still applies tone mapping)
+            let composite_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("bloom_blit_bind_group"),
+                layout: &self.composite_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(scene_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        // Use scene view for "bloom" too - the shader adds them together
+                        // with intensity, so this is equivalent to 0 bloom
+                        resource: wgpu::BindingResource::TextureView(&self.blur_views[0]),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
+                ],
+            });
+
+            // Clear the blur texture to black first (no bloom contribution)
+            {
+                let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("bloom_clear_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.blur_views[0],
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                // No draw - just clear
+            }
+
+            // Composite with cleared (black) bloom texture
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("bloom_blit_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: output_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+
+                pass.set_pipeline(&self.composite_pipeline);
+                pass.set_bind_group(0, &composite_bind_group, &[]);
+                pass.draw(0..3, 0..1);
+            }
         }
     }
 

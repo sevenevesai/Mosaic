@@ -426,15 +426,17 @@ fn ray_march_shadow_hard(world_pos: vec3<f32>, light_dir: vec3<f32>) -> f32 {
     var accumulated_opacity = 0.0;
     var solid_hits = 0;
 
-    var pos = world_pos;
-    var total_distance = 0.0;
+    // Start offset along light direction to escape surface voxel
+    // This prevents self-shadowing artifacts at shadow boundaries
+    var pos = world_pos + light_dir * 0.6;
+    var total_distance = 0.6;
 
     for (var i = 0; i < max_steps; i++) {
         // Adaptive step size: small near (accuracy), larger far (range)
         // Optimized step progression while maintaining accuracy
         var current_step: f32;
-        if (i < 6) {
-            current_step = 0.25;  // Fine detail near surface
+        if (i < 8) {
+            current_step = 0.35;  // Fine detail near surface (was 0.25)
         } else if (i < 24) {
             current_step = 0.5;   // Medium detail
         } else if (i < 56) {
@@ -913,23 +915,26 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // DDA Ray March Shadow (replaces shadow map)
     let ndotl = max(dot(in.normal, sun_dir), 0.0);
-    let shadow_mode = voxel_volume.time_of_day.y;   // 0 = hard, 1 = soft
+    let shadow_mode = voxel_volume.time_of_day.y;   // -1 = off, 0 = hard, 1 = soft
     let shadow_debug = voxel_volume.time_of_day.z;  // 0 = off, 1 = on
 
     var shadow = 1.0;  // Default: fully lit
     var was_traced = 0.0;  // Track if we traced or not
 
-    // Always trace shadow for all faces - shadow determines if the AREA is lit,
-    // not whether the face receives direct sun (that's what ndotl is for).
-    // Previously, side faces weren't traced in hard mode, causing them to appear
-    // lighter than shadowed top faces because they got full ambient.
-    {
+    // Skip shadow tracing if shadows are disabled (shadow_mode < 0)
+    if (shadow_mode >= -0.5) {
+        // Always trace shadow for all faces - shadow determines if the AREA is lit,
+        // not whether the face receives direct sun (that's what ndotl is for).
         was_traced = 1.0;
-        // Offset along normal to prevent self-shadowing
-        // Use a larger offset for grazing angles to avoid acne
+
+        // Shadow origin offset strategy:
+        // 1. Offset along normal to lift ray above surface
+        // 2. Offset along sun direction to escape current voxel
+        // This prevents self-shadowing and ensures shadow boundaries align with geometry
         let grazing_factor = 1.0 - max(ndotl, 0.0);
-        let normal_offset = mix(0.15, 0.5, grazing_factor);
-        let shadow_origin = in.world_position + in.normal * normal_offset;
+        let normal_offset = mix(0.25, 0.6, grazing_factor);  // Increased from 0.15-0.5
+        let sun_offset = 0.15;  // Small push toward sun
+        let shadow_origin = in.world_position + in.normal * normal_offset + sun_dir * sun_offset;
         shadow = ray_march_shadow(shadow_origin, sun_dir, shadow_mode);
     }
 

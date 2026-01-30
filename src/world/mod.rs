@@ -217,6 +217,9 @@ pub struct WorldManager {
     /// Chunks that should be marked urgent when their mesh result arrives
     /// (neighbors of player-modified chunks)
     pending_urgent: ahash::AHashSet<ChunkPos>,
+
+    /// Runtime render distance (can be changed via settings)
+    render_distance: i32,
 }
 
 impl WorldManager {
@@ -290,7 +293,18 @@ impl WorldManager {
             seed,
             urgent_mesh_uploads: Vec::new(),
             pending_urgent: ahash::AHashSet::new(),
+            render_distance: RENDER_DISTANCE,
         }
+    }
+
+    /// Set the render distance (in chunks)
+    pub fn set_render_distance(&mut self, distance: i32) {
+        self.render_distance = distance.clamp(8, 32);
+    }
+
+    /// Get the current render distance
+    pub fn render_distance(&self) -> i32 {
+        self.render_distance
     }
 
     fn worker_loop(
@@ -536,8 +550,8 @@ impl WorldManager {
         let mut chunks_to_queue: Vec<(ChunkPos, i32)> = Vec::new();
 
         for dy in 0..=9 {
-            for dz in -RENDER_DISTANCE..=RENDER_DISTANCE {
-                for dx in -RENDER_DISTANCE..=RENDER_DISTANCE {
+            for dz in -self.render_distance..=self.render_distance {
+                for dx in -self.render_distance..=self.render_distance {
                     let pos = ChunkPos {
                         x: player_chunk.x + dx,
                         y: dy,
@@ -591,7 +605,7 @@ impl WorldManager {
         for pos in self.chunks.read().keys() {
             let dx = (pos.x - player_chunk.x).abs();
             let dz = (pos.z - player_chunk.z).abs();
-            if dx > RENDER_DISTANCE + 2 || dz > RENDER_DISTANCE + 2 {
+            if dx > self.render_distance + 2 || dz > self.render_distance + 2 {
                 to_remove.push(*pos);
             }
         }

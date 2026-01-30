@@ -37,12 +37,29 @@ impl SettingsMenu {
 
     pub fn new() -> Self {
         let items = vec![
+            // === DISPLAY SETTINGS ===
+            MenuItem {
+                label: "DISPLAY MODE",
+                get_value: |r| r.display_mode().as_str().to_string(),
+                toggle: |r| { r.toggle_display_mode(); },
+            },
+            // === GRAPHICS SETTINGS ===
+            MenuItem {
+                label: "RENDER DISTANCE",
+                get_value: |r| format!("{}", r.render_distance()),
+                toggle: |r| { r.cycle_render_distance(); },
+            },
             MenuItem {
                 label: "SHADOW MODE",
-                get_value: |r| {
-                    if r.shadow_mode() < 0.5 { "HARD".to_string() } else { "SOFT".to_string() }
-                },
+                get_value: |r| r.shadow_mode_str().to_string(),
                 toggle: |r| { r.toggle_shadow_mode(); },
+            },
+            MenuItem {
+                label: "BLOOM",
+                get_value: |r| {
+                    if r.is_bloom_enabled() { "ON".to_string() } else { "OFF".to_string() }
+                },
+                toggle: |r| { r.toggle_bloom(); },
             },
             MenuItem {
                 label: "VOLUMETRICS",
@@ -51,13 +68,28 @@ impl SettingsMenu {
                 },
                 toggle: |r| { r.toggle_volumetrics(); },
             },
+            // === GPU SETTINGS ===
             MenuItem {
-                label: "DEBUG OVERLAY",
+                label: "GPU GI",
                 get_value: |r| {
-                    if r.is_debug_overlay_enabled() { "ON".to_string() } else { "OFF".to_string() }
+                    if r.is_gpu_voxel_fill_enabled() { "ON".to_string() } else { "OFF".to_string() }
                 },
-                toggle: |r| { r.toggle_debug_overlay(); },
+                toggle: |r| { r.toggle_gpu_voxel_fill(); },
             },
+            MenuItem {
+                label: "GPU CULLING",
+                get_value: |r| {
+                    if !r.is_mdi_available() {
+                        "N/A".to_string()
+                    } else if r.is_gpu_culling_enabled() {
+                        "ON".to_string()
+                    } else {
+                        "OFF".to_string()
+                    }
+                },
+                toggle: |r| { r.toggle_gpu_culling(); },
+            },
+            // === DEBUG SETTINGS ===
             MenuItem {
                 label: "CYCLE SPEED",
                 get_value: |r| {
@@ -67,17 +99,11 @@ impl SettingsMenu {
                 toggle: |r| { r.toggle_cycle_speed(); },
             },
             MenuItem {
-                label: "GPU CULLING",
+                label: "DEBUG OVERLAY",
                 get_value: |r| {
-                    // Check if GPU culling is available via MDI count
-                    if r.is_mdi_available() {
-                        // We need a way to check current state - for now assume toggle returns state
-                        "ON".to_string() // Will be updated when we add a getter
-                    } else {
-                        "N/A".to_string()
-                    }
+                    if r.is_debug_overlay_enabled() { "ON".to_string() } else { "OFF".to_string() }
                 },
-                toggle: |r| { r.toggle_gpu_culling(); },
+                toggle: |r| { r.toggle_debug_overlay(); },
             },
         ];
 

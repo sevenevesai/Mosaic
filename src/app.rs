@@ -8,12 +8,13 @@ use winit::{
     event::{DeviceEvent, ElementState, Event, WindowEvent},
     event_loop::EventLoop,
     keyboard::{KeyCode, PhysicalKey},
-    window::{CursorGrabMode, Window, WindowBuilder},
+    window::{CursorGrabMode, Fullscreen, Window, WindowBuilder},
 };
 
 use crate::audio::AudioManager;
 use crate::player::{Player, BlockInteraction};
-use crate::renderer::{Renderer, DebugMetrics};
+use crate::renderer::{DisplayMode, Renderer, DebugMetrics};
+use crate::settings::Settings;
 use crate::settings_menu::SettingsMenu;
 use crate::utils::profiler::FrameProfiler;
 use crate::world::{WorldManager, ChunkPos, MESH_STATS};
@@ -29,22 +30,29 @@ pub struct App {
     cursor_grabbed: bool,
     audio: Option<AudioManager>,
     settings_menu: SettingsMenu,
+    /// Remembered window size for returning from fullscreen
+    windowed_size: PhysicalSize<u32>,
 }
 
 impl App {
     pub async fn run() {
         let event_loop = EventLoop::new().expect("Failed to create event loop");
 
+        // Load settings from file (or use defaults)
+        let settings = Settings::load();
+        let initial_size = PhysicalSize::new(settings.windowed_width, settings.windowed_height);
+
         let window = Arc::new(
             WindowBuilder::new()
                 .with_title("Mosaic")
-                .with_inner_size(PhysicalSize::new(1280, 720))
+                .with_inner_size(initial_size)
                 .build(&event_loop)
                 .expect("Failed to create window"),
         );
 
-        // Initialize renderer
-        let renderer = Renderer::new(window.clone()).await;
+        // Initialize renderer and apply loaded settings
+        let mut renderer = Renderer::new(window.clone()).await;
+        renderer.apply_settings(&settings);
 
         // Initialize world manager with save directory
         let save_dir = std::path::PathBuf::from("saves/world1");
@@ -89,6 +97,7 @@ impl App {
             cursor_grabbed: false,
             audio,
             settings_menu,
+            windowed_size: window_size,
         };
 
         tracing::info!("Engine initialized successfully");
@@ -123,6 +132,51 @@ impl App {
         }
     }
 
+    /// Apply pending display mode change from settings
+    fn apply_pending_display_mode(&mut self) {
+        if !self.renderer.is_display_mode_pending() {
+            return;
+        }
+
+        // Save current window size if we're in windowed mode before switching away
+        if self.window.fullscreen().is_none() {
+            self.windowed_size = self.window.inner_size();
+        }
+
+        let mode = self.renderer.display_mode();
+        match mode {
+            DisplayMode::Windowed => {
+                self.window.set_fullscreen(None);
+                // Restore the remembered window size
+                let _ = self.window.request_inner_size(self.windowed_size);
+                tracing::info!("Display mode: WINDOWED ({}x{})", self.windowed_size.width, self.windowed_size.height);
+            }
+            DisplayMode::Borderless => {
+                self.window.set_fullscreen(Some(Fullscreen::Borderless(None)));
+                tracing::info!("Display mode: BORDERLESS FULLSCREEN");
+            }
+            DisplayMode::Fullscreen => {
+                // Use the primary monitor's native video mode
+                if let Some(monitor) = self.window.current_monitor() {
+                    if let Some(video_mode) = monitor.video_modes().next() {
+                        self.window.set_fullscreen(Some(Fullscreen::Exclusive(video_mode)));
+                        tracing::info!("Display mode: EXCLUSIVE FULLSCREEN");
+                    } else {
+                        // Fallback to borderless if no video mode found
+                        self.window.set_fullscreen(Some(Fullscreen::Borderless(None)));
+                        tracing::warn!("No video mode found, using borderless fullscreen");
+                    }
+                } else {
+                    // Fallback to borderless if no monitor found
+                    self.window.set_fullscreen(Some(Fullscreen::Borderless(None)));
+                    tracing::warn!("No monitor found, using borderless fullscreen");
+                }
+            }
+        }
+
+        self.renderer.clear_display_mode_pending();
+    }
+
     fn handle_window_event(&mut self, event: WindowEvent, elwt: &winit::event_loop::EventLoopWindowTarget<()>) {
         match event {
             WindowEvent::CloseRequested => {
@@ -131,6 +185,11 @@ impl App {
                 let pos = self.player.position();
                 self.world.set_spawn(pos.x, pos.y, pos.z);
                 tracing::info!("Saved player position: ({:.1}, {:.1}, {:.1})", pos.x, pos.y, pos.z);
+
+                // Save settings before exit
+                let settings = self.renderer.collect_settings((self.windowed_size.width, self.windowed_size.height));
+                settings.save();
+
                 elwt.exit();
             }
 
@@ -229,6 +288,8 @@ impl App {
                     // Handle menu clicks
                     if state == ElementState::Pressed && button == MouseButton::Left {
                         self.settings_menu.click(&mut self.renderer);
+                        // Note: display mode changes are applied at start of next frame
+                        // to avoid race conditions with the render pipeline
                     }
                 } else if !self.cursor_grabbed {
                     if state == ElementState::Pressed {
@@ -264,6 +325,15 @@ impl App {
     }
 
     fn update_and_render(&mut self, elwt: &winit::event_loop::EventLoopWindowTarget<()>) {
+        // Apply pending display mode changes at start of frame (before rendering)
+        // to avoid race conditions with surface/swapchain changes
+        if self.renderer.is_display_mode_pending() {
+            self.apply_pending_display_mode();
+            // Skip this frame to let the window/surface stabilize after mode change
+            self.last_frame = Instant::now();
+            return;
+        }
+
         // Calculate delta time
         let now = Instant::now();
         let dt = now.duration_since(self.last_frame);
@@ -314,6 +384,8 @@ impl App {
 
         // Update world (chunk loading/generation, meshing, lighting)
         self.profiler.begin_section("world_update");
+        // Sync render distance from settings to world manager
+        self.world.set_render_distance(self.renderer.render_distance());
         self.world.update(&self.player.position());
         // Run water flow simulation
         self.world.tick_water_simulation(dt.as_secs_f32());
