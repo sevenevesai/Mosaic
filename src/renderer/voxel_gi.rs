@@ -168,6 +168,30 @@ struct VoxelFillPipeline {
     bind_group: Option<wgpu::BindGroup>,
 }
 
+/// GPU Light Propagation pipeline resources (jump flooding algorithm)
+struct LightPropagatePipeline {
+    /// Init pass: seed emissive voxels into A channel
+    init_pipeline: wgpu::ComputePipeline,
+    /// Propagate pass: jump flooding iterations
+    propagate_pipeline: wgpu::ComputePipeline,
+    /// Bind group layout for both passes
+    bind_group_layout: wgpu::BindGroupLayout,
+    /// Uniform buffer for step_size parameter
+    uniform_buffer: wgpu::Buffer,
+}
+
+/// Uniforms for light propagation compute shader
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct LightPropagateUniforms {
+    /// Jump step size for current pass (128, 64, 32, 16, 8, 4, 2, 1)
+    step_size: i32,
+    /// Maximum light propagation radius (14 blocks for torches)
+    max_light_radius: f32,
+    /// Padding for alignment
+    _padding: [f32; 2],
+}
+
 /// Manages the 3D voxel volume for GI calculations
 pub struct VoxelGI {
     /// 3D texture storing voxel opacity/emissive data
@@ -228,6 +252,8 @@ pub struct VoxelGI {
     clear_pipeline: VoxelClearPipeline,
     /// GPU compute pipeline for filling voxel volume from chunks
     fill_pipeline: VoxelFillPipeline,
+    /// GPU compute pipeline for light propagation (jump flooding)
+    light_propagate_pipeline: LightPropagatePipeline,
     /// Whether to use GPU fill (true) or CPU fill (false) - for A/B testing
     use_gpu_fill: bool,
     /// Shadow blend factor for smooth fade-in after volume updates (0.0 = no shadow, 1.0 = full shadow)
@@ -397,6 +423,7 @@ impl VoxelGI {
         // Create GPU clear and fill pipelines
         let clear_pipeline = Self::create_clear_pipeline(device, &voxel_texture_view);
         let fill_pipeline = Self::create_fill_pipeline(device, &voxel_texture_view);
+        let light_propagate_pipeline = Self::create_light_propagate_pipeline(device, &voxel_texture_view);
 
         // Create staging buffer for CPU uploads
         let staging_size = (VOXEL_VOLUME_SIZE * VOXEL_VOLUME_SIZE * VOXEL_VOLUME_SIZE * 4) as usize;
@@ -432,6 +459,7 @@ impl VoxelGI {
             voxel_cache: vec![0u8; staging_size],
             clear_pipeline,
             fill_pipeline,
+            light_propagate_pipeline,
             use_gpu_fill: true, // Enable GPU fill by default
             shadow_blend: 1.0,  // Start fully blended
             shadow_fade_speed: 4.0, // Fade in over ~0.25 seconds
@@ -446,7 +474,14 @@ impl VoxelGI {
 
     /// Mark a specific block as dirty for incremental update
     /// This is much faster than full update - only updates one voxel + light radius
+    /// In GPU mode, this triggers a full refresh since incremental GPU updates aren't supported yet
     pub fn mark_dirty_at(&mut self, x: i32, y: i32, z: i32) {
+        // In GPU mode, trigger full refresh since incremental updates aren't supported
+        if self.use_gpu_fill {
+            self.force_full_update = true;
+            return;
+        }
+
         // If we have too many dirty blocks, switch to full update
         if self.dirty_blocks.len() >= MAX_DIRTY_BLOCKS {
             self.force_full_update = true;
@@ -477,19 +512,27 @@ impl VoxelGI {
     }
 
     fn create_propagate_pipeline(device: &wgpu::Device, _bind_group_layout: &wgpu::BindGroupLayout) -> wgpu::ComputePipeline {
+        // Note: This is a legacy placeholder pipeline that is no longer used.
+        // The actual light propagation is handled by light_propagate_pipeline.
+        let placeholder_shader = r#"
+            @compute @workgroup_size(4, 4, 4)
+            fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+                // Placeholder - not used, see light_propagate_pipeline instead
+            }
+        "#;
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Light Propagation Compute Shader"),
-            source: wgpu::ShaderSource::Wgsl(LIGHT_PROPAGATE_SHADER.into()),
+            label: Some("Legacy Propagation Compute Shader"),
+            source: wgpu::ShaderSource::Wgsl(placeholder_shader.into()),
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Light Propagation Pipeline Layout"),
+            label: Some("Legacy Propagation Pipeline Layout"),
             bind_group_layouts: &[],
             push_constant_ranges: &[],
         });
 
         device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("Light Propagation Pipeline"),
+            label: Some("Legacy Propagation Pipeline"),
             layout: Some(&pipeline_layout),
             module: &shader,
             entry_point: "main",
@@ -708,6 +751,157 @@ impl VoxelGI {
         }
     }
 
+    /// Create the GPU light propagation pipeline (jump flooding algorithm)
+    fn create_light_propagate_pipeline(device: &wgpu::Device, voxel_texture_view: &wgpu::TextureView) -> LightPropagatePipeline {
+        use std::num::NonZeroU64;
+
+        // Create bind group layout - needs read-write access to voxel texture
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Light Propagate Bind Group Layout"),
+            entries: &[
+                // Binding 0: Voxel volume (read-write for propagation)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::ReadWrite,
+                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                    },
+                    count: None,
+                },
+                // Binding 1: Uniforms (step_size, max_radius)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(std::mem::size_of::<LightPropagateUniforms>() as u64),
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        // Create uniform buffer
+        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Light Propagate Uniforms"),
+            size: std::mem::size_of::<LightPropagateUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // Create pipeline layout
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Light Propagate Pipeline Layout"),
+            bind_group_layouts: &[&bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        // Create init shader (seeds emissive voxels)
+        let init_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Light Init Shader"),
+            source: wgpu::ShaderSource::Wgsl(LIGHT_INIT_SHADER.into()),
+        });
+
+        let init_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Light Init Pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &init_shader,
+            entry_point: "main",
+        });
+
+        // Create propagate shader (jump flooding)
+        let propagate_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Light Propagate Shader"),
+            source: wgpu::ShaderSource::Wgsl(LIGHT_PROPAGATE_SHADER.into()),
+        });
+
+        let propagate_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Light Propagate Pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &propagate_shader,
+            entry_point: "main",
+        });
+
+        // Note: bind_group is created at dispatch time since we need the texture view
+        let _ = voxel_texture_view; // Will use in dispatch
+
+        LightPropagatePipeline {
+            init_pipeline,
+            propagate_pipeline,
+            bind_group_layout,
+            uniform_buffer,
+        }
+    }
+
+    /// Dispatch light propagation compute passes after voxel fill
+    /// Uses jump flooding algorithm for O(log N) convergence
+    pub fn dispatch_light_propagation(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        queue: &wgpu::Queue,
+    ) {
+        let propagate_start = std::time::Instant::now();
+
+        // Create bind group with current texture view
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Light Propagate Bind Group"),
+            layout: &self.light_propagate_pipeline.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&self.voxel_texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.light_propagate_pipeline.uniform_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        // Pass 1: Initialize A channel from emissive (G channel)
+        {
+            let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Light Init Pass"),
+                timestamp_writes: None,
+            });
+            compute_pass.set_pipeline(&self.light_propagate_pipeline.init_pipeline);
+            compute_pass.set_bind_group(0, &bind_group, &[]);
+            compute_pass.dispatch_workgroups(64, 64, 64); // 256/4 = 64
+        }
+
+        // Passes 2-9: Jump flooding with decreasing step sizes
+        // Each pass propagates light one "jump" further
+        let step_sizes = [64, 32, 16, 8, 4, 2, 1];
+        for &step in &step_sizes {
+            // Update uniform with current step size
+            let uniform = LightPropagateUniforms {
+                step_size: step,
+                max_light_radius: 14.0, // Torch light radius
+                _padding: [0.0; 2],
+            };
+            queue.write_buffer(
+                &self.light_propagate_pipeline.uniform_buffer,
+                0,
+                bytemuck::cast_slice(&[uniform]),
+            );
+
+            let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Light Propagate Pass"),
+                timestamp_writes: None,
+            });
+            compute_pass.set_pipeline(&self.light_propagate_pipeline.propagate_pipeline);
+            compute_pass.set_bind_group(0, &bind_group, &[]);
+            compute_pass.dispatch_workgroups(64, 64, 64);
+        }
+
+        let propagate_time = propagate_start.elapsed();
+        tracing::debug!("Light propagation: {:.2}ms ({} passes)", propagate_time.as_secs_f64() * 1000.0, step_sizes.len() + 1);
+    }
+
     /// Update the voxel volume from chunk data
     /// Supports three modes:
     /// - Full update: When camera moves significantly or on initialization
@@ -725,6 +919,7 @@ impl VoxelGI {
         shadow_mode: f32,
         shadow_debug: f32,
         held_light_emission: u8,
+        torch_shadows: bool,
     ) {
         // Use smoothed_center for gradual transitions (already tracks camera smoothly)
         let snapped_center = Vec3::new(
@@ -743,7 +938,7 @@ impl VoxelGI {
 
         // If no updates needed, just update uniforms
         if !needs_full_refresh && !has_dirty_blocks {
-            self.update_uniform(queue, self.last_update_center, sun_direction, sun_color, ambient_color, time_of_day, shadow_mode, shadow_debug, camera_pos, held_light_emission);
+            self.update_uniform(queue, self.last_update_center, sun_direction, sun_color, ambient_color, time_of_day, shadow_mode, shadow_debug, camera_pos, held_light_emission, torch_shadows);
             return;
         }
 
@@ -765,7 +960,7 @@ impl VoxelGI {
             }
 
             // Update uniforms with current volume center
-            self.update_uniform(queue, self.last_update_center, sun_direction, sun_color, ambient_color, time_of_day, shadow_mode, shadow_debug, camera_pos, held_light_emission);
+            self.update_uniform(queue, self.last_update_center, sun_direction, sun_color, ambient_color, time_of_day, shadow_mode, shadow_debug, camera_pos, held_light_emission, torch_shadows);
             return;
         }
 
@@ -780,7 +975,7 @@ impl VoxelGI {
             // We just need to update the uniform with the values gpu_fill_volume set.
 
             // Always use the actual volume center for uniforms (where the voxel data is)
-            self.update_uniform(queue, self.last_update_center, sun_direction, sun_color, ambient_color, time_of_day, shadow_mode, shadow_debug, camera_pos, held_light_emission);
+            self.update_uniform(queue, self.last_update_center, sun_direction, sun_color, ambient_color, time_of_day, shadow_mode, shadow_debug, camera_pos, held_light_emission, torch_shadows);
             return;
         }
 
@@ -798,7 +993,7 @@ impl VoxelGI {
         self.last_update_center = snapped_center;
 
         // Update uniform buffer
-        self.update_uniform(queue, snapped_center, sun_direction, sun_color, ambient_color, time_of_day, shadow_mode, shadow_debug, camera_pos, held_light_emission);
+        self.update_uniform(queue, snapped_center, sun_direction, sun_color, ambient_color, time_of_day, shadow_mode, shadow_debug, camera_pos, held_light_emission, torch_shadows);
 
         // Time the voxel cache fill
         let fill_start = std::time::Instant::now();
@@ -850,6 +1045,7 @@ impl VoxelGI {
         shadow_debug: f32,
         player_pos: Vec3,
         held_light_emission: u8,
+        torch_shadows: bool,
     ) {
         // Volume origin is the world position of voxel [0,0,0]
         // For toroidal wrapping: origin = center - half_size
@@ -870,7 +1066,8 @@ impl VoxelGI {
             ambient_color: [ambient_color.x, ambient_color.y, ambient_color.z, 1.0],
             time_of_day: [time_of_day, shadow_mode, shadow_debug, self.shadow_blend],
             player_light: [player_pos.x, player_pos.y, player_pos.z, held_light_emission as f32 / 15.0],
-            volume_origin: [origin.x, origin.y, origin.z, 0],
+            // W component stores torch_shadows flag (0 = off, 1 = on)
+            volume_origin: [origin.x, origin.y, origin.z, if torch_shadows { 1 } else { 0 }],
         };
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniform]));
     }
@@ -972,6 +1169,13 @@ impl VoxelGI {
             // 256 / 4 = 64 workgroups per dimension
             compute_pass.dispatch_workgroups(64, 64, 64);
         }
+
+        // Light propagation pass - propagate emissive light through the volume
+        // Uses jump flooding algorithm for O(log N) convergence
+        self.dispatch_light_propagation(device, encoder, queue);
+
+        // Suppress unused variable warning
+        let _ = clear_bind_group;
 
         // Update tracking
         self.volume_center = Vec3::new(volume_center.x as f32, volume_center.y as f32, volume_center.z as f32);
@@ -1763,15 +1967,109 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 "#;
 
-// Compute shader for GPU-based light propagation (flood fill)
-const LIGHT_PROPAGATE_SHADER: &str = r#"
-// GPU-based light propagation using wavefront approach
-// Each iteration propagates light one step further
+// Compute shader for light initialization (seeds emissive voxels into A channel)
+const LIGHT_INIT_SHADER: &str = r#"
+// Initialize light propagation by copying emissive (G channel) to light (A channel)
+
+@group(0) @binding(0) var voxel_volume: texture_storage_3d<rgba8unorm, read_write>;
 
 @compute @workgroup_size(4, 4, 4)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    // Placeholder for GPU flood fill
-    // This will replace the CPU BFS when fully implemented
+    // Bounds check for 256^3 volume
+    if (global_id.x >= 256u || global_id.y >= 256u || global_id.z >= 256u) {
+        return;
+    }
+
+    let coords = vec3<i32>(global_id);
+    let current = textureLoad(voxel_volume, coords);
+
+    // Seed: emissive channel (G) -> propagated light channel (A)
+    // Emissive voxels become light sources
+    let light = current.g;
+
+    // Write back with light seeded in A channel
+    textureStore(voxel_volume, coords, vec4<f32>(current.r, current.g, current.b, light));
+}
+"#;
+
+// Compute shader for GPU-based light propagation (jump flooding algorithm)
+const LIGHT_PROPAGATE_SHADER: &str = r#"
+// GPU-based light propagation using jump flooding algorithm
+// Each iteration propagates light one "jump" further with decreasing step sizes
+// O(log N) convergence: 8 passes for 256^3 volume
+
+struct LightPropagateUniforms {
+    step_size: i32,           // Jump distance for this pass (64, 32, 16, 8, 4, 2, 1)
+    max_light_radius: f32,    // Maximum propagation radius (14 for torches)
+    _padding: vec2<f32>,
+}
+
+@group(0) @binding(0) var voxel_volume: texture_storage_3d<rgba8unorm, read_write>;
+@group(0) @binding(1) var<uniform> params: LightPropagateUniforms;
+
+// Sample a neighbor and return its light contribution (attenuated)
+fn sample_neighbor(coords: vec3<i32>, offset: vec3<i32>, attenuation: f32) -> f32 {
+    let neighbor_coords = coords + offset;
+
+    // Clamp coordinates (edges of volume)
+    let clamped = clamp(neighbor_coords, vec3<i32>(0), vec3<i32>(255));
+
+    // Skip if we went out of bounds
+    if (any(clamped != neighbor_coords)) {
+        return 0.0;
+    }
+
+    // Sample neighbor
+    let neighbor = textureLoad(voxel_volume, clamped);
+
+    // Skip if neighbor is solid blocker
+    if (neighbor.r > 0.78 && neighbor.g < 0.1) {
+        return 0.0;
+    }
+
+    return neighbor.a * attenuation;
+}
+
+@compute @workgroup_size(4, 4, 4)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    // Bounds check for 256^3 volume
+    if (global_id.x >= 256u || global_id.y >= 256u || global_id.z >= 256u) {
+        return;
+    }
+
+    let coords = vec3<i32>(global_id);
+    let current = textureLoad(voxel_volume, coords);
+
+    // If this voxel is solid (opacity > 0.78) and not emissive, it blocks light
+    let is_solid_blocker = current.r > 0.78 && current.g < 0.1;
+    if (is_solid_blocker) {
+        return;
+    }
+
+    var best_light = current.a;  // Current propagated light
+
+    // If this voxel is emissive, it's a light source (keep its brightness)
+    if (current.g > 0.1) {
+        best_light = max(best_light, current.g);
+    }
+
+    // Calculate attenuation based on step distance
+    let step_dist = f32(params.step_size);
+    let attenuation = max(0.0, 1.0 - (step_dist / params.max_light_radius));
+
+    if (attenuation > 0.0) {
+        // Sample all 6 cardinal neighbors (unrolled loop for WGSL compatibility)
+        let step = params.step_size;
+        best_light = max(best_light, sample_neighbor(coords, vec3<i32>(-step, 0, 0), attenuation));
+        best_light = max(best_light, sample_neighbor(coords, vec3<i32>(step, 0, 0), attenuation));
+        best_light = max(best_light, sample_neighbor(coords, vec3<i32>(0, -step, 0), attenuation));
+        best_light = max(best_light, sample_neighbor(coords, vec3<i32>(0, step, 0), attenuation));
+        best_light = max(best_light, sample_neighbor(coords, vec3<i32>(0, 0, -step), attenuation));
+        best_light = max(best_light, sample_neighbor(coords, vec3<i32>(0, 0, step), attenuation));
+    }
+
+    // Write back with updated light value
+    textureStore(voxel_volume, coords, vec4<f32>(current.r, current.g, current.b, best_light));
 }
 "#;
 

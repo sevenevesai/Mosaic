@@ -109,6 +109,10 @@ pub struct Renderer {
     sky_pipeline: wgpu::RenderPipeline,
     sky_buffer: wgpu::Buffer,
     sky_bind_group: wgpu::BindGroup,
+    #[allow(dead_code)]
+    moon_texture: wgpu::Texture,
+    #[allow(dead_code)]
+    moon_texture_view: wgpu::TextureView,
 
     // GPU profiler
     gpu_profiler: GpuProfiler,
@@ -162,6 +166,8 @@ pub struct Renderer {
     display_mode: DisplayMode,
     /// Flag indicating display mode change is pending (app.rs applies it)
     display_mode_pending: bool,
+    /// Whether torches cast shadows (more immersive but higher GPU cost)
+    torch_shadows: bool,
 
     // Voxel-based Global Illumination system
     // Uses DDA ray marching for shadows, VCT for indirect lighting
@@ -204,10 +210,11 @@ impl Renderer {
 
         tracing::info!("Using GPU: {}", adapter.get_info().name);
 
-        // Request device with optional features for GPU profiling and multi-draw
+        // Request device with optional features for GPU profiling, multi-draw, and storage texture read-write
         let desired_features = wgpu::Features::TIMESTAMP_QUERY
             | wgpu::Features::MULTI_DRAW_INDIRECT
-            | wgpu::Features::MULTI_DRAW_INDIRECT_COUNT;
+            | wgpu::Features::MULTI_DRAW_INDIRECT_COUNT
+            | wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES; // For read-write storage textures in light propagation
         let available_features = adapter.features();
         let features_to_use = desired_features & available_features;
 
@@ -381,27 +388,58 @@ impl Renderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
+        // Load moon texture
+        let (moon_texture, moon_texture_view, moon_sampler) = Self::load_moon_texture(&device, &queue);
+
         let sky_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Sky Bind Group Layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
         });
 
         let sky_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Sky Bind Group"),
             layout: &sky_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: sky_buffer.as_entire_binding(),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: sky_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&moon_texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&moon_sampler),
+                },
+            ],
         });
 
         let sky_pipeline = pipeline::create_sky_pipeline(&device, surface_format, &sky_bind_group_layout);
@@ -598,6 +636,8 @@ impl Renderer {
             sky_pipeline,
             sky_buffer,
             sky_bind_group,
+            moon_texture,
+            moon_texture_view,
             gpu_profiler,
             ui_pipeline,
             crosshair_vertex_buffer,
@@ -623,6 +663,7 @@ impl Renderer {
             shadow_distance: crate::constants::RENDER_DISTANCE,
             display_mode: DisplayMode::Windowed,
             display_mode_pending: false,
+            torch_shadows: false,  // Default OFF for performance
             voxel_gi,
             bloom,
             scene_texture,
@@ -845,6 +886,18 @@ impl Renderer {
         self.bloom_enabled
     }
 
+    /// Check if torch shadows are enabled
+    pub fn is_torch_shadows_enabled(&self) -> bool {
+        self.torch_shadows
+    }
+
+    /// Toggle torch shadows on/off
+    pub fn toggle_torch_shadows(&mut self) -> bool {
+        self.torch_shadows = !self.torch_shadows;
+        tracing::info!("Torch shadows: {}", if self.torch_shadows { "ON" } else { "OFF" });
+        self.torch_shadows
+    }
+
     /// Get current render distance
     pub fn render_distance(&self) -> i32 {
         self.render_distance
@@ -919,6 +972,7 @@ impl Renderer {
         self.debug_overlay.set_enabled(settings.debug_overlay);
         self.display_mode = settings.display_mode;
         self.voxel_gi.set_update_threshold(settings.shadow_update_step);
+        self.torch_shadows = settings.torch_shadows;
     }
 
     /// Collect current settings into a Settings struct
@@ -936,7 +990,148 @@ impl Renderer {
             windowed_width: windowed_size.0,
             windowed_height: windowed_size.1,
             shadow_update_step: self.voxel_gi.get_update_threshold(),
+            torch_shadows: self.torch_shadows,
         }
+    }
+
+    /// Load moon texture from assets/moon-1.png for sky rendering
+    fn load_moon_texture(device: &wgpu::Device, queue: &wgpu::Queue) -> (wgpu::Texture, wgpu::TextureView, wgpu::Sampler) {
+        // Try to load moon texture from file
+        let moon_data = Self::load_moon_image().unwrap_or_else(|| {
+            log::warn!("Failed to load moon texture, using procedural fallback");
+            Self::generate_procedural_moon()
+        });
+
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Moon Texture"),
+            size: wgpu::Extent3d {
+                width: moon_data.0,
+                height: moon_data.1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &moon_data.2,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * moon_data.0),
+                rows_per_image: Some(moon_data.1),
+            },
+            wgpu::Extent3d {
+                width: moon_data.0,
+                height: moon_data.1,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Use nearest filtering to preserve pixel art crispness
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Moon Texture Sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Nearest,  // Crisp pixels
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
+        log::info!("Moon texture loaded: {}x{}", moon_data.0, moon_data.1);
+        (texture, view, sampler)
+    }
+
+    /// Try to load moon image from file
+    fn load_moon_image() -> Option<(u32, u32, Vec<u8>)> {
+        use std::path::Path;
+
+        // Get the executable's directory for asset resolution
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+
+        // Try multiple paths
+        let possible_paths = [
+            Path::new("assets/moon-1.png").to_path_buf(),
+            exe_dir.join("assets/moon-1.png"),
+            exe_dir.join("..").join("..").join("..").join("assets/moon-1.png"),
+        ];
+
+        for path in &possible_paths {
+            if let Ok(img) = image::open(path) {
+                let rgba = img.to_rgba8();
+                let (width, height) = rgba.dimensions();
+                log::info!("Loaded moon texture from: {}", path.display());
+                return Some((width, height, rgba.into_raw()));
+            }
+        }
+
+        log::warn!("Moon texture not found. Tried paths:");
+        for path in &possible_paths {
+            log::warn!("  - {}", path.display());
+        }
+        None
+    }
+
+    /// Generate a procedural moon texture as fallback
+    fn generate_procedural_moon() -> (u32, u32, Vec<u8>) {
+        let size = 128u32;
+        let mut data = vec![0u8; (size * size * 4) as usize];
+
+        let center = size as f32 / 2.0;
+        let radius = center - 2.0;
+
+        for y in 0..size {
+            for x in 0..size {
+                let dx = x as f32 - center;
+                let dy = y as f32 - center;
+                let dist = (dx * dx + dy * dy).sqrt();
+
+                let idx = ((y * size + x) * 4) as usize;
+
+                if dist < radius {
+                    // Inside moon disc - warm amber color
+                    let edge_factor = 1.0 - (dist / radius).powf(2.0);
+                    let r = (255.0 * (0.9 + 0.1 * edge_factor)) as u8;
+                    let g = (200.0 * (0.85 + 0.15 * edge_factor)) as u8;
+                    let b = (140.0 * (0.7 + 0.3 * edge_factor)) as u8;
+
+                    // Add some crater-like variation
+                    let noise = ((x.wrapping_mul(7) ^ y.wrapping_mul(13)) % 30) as i32 - 15;
+                    let r = (r as i32 + noise).clamp(0, 255) as u8;
+                    let g = (g as i32 + noise / 2).clamp(0, 255) as u8;
+                    let b = (b as i32 + noise / 3).clamp(0, 255) as u8;
+
+                    data[idx] = r;
+                    data[idx + 1] = g;
+                    data[idx + 2] = b;
+                    data[idx + 3] = 255;
+                } else {
+                    // Outside moon - transparent
+                    data[idx] = 0;
+                    data[idx + 1] = 0;
+                    data[idx + 2] = 0;
+                    data[idx + 3] = 0;
+                }
+            }
+        }
+
+        (size, size, data)
     }
 
     fn create_depth_texture(
@@ -1084,6 +1279,7 @@ impl Renderer {
             self.shadow_mode,
             self.shadow_debug,
             held_light_emission,
+            self.torch_shadows,
         );
         let voxel_gi_elapsed = voxel_gi_start.elapsed();
 
@@ -1606,11 +1802,12 @@ impl DayNightCycle {
             // Below horizon - fade out quickly
             ((sun_direction.y + 0.15) * 4.0).clamp(0.0, 0.5)
         };
-        // Moon - stays visible until below horizon, dimmer than sun
+        // Moon - stays visible until below horizon, provides soft night lighting
+        // Increased intensity for visible moonlight effect
         let moon_intensity = if moon_direction.y > 0.0 {
-            (moon_direction.y * 2.0 + 0.15).clamp(0.15, 0.25)
+            (moon_direction.y * 1.5 + 0.25).clamp(0.25, 0.5)
         } else {
-            ((moon_direction.y + 0.1) * 2.0).clamp(0.0, 0.15)
+            ((moon_direction.y + 0.15) * 2.5).clamp(0.0, 0.25)
         };
 
         // Define color keyframes (warm palette)
@@ -1618,13 +1815,16 @@ impl DayNightCycle {
         //              noon(0.5), afternoon(0.65), dusk(0.75), twilight(0.85)
 
         let (sky_top, sky_horizon, sun_color, ambient) = if t < 0.20 {
-            // Night (0.0 - 0.20) - longer dark period before dawn
+            // Night (0.0 - 0.20) - deep blue/indigo night sky
             let f = t / 0.20;
             (
-                Self::lerp_color(Vec3::new(0.04, 0.04, 0.08), Vec3::new(0.10, 0.07, 0.15), f), // very dark -> slightly lighter
-                Self::lerp_color(Vec3::new(0.08, 0.08, 0.14), Vec3::new(0.15, 0.12, 0.20), f), // dark purple -> hint of color
+                // Deep indigo zenith - darker and more blue
+                Self::lerp_color(Vec3::new(0.02, 0.02, 0.06), Vec3::new(0.06, 0.04, 0.12), f),
+                // Warmer horizon with slight purple tint
+                Self::lerp_color(Vec3::new(0.04, 0.03, 0.08), Vec3::new(0.10, 0.06, 0.14), f),
                 Vec3::new(0.0, 0.0, 0.0), // sun below horizon
-                Self::lerp_color(Vec3::new(0.03, 0.03, 0.05), Vec3::new(0.05, 0.04, 0.07), f), // very dark ambient
+                // Very dark ambient - moonlight provides most light
+                Self::lerp_color(Vec3::new(0.015, 0.015, 0.025), Vec3::new(0.025, 0.02, 0.035), f),
             )
         } else if t < 0.25 {
             // Pre-dawn to dawn (0.20 - 0.25) - fast brightening
@@ -1681,13 +1881,15 @@ impl DayNightCycle {
                 Self::lerp_color(Vec3::new(0.50, 0.31, 0.25), Vec3::new(0.08, 0.06, 0.10), f), // fast to dark ambient
             )
         } else {
-            // Night (0.80 - 1.0) - longer dark period
+            // Night (0.80 - 1.0) - deep blue/indigo night
             let f = (t - 0.80) / 0.20;
             (
-                Self::lerp_color(Vec3::new(0.15, 0.10, 0.22), Vec3::new(0.04, 0.04, 0.08), f), // dark purple -> very dark
-                Self::lerp_color(Vec3::new(0.20, 0.15, 0.25), Vec3::new(0.08, 0.08, 0.14), f), // dark mauve -> darker
+                // Transition to deep indigo
+                Self::lerp_color(Vec3::new(0.12, 0.07, 0.18), Vec3::new(0.02, 0.02, 0.06), f),
+                Self::lerp_color(Vec3::new(0.16, 0.10, 0.20), Vec3::new(0.04, 0.03, 0.08), f),
                 Vec3::new(0.0, 0.0, 0.0), // sun below horizon
-                Self::lerp_color(Vec3::new(0.08, 0.06, 0.10), Vec3::new(0.03, 0.03, 0.05), f), // very dark ambient
+                // Dark ambient - moonlight is primary source
+                Self::lerp_color(Vec3::new(0.05, 0.035, 0.06), Vec3::new(0.015, 0.015, 0.025), f),
             )
         };
 

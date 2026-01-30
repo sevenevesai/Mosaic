@@ -73,6 +73,13 @@ impl SettingsMenu {
                 },
                 toggle: |r| { r.toggle_volumetrics(); },
             },
+            MenuItem {
+                label: "TORCH SHADOWS",
+                get_value: |r| {
+                    if r.is_torch_shadows_enabled() { "ON".to_string() } else { "OFF".to_string() }
+                },
+                toggle: |r| { r.toggle_torch_shadows(); },
+            },
             // === GPU SETTINGS ===
             MenuItem {
                 label: "GPU GI",

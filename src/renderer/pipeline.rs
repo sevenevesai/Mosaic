@@ -116,6 +116,12 @@ struct SkyUniform {
 @group(0) @binding(0)
 var<uniform> sky: SkyUniform;
 
+@group(0) @binding(1)
+var t_moon: texture_2d<f32>;
+
+@group(0) @binding(2)
+var s_moon: sampler;
+
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) ndc: vec2<f32>,
@@ -206,45 +212,133 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         }
     }
 
-    // Moon rendering - solid and luminous
+    // Moon rendering - textured with warm glow
     if (moon_intensity > 0.05) {
-        // Subtle outer halo - very soft atmospheric glow
-        let moon_halo = pow(max(moon_dot, 0.0), 12.0) * 0.06;
-        sky_color += vec3<f32>(0.75, 0.78, 0.85) * moon_halo;
+        // Subtle outer halo - warm atmospheric glow
+        let moon_halo = pow(max(moon_dot, 0.0), 8.0) * 0.08;
+        sky_color += vec3<f32>(0.95, 0.80, 0.55) * moon_halo * moon_intensity;
 
-        // Moon disc - solid, bright, well-defined
-        let moon_size = 0.9990;
-        let moon_edge = 0.9995;
+        // Moon disc - size in dot product space
+        let moon_size = 0.997;   // Larger moon disc
+        let moon_edge = 0.999;
 
         if (moon_dot > moon_size) {
-            // Sharp edge with slight softness
+            // Calculate UV coordinates for moon texture
+            // Build orthonormal basis around moon direction (handle pole case)
+            var right: vec3<f32>;
+            if (abs(moon_dir.y) > 0.99) {
+                // Moon near zenith/nadir - use X as reference
+                right = normalize(cross(vec3<f32>(1.0, 0.0, 0.0), moon_dir));
+            } else {
+                // Normal case - use Y as reference
+                right = normalize(cross(vec3<f32>(0.0, 1.0, 0.0), moon_dir));
+            }
+            let local_up = normalize(cross(moon_dir, right));
+
+            // Get the offset from moon center to view direction
+            let offset = view_dir - moon_dir * moon_dot;
+
+            // Project offset onto the local coordinate system
+            let local_x = dot(offset, right);
+            let local_y = dot(offset, local_up);
+
+            // Calculate distance from center in disc space
+            let disc_radius = sqrt(1.0 - moon_size * moon_size);  // Proper sphere radius
+
+            // Convert to UV [0,1] - center at 0.5, scale to fill texture
+            let uv = vec2<f32>(
+                local_x / disc_radius * 0.5 + 0.5,
+                -local_y / disc_radius * 0.5 + 0.5  // Flip Y for texture coords
+            );
+
+            // Sample moon texture
+            let moon_tex = textureSample(t_moon, s_moon, uv);
+
+            // Edge softening
             let edge_blend = smoothstep(moon_size, moon_edge, moon_dot);
 
-            // Solid moon surface - pale cream/silver
-            let moon_surface = vec3<f32>(0.92, 0.90, 0.85);
-
-            // Slight limb darkening for 3D appearance
-            let limb_factor = smoothstep(moon_size, moon_edge, moon_dot);
-            let shaded_surface = mix(moon_surface * 0.85, moon_surface, limb_factor);
-
-            // Apply moon with full opacity for solid look
-            sky_color = mix(sky_color, shaded_surface, edge_blend * moon_intensity);
-
-            // Subtle bright edge highlight
-            if (moon_dot > moon_edge - 0.0003 && moon_dot < moon_edge) {
-                sky_color += vec3<f32>(0.1, 0.1, 0.08) * moon_intensity;
+            // Apply moon texture
+            if (moon_tex.a > 0.1) {
+                let moon_surface = moon_tex.rgb * 1.3;  // Brightness boost
+                sky_color = mix(sky_color, moon_surface, edge_blend * moon_intensity * moon_tex.a);
+            } else {
+                // Fallback for transparent areas - warm disc color
+                let fallback_color = vec3<f32>(0.95, 0.85, 0.65);
+                sky_color = mix(sky_color, fallback_color, edge_blend * moon_intensity * 0.5);
             }
         }
     }
 
-    // Add subtle stars at night (when sun is below horizon)
-    if (sun_intensity < 0.2 && view_dir.y > 0.0) {
-        let star_noise = fract(sin(dot(view_dir.xz * 500.0, vec2<f32>(12.9898, 78.233))) * 43758.5453);
-        let star_threshold = 0.997;
-        if (star_noise > star_threshold) {
-            let star_brightness = (star_noise - star_threshold) / (1.0 - star_threshold);
-            let night_factor = 1.0 - sun_intensity * 5.0;
-            sky_color += vec3<f32>(0.9, 0.85, 0.75) * star_brightness * 0.5 * night_factor * view_dir.y;
+    // Add stars at night (when sun is below horizon)
+    // Stars are fixed in the sky dome - use quantized direction for stable positions
+    if (sun_intensity < 0.3 && view_dir.y > -0.1) {
+        let night_factor = 1.0 - sun_intensity * 3.5;
+
+        // Quantize view direction to create stable star grid
+        // Higher multiplier = more stars, smaller = fewer larger star cells
+        let star_grid = floor(view_dir * 150.0);  // 150 = star density
+
+        // 3D hash for stable star positions (doesn't change with camera rotation)
+        let hash_input = star_grid.x * 127.1 + star_grid.y * 311.7 + star_grid.z * 74.7;
+        let star_hash = fract(sin(hash_input) * 43758.5453);
+
+        // Primary stars - bright, sparse
+        let star_threshold1 = 0.985;
+        if (star_hash > star_threshold1) {
+            let brightness = (star_hash - star_threshold1) / (1.0 - star_threshold1);
+
+            // Sub-cell position for star placement within grid cell
+            let cell_pos = fract(view_dir * 150.0);
+            let star_center = vec3<f32>(
+                fract(sin(hash_input * 1.1) * 12345.6),
+                fract(sin(hash_input * 1.2) * 23456.7),
+                fract(sin(hash_input * 1.3) * 34567.8)
+            );
+            let dist_to_star = length(cell_pos - star_center);
+
+            // Star is a small bright point
+            if (dist_to_star < 0.15) {
+                let star_intensity = 1.0 - dist_to_star / 0.15;
+                let star_intensity_sq = star_intensity * star_intensity;
+
+                // Gentle twinkling based on time
+                let twinkle = 0.9 + 0.1 * sin(star_hash * 100.0 + sky.sky_top_color.a * 3.0);
+
+                // Star colors based on hash
+                var star_color = vec3<f32>(1.0, 1.0, 1.0);  // White default
+                if (star_hash < 0.99) {
+                    star_color = vec3<f32>(1.0, 0.95, 0.85);  // Warm
+                }
+                if (star_hash < 0.9875) {
+                    star_color = vec3<f32>(0.9, 0.95, 1.0);   // Cool blue
+                }
+
+                let height_factor = max(view_dir.y + 0.1, 0.0);
+                sky_color += star_color * brightness * star_intensity_sq * 0.8 * night_factor * twinkle * height_factor;
+            }
+        }
+
+        // Secondary star layer - dimmer background stars
+        let star_grid2 = floor(view_dir * 300.0);
+        let hash_input2 = star_grid2.x * 73.1 + star_grid2.y * 157.3 + star_grid2.z * 213.5;
+        let star_hash2 = fract(sin(hash_input2) * 23421.631);
+
+        let star_threshold2 = 0.975;
+        if (star_hash2 > star_threshold2) {
+            let brightness = (star_hash2 - star_threshold2) / (1.0 - star_threshold2);
+            let cell_pos2 = fract(view_dir * 300.0);
+            let star_center2 = vec3<f32>(
+                fract(sin(hash_input2 * 1.4) * 45678.9),
+                fract(sin(hash_input2 * 1.5) * 56789.0),
+                fract(sin(hash_input2 * 1.6) * 67890.1)
+            );
+            let dist_to_star2 = length(cell_pos2 - star_center2);
+
+            if (dist_to_star2 < 0.12) {
+                let star_intensity = 1.0 - dist_to_star2 / 0.12;
+                let height_factor = max(view_dir.y + 0.1, 0.0);
+                sky_color += vec3<f32>(0.9, 0.92, 0.98) * brightness * star_intensity * 0.25 * night_factor * height_factor;
+            }
         }
     }
 
@@ -785,9 +879,48 @@ fn trace_held_light_shadow(world_pos: vec3<f32>, light_pos: vec3<f32>) -> f32 {
     return 1.0 - clamp(accumulated_opacity, 0.0, 1.0);
 }
 
-// Calculate light from player's held torch (with shadow casting)
+// === TORCH FLICKER UTILITIES ===
+// Hash function for per-position variation (returns 0-1)
+fn hash31(p: vec3<f32>) -> f32 {
+    var p3 = fract(p * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+// Multi-octave smooth noise for natural torch flicker
+// torch_pos should be the actual torch block position (or estimate)
+// Returns a multiplier around 1.0 (range: ~0.88 to ~1.12)
+fn torch_flicker_at_source(torch_pos: vec3<f32>, time: f32) -> f32 {
+    // Per-torch phase offset based on torch position (so each torch flickers differently)
+    let phase_offset = hash31(torch_pos) * 6.28318;
+
+    // Multiple frequency components for natural look:
+    // - Slow breathing (like fire expanding/contracting)
+    // - Medium flicker (like flame movement)
+    // - Fast shimmer (like heat distortion)
+    let slow_wave = sin(time * 2.5 + phase_offset) * 0.06;
+    let med_wave = sin(time * 7.3 + phase_offset * 1.3) * 0.04;
+    let fast_wave = sin(time * 15.7 + phase_offset * 2.1) * 0.02;
+
+    // Combine: base 1.0 + variations (range ~0.88 to ~1.12)
+    return 1.0 + slow_wave + med_wave + fast_wave;
+}
+
+// Simple time-based flicker for when we don't know torch position
+// Provides subtle ambient variation without position-based artifacts
+fn torch_flicker_simple(time: f32) -> f32 {
+    let slow_wave = sin(time * 2.5) * 0.04;
+    let med_wave = sin(time * 7.3) * 0.03;
+    return 1.0 + slow_wave + med_wave;
+}
+
+// Get torch color (warm orange, constant - flicker applied to intensity only)
+fn get_torch_color() -> vec3<f32> {
+    return vec3<f32>(1.0, 0.85, 0.6);  // Warm orange
+}
+
+// Calculate light from player's held torch (with shadow casting and flicker)
 fn calculate_held_light(world_pos: vec3<f32>) -> vec3<f32> {
-    let torch_color = vec3<f32>(1.0, 0.85, 0.6);
     let player_pos = voxel_volume.player_light.xyz;
     let intensity = voxel_volume.player_light.w;
 
@@ -806,18 +939,88 @@ fn calculate_held_light(world_pos: vec3<f32>) -> vec3<f32> {
     // Trace shadow from surface toward held light
     let shadow = trace_held_light_shadow(world_pos, player_pos);
 
+    // Get animation time and calculate flicker (based on player position)
+    let time = camera.anim_data.x;
+    let flicker = torch_flicker_at_source(floor(player_pos), time);
+    let torch_color = get_torch_color();
+
     // Quartic falloff: smaller bright core, dims quickly, long subtle tail to edge
     let falloff = 1.0 - (dist / max_radius);
-    let light_strength = pow(falloff, 4.0) * intensity;
+    let light_strength = pow(falloff, 4.0) * intensity * flicker;
 
     // Apply shadow - light blocked by geometry between surface and player
     return torch_color * light_strength * shadow * 2.5;
 }
 
+// Trace shadow toward estimated torch light source
+// Uses light gradient to find direction toward the brightest source
+fn trace_torch_shadow(world_pos: vec3<f32>, max_dist: f32) -> f32 {
+    // Sample light gradient to find direction toward light source
+    let step = 2.0;
+    let uv = world_to_voxel_uv(world_pos);
+    let inv_size = 1.0 / 256.0;
+
+    // Sample neighbors to compute gradient
+    let sample_x_pos = textureSampleLevel(t_voxel, s_voxel, uv + vec3<f32>(step * inv_size, 0.0, 0.0), 0.0).a;
+    let sample_x_neg = textureSampleLevel(t_voxel, s_voxel, uv - vec3<f32>(step * inv_size, 0.0, 0.0), 0.0).a;
+    let sample_y_pos = textureSampleLevel(t_voxel, s_voxel, uv + vec3<f32>(0.0, step * inv_size, 0.0), 0.0).a;
+    let sample_y_neg = textureSampleLevel(t_voxel, s_voxel, uv - vec3<f32>(0.0, step * inv_size, 0.0), 0.0).a;
+    let sample_z_pos = textureSampleLevel(t_voxel, s_voxel, uv + vec3<f32>(0.0, 0.0, step * inv_size), 0.0).a;
+    let sample_z_neg = textureSampleLevel(t_voxel, s_voxel, uv - vec3<f32>(0.0, 0.0, step * inv_size), 0.0).a;
+
+    // Gradient points toward higher light (toward source)
+    let gradient = vec3<f32>(
+        sample_x_pos - sample_x_neg,
+        sample_y_pos - sample_y_neg,
+        sample_z_pos - sample_z_neg
+    );
+
+    let grad_len = length(gradient);
+    if (grad_len < 0.01) {
+        return 1.0;  // No clear gradient, assume no shadow
+    }
+
+    let light_dir = normalize(gradient);
+
+    // Short ray march toward light source
+    var accumulated_opacity = 0.0;
+    var pos = world_pos + light_dir * 0.5;  // Start slightly offset
+    let step_size = 1.0;
+    let max_steps = i32(min(max_dist / step_size, 12.0));  // Limit for performance
+
+    for (var i = 0; i < max_steps; i++) {
+        let sample_uv = world_to_voxel_uv(pos);
+        if (!is_in_volume(sample_uv)) {
+            break;
+        }
+
+        let sample_voxel = textureSampleLevel(t_voxel, s_voxel, sample_uv, 0.0);
+
+        // If we hit an emissive voxel, we reached the source
+        if (sample_voxel.g > 0.5) {
+            break;
+        }
+
+        // Accumulate opacity from solid blocks
+        if (sample_voxel.r > 0.5) {
+            accumulated_opacity += 0.25;
+        } else if (sample_voxel.r > 0.2) {
+            accumulated_opacity += sample_voxel.r * 0.15;
+        }
+
+        if (accumulated_opacity >= 1.0) {
+            return 0.0;  // Fully blocked
+        }
+
+        pos += light_dir * step_size;
+    }
+
+    return 1.0 - clamp(accumulated_opacity, 0.0, 1.0);
+}
+
 fn sample_torch_light(world_pos: vec3<f32>) -> vec3<f32> {
     // Sample pre-propagated light from the voxel volume
-    // Light is propagated on CPU and stored in the A channel
-    let torch_color = vec3<f32>(1.0, 0.85, 0.6);
+    // Light is propagated via GPU compute shader and stored in the A channel
 
     let uv = world_to_voxel_uv(world_pos);
     if (!is_in_volume(uv)) {
@@ -829,10 +1032,54 @@ fn sample_torch_light(world_pos: vec3<f32>) -> vec3<f32> {
     let voxel = textureSampleLevel(t_voxel, s_voxel, uv, 0.0);
     let light_intensity = voxel.a;  // A channel = propagated light (0-1)
 
-    // Apply softer gamma curve for longer falloff trail
-    let curved_light = pow(light_intensity, 1.2);
+    if (light_intensity < 0.01) {
+        return vec3<f32>(0.0);
+    }
 
-    // Much brighter placed torches
+    // Estimate torch position by following light gradient
+    // This ensures all surfaces lit by the same torch flicker together
+    let inv_size = 1.0 / 256.0;
+    let step = 2.0;
+    let sample_x_pos = textureSampleLevel(t_voxel, s_voxel, uv + vec3<f32>(step * inv_size, 0.0, 0.0), 0.0).a;
+    let sample_x_neg = textureSampleLevel(t_voxel, s_voxel, uv - vec3<f32>(step * inv_size, 0.0, 0.0), 0.0).a;
+    let sample_y_pos = textureSampleLevel(t_voxel, s_voxel, uv + vec3<f32>(0.0, step * inv_size, 0.0), 0.0).a;
+    let sample_y_neg = textureSampleLevel(t_voxel, s_voxel, uv - vec3<f32>(0.0, step * inv_size, 0.0), 0.0).a;
+    let sample_z_pos = textureSampleLevel(t_voxel, s_voxel, uv + vec3<f32>(0.0, 0.0, step * inv_size), 0.0).a;
+    let sample_z_neg = textureSampleLevel(t_voxel, s_voxel, uv - vec3<f32>(0.0, 0.0, step * inv_size), 0.0).a;
+
+    let gradient = vec3<f32>(
+        sample_x_pos - sample_x_neg,
+        sample_y_pos - sample_y_neg,
+        sample_z_pos - sample_z_neg
+    );
+
+    // Estimate torch position: current position + normalized gradient * estimated distance
+    // Distance estimate: light_intensity maps to ~14 blocks radius, so inverse
+    let estimated_dist = (1.0 - light_intensity) * 14.0;
+    var estimated_torch_pos = world_pos;
+    let grad_len = length(gradient);
+    if (grad_len > 0.01) {
+        estimated_torch_pos = world_pos + normalize(gradient) * estimated_dist;
+    }
+
+    // Check if torch shadows are enabled (stored in volume_origin.w)
+    let torch_shadows_enabled = voxel_volume.volume_origin.w > 0;
+    var shadow_factor = 1.0;
+    if (torch_shadows_enabled && grad_len > 0.01) {
+        // Trace shadow toward light source
+        shadow_factor = trace_torch_shadow(world_pos, estimated_dist);
+    }
+
+    // Get animation time and calculate flicker based on estimated torch position
+    // This ensures all surfaces lit by the same torch flicker together
+    let time = camera.anim_data.x;
+    let flicker = torch_flicker_at_source(floor(estimated_torch_pos), time);
+    let torch_color = get_torch_color();
+
+    // Apply softer gamma curve for longer falloff trail, modulated by flicker and shadow
+    let curved_light = pow(light_intensity, 1.2) * flicker * shadow_factor;
+
+    // Brighter placed torches
     return torch_color * curved_light * 3.0;
 }
 
@@ -987,12 +1234,21 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         face_brightness = 0.85;
     }
 
+    // Sky occlusion - check if we're in an enclosed space (cave)
+    // Must be calculated early as it affects moon, ambient, and torch lighting
+    let sky_access = trace_sky_occlusion(in.world_position);
+
     // Direct lighting
     let sun_ndotl = max(dot(in.normal, sun_dir), 0.0);
     let sun_contribution = sun_color * sun_ndotl * 0.7 * sun_intensity * final_shadow;
 
+    // Enhanced moon lighting - soft ambient fill + directional
     let moon_ndotl = max(dot(in.normal, moon_dir), 0.0);
-    let moon_contribution = moon_color * moon_ndotl * 0.25 * moon_intensity;
+    // Moon provides both directional light and soft ambient fill
+    let moon_direct = moon_ndotl * 0.2;
+    let moon_ambient = 0.15;  // Soft fill from all directions (scattered moonlight)
+    // Moon only illuminates areas with sky access
+    let moon_contribution = moon_color * (moon_direct + moon_ambient) * moon_intensity * sky_access;
 
     // Voxel Cone Traced GI - disabled for now, too expensive
     // TODO: Re-enable once shadows are stable
@@ -1001,9 +1257,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Voxel AO - short range occlusion from nearby geometry
     let voxel_ao_raw = trace_voxel_ao(in.world_position, in.normal);
     let voxel_ao = mix(0.85, 1.0, voxel_ao_raw);  // Subtle effect (0.85-1.0 range)
-
-    // Sky occlusion - check if we're in an enclosed space (cave)
-    let sky_access = trace_sky_occlusion(in.world_position);
 
     // Per-vertex AO
     let ao_raw = in.ao;
@@ -1021,9 +1274,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Add player's held torch light (dynamic, follows player)
     let held_torch_light = calculate_held_light(in.world_position);
 
-    // Night boost: torch light is more prominent when sun is down
-    let night_boost = 1.0 + (1.0 - sun_intensity) * 0.5;
-    let block_light_contribution = (voxel_torch_light + held_torch_light) * night_boost;
+    // Context-aware torch lighting:
+    // - In caves (low sky_access): torches are PRIMARY light source, boost significantly
+    // - On surface at night: torches complement moonlight, moderate boost
+    // - During day: torches barely visible (sun overpowers)
+    let night_factor = 1.0 - sun_intensity;
+    let cave_boost = mix(1.5, 3.0, 1.0 - sky_access);  // 1.5x surface, 3x in caves
+    let time_boost = 1.0 + night_factor * 0.8;          // Up to 1.8x at night
+    let torch_boost = cave_boost * time_boost;
+    let block_light_contribution = (voxel_torch_light + held_torch_light) * torch_boost;
 
     // Combine all lighting
     // Sky access affects ambient - caves get much less ambient light

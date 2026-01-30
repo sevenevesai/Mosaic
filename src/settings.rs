@@ -23,6 +23,8 @@ pub struct Settings {
     pub windowed_height: u32,
     /// Shadow volume update step in blocks (2, 4, 8, 16, 32, 48)
     pub shadow_update_step: f32,
+    /// Whether torches cast shadows (more immersive but higher GPU cost)
+    pub torch_shadows: bool,
 }
 
 impl Default for Settings {
@@ -40,6 +42,7 @@ impl Default for Settings {
             windowed_width: 1280,
             windowed_height: 720,
             shadow_update_step: 2.0, // Frequent small updates (options: 2, 4, 8, 16, 32, 48)
+            torch_shadows: false,    // Default OFF for performance
         }
     }
 }
@@ -131,6 +134,9 @@ impl Settings {
                             settings.shadow_update_step = v;
                         }
                     }
+                    "torch_shadows" => {
+                        settings.torch_shadows = value == "true";
+                    }
                     _ => {}
                 }
             }
@@ -155,7 +161,8 @@ impl Settings {
              display_mode={}\n\
              windowed_width={}\n\
              windowed_height={}\n\
-             shadow_update_step={}\n",
+             shadow_update_step={}\n\
+             torch_shadows={}\n",
             self.render_distance,
             self.shadow_mode,
             self.bloom_enabled,
@@ -168,6 +175,7 @@ impl Settings {
             self.windowed_width,
             self.windowed_height,
             self.shadow_update_step,
+            self.torch_shadows,
         );
 
         if let Err(e) = fs::write(Self::FILE_PATH, content) {
