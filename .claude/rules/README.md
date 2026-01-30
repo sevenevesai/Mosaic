@@ -1,6 +1,6 @@
 # .claude/rules/ Documentation
 
-This directory contains detailed system documentation for the Neolith engine. These files are automatically loaded by Claude Code when working in this project.
+This directory contains detailed system documentation for the Mosaic engine. These files are automatically loaded by Claude Code when working in this project.
 
 ## Files
 

@@ -1,8 +1,8 @@
 [package]
-name = "neolith"
+name = "mosaic"
 version = "0.1.0"
 edition = "2021"
-description = "Neolith - A high-performance voxel engine built for scalability from the metal"
+description = "Mosaic - A high-performance voxel engine built for scalability from the metal"
 
 [dependencies]
 # Graphics

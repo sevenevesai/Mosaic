@@ -2,7 +2,7 @@
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
-use neolith::world::{ChunkPos, generate_chunk_with_seed};
+use mosaic::world::{ChunkPos, generate_chunk_with_seed};
 
 fn generation_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("generation");

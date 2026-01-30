@@ -1394,6 +1394,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "mosaic"
+version = "0.1.0"
+dependencies = [
+ "ahash",
+ "bytemuck",
+ "criterion",
+ "crossbeam-channel",
+ "env_logger",
+ "glam",
+ "image",
+ "log",
+ "lru",
+ "noise",
+ "num_cpus",
+ "parking_lot",
+ "pollster",
+ "rayon",
+ "rodio",
+ "tempfile",
+ "tracing",
+ "tracing-subscriber",
+ "wgpu",
+ "winit",
+ "zstd",
+]
+
+[[package]]
 name = "naga"
 version = "0.19.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1441,33 +1468,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8c196769dd60fd4f363e11d948139556a344e79d451aeb2fa2fd040738ef7691"
 dependencies = [
  "jni-sys",
-]
-
-[[package]]
-name = "neolith"
-version = "0.1.0"
-dependencies = [
- "ahash",
- "bytemuck",
- "criterion",
- "crossbeam-channel",
- "env_logger",
- "glam",
- "image",
- "log",
- "lru",
- "noise",
- "num_cpus",
- "parking_lot",
- "pollster",
- "rayon",
- "rodio",
- "tempfile",
- "tracing",
- "tracing-subscriber",
- "wgpu",
- "winit",
- "zstd",
 ]
 
 [[package]]

@@ -37,7 +37,7 @@ impl App {
 
         let window = Arc::new(
             WindowBuilder::new()
-                .with_title("Neolith")
+                .with_title("Mosaic")
                 .with_inner_size(PhysicalSize::new(1280, 720))
                 .build(&event_loop)
                 .expect("Failed to create window"),

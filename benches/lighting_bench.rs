@@ -6,8 +6,8 @@ use std::sync::Arc;
 use ahash::AHashMap;
 use parking_lot::RwLock;
 
-use neolith::world::{Block, Chunk, ChunkPos, LightEngine, apply_light_updates};
-use neolith::constants::CHUNK_SIZE;
+use mosaic::world::{Block, Chunk, ChunkPos, LightEngine, apply_light_updates};
+use mosaic::constants::CHUNK_SIZE;
 
 /// Create a 3x3x3 grid of empty chunks centered at origin
 fn create_chunk_grid() -> Arc<RwLock<AHashMap<ChunkPos, Arc<Chunk>>>> {

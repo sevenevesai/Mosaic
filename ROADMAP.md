@@ -1,4 +1,4 @@
-# Neolith Engine Roadmap
+# Mosaic Engine Roadmap
 
 **Philosophy:** Foundation before features. Tests and profiling enable confident iteration.
 

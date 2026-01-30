@@ -1,9 +1,9 @@
-//! Neolith - A high-performance voxel engine
+//! Mosaic - A high-performance voxel engine
 //!
 //! Built for scalability from the metal: world generation, chunk management,
 //! and rendering performance at scale.
 
-use neolith::App;
+use mosaic::App;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 fn main() {
@@ -11,11 +11,11 @@ fn main() {
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer())
         .with(tracing_subscriber::EnvFilter::from_default_env()
-            .add_directive("neolith=info".parse().unwrap())
+            .add_directive("mosaic=info".parse().unwrap())
             .add_directive("wgpu=warn".parse().unwrap()))
         .init();
 
-    tracing::info!("Starting Neolith engine...");
+    tracing::info!("Starting Mosaic engine...");
 
     pollster::block_on(App::run());
 }

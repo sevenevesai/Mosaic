@@ -1,4 +1,4 @@
-# Neolith Engine
+# Mosaic Engine
 
 High-performance voxel engine in Rust + wgpu. ~13K LOC, 8 worker threads, 5 render passes.
 
@@ -6,7 +6,7 @@ High-performance voxel engine in Rust + wgpu. ~13K LOC, 8 worker threads, 5 rend
 
 ```bash
 cargo build --release
-./target/release/neolith.exe
+./target/release/mosaic.exe
 ```
 
 **Controls:** WASD move, Space jump/fly-up, Shift fly-down, Ctrl sprint, F fly mode, F3 debug, T day/night speed, Y shadow mode, U shadow debug, V volumetric light shafts, 1-8 blocks (1=Stone, 2=Dirt, 3=Grass, 4=StoneDirt, 5=Brick, 6=Wood, 7=Leaves, 8=Torch), LMB break, RMB place, P perf log, Esc release mouse.
@@ -17,8 +17,8 @@ cargo build --release
 |--------|---------|
 | Build | `cargo build --release` |
 | Check | `cargo check 2>&1 \| head -40` |
-| Run | `./target/release/neolith.exe` |
-| Quick iteration | `taskkill //F //IM neolith.exe 2>&1; cargo build --release && ./target/release/neolith.exe` |
+| Run | `./target/release/mosaic.exe` |
+| Quick iteration | `taskkill //F //IM mosaic.exe 2>&1; cargo build --release && ./target/release/mosaic.exe` |
 | New world | `rm -rf saves/world1` before running |
 
 ## Architecture
@@ -198,7 +198,7 @@ Before committing changes:
 cargo check                    # Compilation errors
 cargo test                     # Run 50 unit tests
 cargo build --release          # Full build
-./target/release/neolith.exe   # Manual smoke test
+./target/release/mosaic.exe    # Manual smoke test
 ```
 
 Check F3 overlay for: FPS, chunk count, triangle count, light levels.

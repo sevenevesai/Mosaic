@@ -3,8 +3,8 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
 use std::sync::Arc;
 
-use neolith::world::{Block, Chunk, ChunkPos, LodLevel, build_chunk_mesh, build_chunk_mesh_lod};
-use neolith::constants::CHUNK_SIZE;
+use mosaic::world::{Block, Chunk, ChunkPos, LodLevel, build_chunk_mesh, build_chunk_mesh_lod};
+use mosaic::constants::CHUNK_SIZE;
 
 /// Create a chunk filled with a single block type
 fn create_solid_chunk(block: Block) -> Arc<Chunk> {

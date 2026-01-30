@@ -2,8 +2,8 @@
 //!
 //! Tests chunk loading, unloading, block operations, and persistence.
 
-use neolith::world::{Block, ChunkPos, WorldManager, generate_chunk_with_seed};
-use neolith::constants::CHUNK_SIZE_I32;
+use mosaic::world::{Block, ChunkPos, WorldManager, generate_chunk_with_seed};
+use mosaic::constants::CHUNK_SIZE_I32;
 use glam::Vec3;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;

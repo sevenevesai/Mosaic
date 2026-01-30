@@ -184,7 +184,7 @@ impl Renderer {
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
-                    label: Some("Neolith Device"),
+                    label: Some("Mosaic Device"),
                     required_features: features_to_use,
                     required_limits: wgpu::Limits::default(),
                 },

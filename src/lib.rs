@@ -1,4 +1,4 @@
-//! Blocks Engine Library
+//! Mosaic Engine Library
 //!
 //! Core modules for the voxel engine.
 
