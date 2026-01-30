@@ -48,6 +48,7 @@ pub struct CullUniforms {
 /// Atomic counter for visible chunk count (read back to CPU)
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+#[allow(dead_code)]
 pub struct DrawCount {
     pub count: u32,
 }
@@ -82,7 +83,7 @@ pub struct GpuCuller {
 }
 
 impl GpuCuller {
-    pub fn new(device: &wgpu::Device, indirect_buffer: &wgpu::Buffer) -> Self {
+    pub fn new(device: &wgpu::Device, _indirect_buffer: &wgpu::Buffer) -> Self {
         // Create compute shader
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("GPU Cull Shader"),
@@ -266,7 +267,7 @@ impl GpuCuller {
     /// Returns None if GPU culling isn't ready
     pub fn cull(
         &mut self,
-        device: &wgpu::Device,
+        _device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         frustum_planes: &[[f32; 4]; 6],
@@ -313,16 +314,19 @@ impl GpuCuller {
     }
 
     /// Get the draw count (call after submit, with map_async)
+    #[allow(dead_code)]
     pub fn get_draw_count_async(&self) -> &wgpu::Buffer {
         &self.count_staging
     }
 
     /// Mark bounds as needing rebuild
+    #[allow(dead_code)]
     pub fn mark_dirty(&mut self) {
         self.dirty = true;
     }
 
     /// Check if bounds need rebuild
+    #[allow(dead_code)]
     pub fn is_dirty(&self) -> bool {
         self.dirty
     }

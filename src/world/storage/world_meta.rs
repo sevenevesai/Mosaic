@@ -164,7 +164,6 @@ fn current_time_millis() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
     use tempfile::NamedTempFile;
 
     #[test]

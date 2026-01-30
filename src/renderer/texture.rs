@@ -434,7 +434,7 @@ impl TextureAtlas {
         atlas: &mut ImageBuffer<Rgba<u8>, Vec<u8>>,
         tile_x: u32,
         tile_y: u32,
-        tiles_per_row: u32,
+        _tiles_per_row: u32,
         tile_index: u32,
     ) {
         let tile_size = TEXTURE_TILE_SIZE as u32;

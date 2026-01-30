@@ -77,6 +77,7 @@ pub struct Ruin {
 }
 
 /// Noise generators for ruin features
+#[allow(dead_code)]
 pub struct RuinNoise {
     /// Wall decay noise
     decay_noise: Perlin,
@@ -180,7 +181,7 @@ impl RuinNoise {
     }
 
     /// Generate ruin parameters from world position
-    pub fn generate_ruin(&self, world_x: i32, world_z: i32, terrain_height: i32) -> Ruin {
+    pub fn generate_ruin(&self, world_x: i32, world_z: i32, _terrain_height: i32) -> Ruin {
         let hash = fast_hash(world_x / 16, world_z / 16).wrapping_add(self.seed);
 
         // Determine ruin style based on position/biome

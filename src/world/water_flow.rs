@@ -641,7 +641,7 @@ mod tests {
         assert_eq!(lz, 15);
 
         // Boundary
-        let (pos, lx, lz) = world_to_chunk_local_2d(16, 0);
+        let (pos, lx, _lz) = world_to_chunk_local_2d(16, 0);
         assert_eq!(pos.x, 1);
         assert_eq!(lx, 0);
     }

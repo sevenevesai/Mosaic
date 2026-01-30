@@ -237,3 +237,214 @@ impl Default for Inventory {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_inventory_creation() {
+        let inv = Inventory::new();
+        assert_eq!(inv.selected_index(), 0);
+        assert!(!inv.is_open);
+
+        // Should have starter items in hotbar
+        assert!(inv.hotbar_slots()[0].is_some());
+        assert!(inv.hotbar_slots()[7].is_some()); // Torch
+    }
+
+    #[test]
+    fn test_inventory_slot_selection() {
+        let mut inv = Inventory::new();
+        assert_eq!(inv.selected_index(), 0);
+
+        inv.select_slot(5);
+        assert_eq!(inv.selected_index(), 5);
+
+        // Invalid slot should be ignored
+        inv.select_slot(20);
+        assert_eq!(inv.selected_index(), 5);
+    }
+
+    #[test]
+    fn test_inventory_slot_cycling() {
+        let mut inv = Inventory::new();
+
+        // Cycle forward
+        inv.next_slot();
+        assert_eq!(inv.selected_index(), 1);
+
+        // Cycle backward
+        inv.prev_slot();
+        assert_eq!(inv.selected_index(), 0);
+
+        // Wrap around backward
+        inv.prev_slot();
+        assert_eq!(inv.selected_index(), HOTBAR_SIZE - 1);
+
+        // Wrap around forward
+        inv.select_slot(HOTBAR_SIZE - 1);
+        inv.next_slot();
+        assert_eq!(inv.selected_index(), 0);
+    }
+
+    #[test]
+    fn test_inventory_selected_item() {
+        let inv = Inventory::new();
+        let selected = inv.selected_item();
+        assert!(selected.is_some());
+
+        let block = inv.selected_block();
+        assert!(block.is_some());
+    }
+
+    #[test]
+    fn test_inventory_consume_selected() {
+        let mut inv = Inventory::new();
+
+        // Get initial count
+        let initial_count = inv.selected_item().unwrap().count;
+
+        // Consume one
+        assert!(inv.consume_selected());
+        assert_eq!(inv.selected_item().unwrap().count, initial_count - 1);
+    }
+
+    #[test]
+    fn test_inventory_consume_clears_empty_slot() {
+        let mut inv = Inventory::new();
+
+        // Set slot to single item
+        inv.slots[0] = Some(ItemStack::new(Item::Block(Block::Stone), 1));
+
+        // Consume should clear the slot
+        inv.consume_selected();
+        assert!(inv.slots[0].is_none());
+    }
+
+    #[test]
+    fn test_inventory_add_item_stacks() {
+        let mut inv = Inventory::new();
+
+        // Clear inventory first
+        for slot in &mut inv.slots {
+            *slot = None;
+        }
+
+        // Add stone
+        let overflow = inv.add_item(Item::Block(Block::Stone), 32);
+        assert_eq!(overflow, 0);
+        assert!(inv.slots[0].is_some());
+        assert_eq!(inv.slots[0].as_ref().unwrap().count, 32);
+
+        // Add more stone - should stack
+        let overflow = inv.add_item(Item::Block(Block::Stone), 20);
+        assert_eq!(overflow, 0);
+        assert_eq!(inv.slots[0].as_ref().unwrap().count, 52);
+    }
+
+    #[test]
+    fn test_inventory_add_item_overflow_to_new_slot() {
+        let mut inv = Inventory::new();
+
+        // Clear inventory
+        for slot in &mut inv.slots {
+            *slot = None;
+        }
+
+        // Add more than one stack
+        let overflow = inv.add_item(Item::Block(Block::Stone), 100);
+        assert_eq!(overflow, 0);
+
+        // Should have 64 in first slot, 36 in second
+        assert_eq!(inv.slots[0].as_ref().unwrap().count, 64);
+        assert_eq!(inv.slots[1].as_ref().unwrap().count, 36);
+    }
+
+    #[test]
+    fn test_inventory_add_item_returns_overflow() {
+        let mut inv = Inventory::new();
+
+        // Fill all slots with different items
+        for (i, slot) in inv.slots.iter_mut().enumerate() {
+            *slot = Some(ItemStack::new(
+                Item::Block(if i % 2 == 0 { Block::Stone } else { Block::Dirt }),
+                64,
+            ));
+        }
+
+        // Try to add grass - should overflow
+        let overflow = inv.add_item(Item::Block(Block::Grass), 10);
+        assert_eq!(overflow, 10);
+    }
+
+    #[test]
+    fn test_inventory_swap_with_slot() {
+        let mut inv = Inventory::new();
+
+        // Clear and set up
+        for slot in &mut inv.slots {
+            *slot = None;
+        }
+        inv.slots[0] = Some(ItemStack::new(Item::Block(Block::Stone), 10));
+
+        // Pick up item (swap empty held with slot 0)
+        inv.swap_with_slot(0);
+        assert!(inv.slots[0].is_none());
+        assert!(inv.held_item().is_some());
+        assert_eq!(inv.held_item().unwrap().count, 10);
+
+        // Put down in different slot
+        inv.swap_with_slot(5);
+        assert!(inv.slots[5].is_some());
+        assert!(inv.held_item().is_none());
+    }
+
+    #[test]
+    fn test_inventory_toggle() {
+        let mut inv = Inventory::new();
+
+        assert!(!inv.is_open);
+        inv.toggle();
+        assert!(inv.is_open);
+        inv.toggle();
+        assert!(!inv.is_open);
+    }
+
+    #[test]
+    fn test_inventory_toggle_returns_held_item() {
+        let mut inv = Inventory::new();
+
+        // Open inventory
+        inv.toggle();
+
+        // Pick up item
+        inv.set_held_item(Some(ItemStack::new(Item::Block(Block::Stone), 5)));
+
+        // Close inventory - held item should be returned
+        inv.toggle();
+        assert!(inv.held_item().is_none());
+        // Item should be back in inventory (stacked or new slot)
+    }
+
+    #[test]
+    fn test_inventory_hotbar_slots() {
+        let inv = Inventory::new();
+        let hotbar = inv.hotbar_slots();
+        assert_eq!(hotbar.len(), HOTBAR_SIZE);
+    }
+
+    #[test]
+    fn test_inventory_all_slots() {
+        let inv = Inventory::new();
+        let all = inv.all_slots();
+        assert_eq!(all.len(), TOTAL_SLOTS);
+    }
+
+    #[test]
+    fn test_inventory_constants() {
+        assert_eq!(HOTBAR_SIZE, 9);
+        assert_eq!(MAIN_INVENTORY_SIZE, 27);
+        assert_eq!(TOTAL_SLOTS, 36);
+    }
+}

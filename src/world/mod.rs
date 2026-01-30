@@ -918,6 +918,7 @@ impl WorldManager {
         true
     }
 
+    #[allow(dead_code)]
     fn remesh_if_exists(&mut self, pos: ChunkPos) {
         if self.chunks.read().contains_key(&pos) {
             // Keep old mesh until new one is ready to avoid flicker

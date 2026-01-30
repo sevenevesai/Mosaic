@@ -148,6 +148,7 @@ struct VoxelFillUniforms {
 }
 
 /// GPU Clear pipeline resources
+#[allow(dead_code)]
 struct VoxelClearPipeline {
     pipeline: wgpu::ComputePipeline,
     bind_group_layout: wgpu::BindGroupLayout,
@@ -155,6 +156,7 @@ struct VoxelClearPipeline {
 }
 
 /// GPU Voxel Fill pipeline resources
+#[allow(dead_code)]
 struct VoxelFillPipeline {
     pipeline: wgpu::ComputePipeline,
     bind_group_layout: wgpu::BindGroupLayout,
@@ -200,6 +202,7 @@ pub struct VoxelGI {
     last_update_center: Vec3,
     /// Volume origin for toroidal wrapping (world position of voxel [0,0,0])
     /// This is volume_center - 128, snapped to chunk boundaries for efficiency
+    #[allow(dead_code)]
     volume_origin: glam::IVec3,
     /// Whether we've done the initial voxel fill
     initialized: bool,
@@ -552,7 +555,7 @@ impl VoxelGI {
     }
 
     /// Create the GPU voxel fill pipeline
-    fn create_fill_pipeline(device: &wgpu::Device, voxel_texture_view: &wgpu::TextureView) -> VoxelFillPipeline {
+    fn create_fill_pipeline(device: &wgpu::Device, _voxel_texture_view: &wgpu::TextureView) -> VoxelFillPipeline {
         use std::num::NonZeroU64;
 
         // Create bind group layout
@@ -983,7 +986,7 @@ impl VoxelGI {
     /// Returns (num_chunks, min_chunk_pos)
     fn upload_chunk_data_for_gpu(
         &mut self,
-        device: &wgpu::Device,
+        _device: &wgpu::Device,
         queue: &wgpu::Queue,
         chunks: &Arc<RwLock<AHashMap<ChunkPos, Arc<Chunk>>>>,
         volume_center: glam::IVec3,

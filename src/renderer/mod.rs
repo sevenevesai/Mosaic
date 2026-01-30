@@ -892,8 +892,8 @@ impl Renderer {
         let shadow_elapsed = std::time::Duration::ZERO;
         let main_start = std::time::Instant::now();
         // Timing for spike detection (assigned inside render pass)
-        let mut cull_elapsed = std::time::Duration::ZERO;
-        let mut mdi_prep_elapsed = std::time::Duration::ZERO;
+        let cull_elapsed: std::time::Duration;
+        let mdi_prep_elapsed: std::time::Duration;
 
         // ═══════════════════════════════════════════════════════════════════════════
         // GPU FRUSTUM CULLING (compute pass - runs before render pass)

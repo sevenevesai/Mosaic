@@ -7,13 +7,10 @@
 //! Phase 2: Proper in-scattering with Henyey-Greenstein phase function
 //! Phase 3: Performance optimizations (half-res, dithering, bilateral blur)
 
-use wgpu::util::DeviceExt;
-
-/// Number of raymarch steps (higher = better quality, more expensive)
-/// Start with 32 for debug, can tune later
+// Constants for volumetric lighting (reserved for future use)
+#[allow(dead_code)]
 const VOLUMETRIC_STEPS: u32 = 32;
-
-/// Density of the participating medium (higher = more visible beams)
+#[allow(dead_code)]
 const VOLUMETRIC_DENSITY: f32 = 0.015;
 
 /// Volumetric lighting system

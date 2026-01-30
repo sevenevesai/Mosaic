@@ -362,7 +362,7 @@ impl CavernGenerator {
 
     /// Check if a block should be a stalactite/stalagmite
     /// Call this when processing cave ceilings/floors
-    pub fn get_cave_decoration(&self, x: i32, y: i32, z: i32, is_ceiling: bool, is_floor: bool) -> Option<Block> {
+    pub fn get_cave_decoration(&self, x: i32, _y: i32, z: i32, is_ceiling: bool, is_floor: bool) -> Option<Block> {
         if is_ceiling && self.noise.should_place_stalactite(x, z) {
             return Some(Block::Stalactite);
         }

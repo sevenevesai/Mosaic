@@ -9,7 +9,6 @@ use crate::world::chunk::{Block, Chunk, ChunkPos};
 use crate::constants::{CHUNK_SIZE, CHUNK_SIZE_I32};
 
 use super::biome::BiomeId;
-use super::util::fast_hash_3d;
 
 /// Formation types that can be generated
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -304,7 +303,7 @@ impl<'a> FormationGenerator<'a> {
         B: Fn(i32, i32) -> BiomeId,
     {
         let world_x = pos.x * CHUNK_SIZE_I32;
-        let world_y = pos.y * CHUNK_SIZE_I32;
+        let _world_y = pos.y * CHUNK_SIZE_I32;
         let world_z = pos.z * CHUNK_SIZE_I32;
 
         // Check for arches in nearby cells (arches are large, check wider area)

@@ -96,6 +96,7 @@ impl TreeType {
 const SPECIES_CELL_SIZE: i32 = 32;
 
 /// Clearing detection cell size (blocks)
+#[allow(dead_code)]
 const CLEARING_CELL_SIZE: i32 = 48;
 
 /// Tree noise generators

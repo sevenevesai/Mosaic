@@ -557,3 +557,192 @@ impl Player {
 fn lerp(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t.min(1.0)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_lerp() {
+        assert!((lerp(0.0, 10.0, 0.5) - 5.0).abs() < 0.001);
+        assert!((lerp(0.0, 10.0, 0.0) - 0.0).abs() < 0.001);
+        assert!((lerp(0.0, 10.0, 1.0) - 10.0).abs() < 0.001);
+
+        // Clamped to 1.0
+        assert!((lerp(0.0, 10.0, 2.0) - 10.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_aabb_from_feet_pos() {
+        let aabb = Aabb::from_feet_pos(Vec3::new(0.0, 10.0, 0.0));
+
+        // Check dimensions match player constants
+        let expected_half_width = PLAYER_WIDTH / 2.0;
+        assert!((aabb.min.x - (-expected_half_width)).abs() < 0.001);
+        assert!((aabb.max.x - expected_half_width).abs() < 0.001);
+        assert!((aabb.min.y - 10.0).abs() < 0.001);
+        assert!((aabb.max.y - (10.0 + PLAYER_HEIGHT)).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_aabb_intersects_block() {
+        // Player standing at origin
+        let aabb = Aabb::from_feet_pos(Vec3::new(0.5, 0.0, 0.5));
+
+        // Block at feet level should intersect
+        assert!(aabb.intersects_block(0, 0, 0));
+
+        // Block at head level should intersect
+        assert!(aabb.intersects_block(0, 1, 0));
+
+        // Block way below should not intersect
+        assert!(!aabb.intersects_block(0, -5, 0));
+
+        // Block way above should not intersect
+        assert!(!aabb.intersects_block(0, 10, 0));
+
+        // Block far away should not intersect
+        assert!(!aabb.intersects_block(100, 0, 100));
+    }
+
+    #[test]
+    fn test_aabb_edge_cases() {
+        // Player at block boundary
+        let aabb = Aabb::from_feet_pos(Vec3::new(1.0, 0.0, 1.0));
+
+        // Adjacent blocks should intersect due to player width
+        assert!(aabb.intersects_block(0, 0, 0));
+        assert!(aabb.intersects_block(1, 0, 1));
+    }
+
+    #[test]
+    fn test_player_creation() {
+        let player = Player::new(Vec3::new(0.0, 100.0, 0.0));
+
+        assert!((player.position().y - 100.0).abs() < 0.001);
+        assert!(!player.is_flying());
+        assert!(!player.is_on_ground());
+        assert!(!player.is_sprinting());
+    }
+
+    #[test]
+    fn test_player_horizontal_speed() {
+        let mut player = Player::new(Vec3::new(0.0, 100.0, 0.0));
+
+        // Zero velocity = zero speed
+        assert!((player.horizontal_speed() - 0.0).abs() < 0.001);
+
+        // Set horizontal velocity
+        player.velocity = Vec3::new(3.0, 5.0, 4.0); // 3-4-5 triangle, horizontal = 5
+        assert!((player.horizontal_speed() - 5.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_player_selected_block() {
+        let mut player = Player::new(Vec3::new(0.0, 100.0, 0.0));
+
+        // Default is Stone
+        assert_eq!(player.selected_block(), Block::Stone);
+
+        // Can change
+        player.selected_block = Block::Torch;
+        assert_eq!(player.selected_block(), Block::Torch);
+    }
+
+    #[test]
+    fn test_player_key_handling() {
+        let mut player = Player::new(Vec3::ZERO);
+
+        // Movement keys
+        assert!(!player.move_forward);
+        player.handle_key(KeyCode::KeyW, true);
+        assert!(player.move_forward);
+        player.handle_key(KeyCode::KeyW, false);
+        assert!(!player.move_forward);
+
+        // Sprint
+        assert!(!player.sprint);
+        player.handle_key(KeyCode::ControlLeft, true);
+        assert!(player.sprint);
+
+        // Fly mode toggle
+        assert!(!player.fly_mode);
+        player.handle_key(KeyCode::KeyF, true);
+        assert!(player.fly_mode);
+        player.handle_key(KeyCode::KeyF, true);
+        assert!(!player.fly_mode);
+    }
+
+    #[test]
+    fn test_player_block_selection_keys() {
+        let mut player = Player::new(Vec3::ZERO);
+
+        player.handle_key(KeyCode::Digit2, true);
+        assert_eq!(player.selected_block, Block::Dirt);
+
+        player.handle_key(KeyCode::Digit8, true);
+        assert_eq!(player.selected_block, Block::Torch);
+    }
+
+    #[test]
+    fn test_player_mouse_button_handling() {
+        let mut player = Player::new(Vec3::ZERO);
+
+        // Left click requests break
+        assert!(!player.break_requested);
+        player.handle_mouse_button(MouseButton::Left, true);
+        assert!(player.break_requested);
+
+        // Right click requests place
+        assert!(!player.place_requested);
+        player.handle_mouse_button(MouseButton::Right, true);
+        assert!(player.place_requested);
+
+        // Release doesn't trigger
+        player.break_requested = false;
+        player.handle_mouse_button(MouseButton::Left, false);
+        assert!(!player.break_requested);
+    }
+
+    #[test]
+    fn test_block_interaction_enum() {
+        let none = BlockInteraction::None;
+        let brk = BlockInteraction::Break { x: 1, y: 2, z: 3 };
+        let place = BlockInteraction::Place { x: 4, y: 5, z: 6 };
+
+        assert_eq!(none, BlockInteraction::None);
+        assert_ne!(brk, none);
+        assert_ne!(place, none);
+
+        if let BlockInteraction::Break { x, y, z } = brk {
+            assert_eq!((x, y, z), (1, 2, 3));
+        } else {
+            panic!("Expected Break variant");
+        }
+    }
+
+    #[test]
+    fn test_player_update_fly_mode() {
+        let mut player = Player::new(Vec3::new(0.0, 100.0, 0.0));
+        player.fly_mode = true;
+        player.move_forward = true;
+
+        let initial_z = player.feet_pos.z;
+        player.update(Duration::from_millis(100), None);
+
+        // Should have moved (fly mode moves in camera direction)
+        assert!(player.feet_pos.z != initial_z || player.feet_pos.x != 0.0);
+    }
+
+    #[test]
+    fn test_player_update_without_world() {
+        let mut player = Player::new(Vec3::new(0.0, 100.0, 0.0));
+        player.velocity = Vec3::new(0.0, -5.0, 0.0);
+
+        let initial_y = player.feet_pos.y;
+        player.update(Duration::from_millis(100), None);
+
+        // Should have fallen (no collision without world)
+        assert!(player.feet_pos.y < initial_y);
+    }
+}

@@ -23,7 +23,7 @@ use crate::constants::{
 };
 
 use biome::BiomeRegistry;
-use caverns::{CavernGenerator, CavernResult};
+use caverns::CavernGenerator;
 use caves::CaveNoise;
 use formations::{FormationGenerator, FormationNoise};
 use ruins::RuinGenerator;
@@ -32,8 +32,8 @@ use util::fast_hash_3d;
 
 use std::cell::RefCell;
 
-/// Thread-local cached TerrainGenerator to avoid recreating noise objects per-chunk
-/// Each worker thread maintains its own generator instance, reused across all chunk generations
+// Thread-local cached TerrainGenerator to avoid recreating noise objects per-chunk
+// Each worker thread maintains its own generator instance, reused across all chunk generations
 thread_local! {
     static CACHED_GENERATOR: RefCell<Option<(u32, TerrainGenerator)>> = const { RefCell::new(None) };
 }
@@ -41,6 +41,7 @@ thread_local! {
 /// Cached data for a single terrain column (x, z)
 /// Pre-computed once per column to avoid redundant noise calculations
 #[derive(Clone, Copy)]
+#[allow(dead_code)]
 struct ColumnCache {
     height: i32,
     is_mountain: bool,
@@ -197,6 +198,7 @@ pub struct TerrainGenerator {
     cave_noise: CaveNoise,
 
     // Large caverns (dome ceilings, pillars, crystals, aquifers)
+    #[allow(dead_code)]
     cavern_generator: CavernGenerator,
 
     // Tree system
