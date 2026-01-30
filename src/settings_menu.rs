@@ -55,6 +55,11 @@ impl SettingsMenu {
                 toggle: |r| { r.toggle_shadow_mode(); },
             },
             MenuItem {
+                label: "SHADOW UPDATE",
+                get_value: |r| format!("{} BLOCKS", r.get_shadow_update_step() as i32),
+                toggle: |r| { r.toggle_shadow_update_step(); },
+            },
+            MenuItem {
                 label: "BLOOM",
                 get_value: |r| {
                     if r.is_bloom_enabled() { "ON".to_string() } else { "OFF".to_string() }

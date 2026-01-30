@@ -21,6 +21,8 @@ pub struct Settings {
     pub display_mode: DisplayMode,
     pub windowed_width: u32,
     pub windowed_height: u32,
+    /// Shadow volume update step in blocks (2, 4, 8, 16, 32, 48)
+    pub shadow_update_step: f32,
 }
 
 impl Default for Settings {
@@ -37,6 +39,7 @@ impl Default for Settings {
             display_mode: DisplayMode::Windowed,
             windowed_width: 1280,
             windowed_height: 720,
+            shadow_update_step: 2.0, // Frequent small updates (options: 2, 4, 8, 16, 32, 48)
         }
     }
 }
@@ -123,6 +126,11 @@ impl Settings {
                             settings.windowed_height = v;
                         }
                     }
+                    "shadow_update_step" => {
+                        if let Ok(v) = value.parse() {
+                            settings.shadow_update_step = v;
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -146,7 +154,8 @@ impl Settings {
              debug_overlay={}\n\
              display_mode={}\n\
              windowed_width={}\n\
-             windowed_height={}\n",
+             windowed_height={}\n\
+             shadow_update_step={}\n",
             self.render_distance,
             self.shadow_mode,
             self.bloom_enabled,
@@ -158,6 +167,7 @@ impl Settings {
             self.display_mode.as_str(),
             self.windowed_width,
             self.windowed_height,
+            self.shadow_update_step,
         );
 
         if let Err(e) = fs::write(Self::FILE_PATH, content) {

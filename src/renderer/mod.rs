@@ -721,6 +721,33 @@ impl Renderer {
         self.cycle_speed
     }
 
+    /// Toggle shadow update step: 2 -> 4 -> 8 -> 16 -> 32 -> 48 -> 2
+    /// Returns the new step for display
+    pub fn toggle_shadow_update_step(&mut self) -> f32 {
+        let current = self.voxel_gi.get_update_threshold() as i32;
+        let new_step = match current {
+            2 => 4.0,
+            4 => 8.0,
+            8 => 16.0,
+            16 => 32.0,
+            32 => 48.0,
+            48 => 2.0,
+            _ => 2.0,
+        };
+        self.voxel_gi.set_update_threshold(new_step);
+        new_step
+    }
+
+    /// Set shadow update step directly (for loading from settings)
+    pub fn set_shadow_update_step(&mut self, step: f32) {
+        self.voxel_gi.set_update_threshold(step);
+    }
+
+    /// Get current shadow update step
+    pub fn get_shadow_update_step(&self) -> f32 {
+        self.voxel_gi.get_update_threshold()
+    }
+
     /// Get current time of day (0.0-1.0)
     pub fn time_of_day(&self) -> f32 {
         self.time_of_day
@@ -891,6 +918,7 @@ impl Renderer {
         self.cycle_speed = settings.cycle_speed;
         self.debug_overlay.set_enabled(settings.debug_overlay);
         self.display_mode = settings.display_mode;
+        self.voxel_gi.set_update_threshold(settings.shadow_update_step);
     }
 
     /// Collect current settings into a Settings struct
@@ -907,6 +935,7 @@ impl Renderer {
             display_mode: self.display_mode,
             windowed_width: windowed_size.0,
             windowed_height: windowed_size.1,
+            shadow_update_step: self.voxel_gi.get_update_threshold(),
         }
     }
 

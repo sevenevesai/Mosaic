@@ -282,7 +282,7 @@ struct VoxelVolumeUniform {
     sun_direction: vec4<f32>,
     sun_color: vec4<f32>,
     ambient_color: vec4<f32>,
-    time_of_day: vec4<f32>,  // x = time, y = shadow_mode (0=hard, 1=soft), z = shadow_debug, w = padding
+    time_of_day: vec4<f32>,  // x = time, y = shadow_mode (0=hard, 1=soft), z = shadow_debug, w = shadow_blend (0=no shadow, 1=full)
     player_light: vec4<f32>, // xyz = position, w = intensity (0-1, where 1 = 15 emission)
     volume_origin: vec4<i32>, // xyz = world position of voxel [0,0,0] for toroidal wrapping
 };
@@ -937,6 +937,22 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let shadow_origin = in.world_position + in.normal * normal_offset + sun_dir * sun_offset;
         shadow = ray_march_shadow(shadow_origin, sun_dir, shadow_mode);
     }
+
+    // Edge-distance based shadow fade
+    // Soften shadows near volume boundaries (where new data appears)
+    // This creates a smooth transition at the edges without affecting the center
+    let volume_center = voxel_volume.volume_center.xyz;
+    let half_size = 128.0;  // Volume is 256, half is 128
+    let edge_fade_distance = 2.0;  // Fade within 2 blocks of edge
+
+    // Distance from position to volume center on each axis
+    let delta = abs(in.world_position - volume_center);
+    // Distance to nearest edge (minimum across all axes)
+    let dist_to_edge = half_size - max(delta.x, max(delta.y, delta.z));
+    // Fade factor: 0 at edge, 1 at edge_fade_distance or more inside
+    let edge_blend = saturate(dist_to_edge / edge_fade_distance);
+    // Apply edge fade - shadows soften near edges
+    shadow = mix(1.0, shadow, edge_blend);
 
     // === SHADOW DEBUG MODE ===
     // Press U to toggle

@@ -230,6 +230,10 @@ pub struct VoxelGI {
     fill_pipeline: VoxelFillPipeline,
     /// Whether to use GPU fill (true) or CPU fill (false) - for A/B testing
     use_gpu_fill: bool,
+    /// Shadow blend factor for smooth fade-in after volume updates (0.0 = no shadow, 1.0 = full shadow)
+    shadow_blend: f32,
+    /// How fast shadows fade in after an update (higher = faster)
+    shadow_fade_speed: f32,
 }
 
 impl VoxelGI {
@@ -419,7 +423,7 @@ impl VoxelGI {
             last_update_center: Vec3::ZERO,
             smoothed_center: Vec3::ZERO,
             follow_speed: 0.08,        // Smooth following - adjust for feel (0.05-0.15 range)
-            update_threshold: 12.0,    // Trigger update every ~12 blocks (was 48)
+            update_threshold: 2.0,     // Trigger update every ~2 blocks (frequent small updates)
             volume_origin: glam::IVec3::ZERO,
             initialized: false,
             force_full_update: false,
@@ -429,6 +433,8 @@ impl VoxelGI {
             clear_pipeline,
             fill_pipeline,
             use_gpu_fill: true, // Enable GPU fill by default
+            shadow_blend: 1.0,  // Start fully blended
+            shadow_fade_speed: 4.0, // Fade in over ~0.25 seconds
         }
     }
 
@@ -862,7 +868,7 @@ impl VoxelGI {
             sun_direction: [sun_direction.x, sun_direction.y, sun_direction.z, sun_direction.y.max(0.0).min(1.0)],
             sun_color: [sun_color.x, sun_color.y, sun_color.z, 1.0],
             ambient_color: [ambient_color.x, ambient_color.y, ambient_color.z, 1.0],
-            time_of_day: [time_of_day, shadow_mode, shadow_debug, 0.0],
+            time_of_day: [time_of_day, shadow_mode, shadow_debug, self.shadow_blend],
             player_light: [player_pos.x, player_pos.y, player_pos.z, held_light_emission as f32 / 15.0],
             volume_origin: [origin.x, origin.y, origin.z, 0],
         };
@@ -973,6 +979,8 @@ impl VoxelGI {
         self.initialized = true;
         self.force_full_update = false;
         self.dirty_blocks.clear();
+
+        // Note: shadow_blend no longer reset here - using edge-distance fade instead
 
         let fill_time = fill_start.elapsed();
         tracing::info!(
@@ -1193,8 +1201,20 @@ impl VoxelGI {
         let old_center = self.smoothed_center;
         self.smoothed_center = old_center.lerp(target, t);
 
+        // Update shadow blend (fade in after volume updates)
+        // shadow_blend goes from 0.0 -> 1.0 over time
+        if self.shadow_blend < 1.0 {
+            let blend_t = 1.0 - (-self.shadow_fade_speed * delta_time).exp();
+            self.shadow_blend = (self.shadow_blend + blend_t).min(1.0);
+        }
+
         // Return true if we moved at all (for debugging)
         (self.smoothed_center - old_center).length() > 0.01
+    }
+
+    /// Get current shadow blend factor (0.0 = no shadows, 1.0 = full shadows)
+    pub fn get_shadow_blend(&self) -> f32 {
+        self.shadow_blend
     }
 
     /// Get the current smoothed center (for GPU fill to use as target)
@@ -1219,6 +1239,17 @@ impl VoxelGI {
     /// Get current fill mode
     pub fn is_gpu_fill_enabled(&self) -> bool {
         self.use_gpu_fill
+    }
+
+    /// Set the shadow update threshold (how many blocks before triggering an update)
+    pub fn set_update_threshold(&mut self, threshold: f32) {
+        self.update_threshold = threshold;
+        tracing::info!("Shadow update step: {} blocks", threshold);
+    }
+
+    /// Get current update threshold
+    pub fn get_update_threshold(&self) -> f32 {
+        self.update_threshold
     }
 
     fn fill_voxel_cache(&mut self, chunks: &Arc<RwLock<AHashMap<ChunkPos, Arc<Chunk>>>>, time_of_day: f32, center: Vec3) {
