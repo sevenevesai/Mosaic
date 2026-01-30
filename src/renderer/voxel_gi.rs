@@ -195,11 +195,18 @@ pub struct VoxelGI {
     /// Compute pipeline for mipmap generation
     pub mipmap_pipeline: wgpu::ComputePipeline,
 
-    /// Current volume center (world coordinates)
+    /// Current volume center (world coordinates) - where voxel data is actually centered
     volume_center: Vec3,
     /// Last update position (to detect when re-upload needed)
     /// Starts at origin, will update on first frame
     last_update_center: Vec3,
+    /// Smoothed center that gradually follows the camera (for smooth shadow transitions)
+    /// This is where we WANT the volume to be - volume_center catches up to this
+    smoothed_center: Vec3,
+    /// How fast the smoothed center follows the camera (0.0 = never, 1.0 = instant)
+    follow_speed: f32,
+    /// Distance threshold before triggering a volume update (smaller = more frequent, smoother)
+    update_threshold: f32,
     /// Volume origin for toroidal wrapping (world position of voxel [0,0,0])
     /// This is volume_center - 128, snapped to chunk boundaries for efficiency
     #[allow(dead_code)]
@@ -410,6 +417,9 @@ impl VoxelGI {
             mipmap_pipeline,
             volume_center: Vec3::ZERO,
             last_update_center: Vec3::ZERO,
+            smoothed_center: Vec3::ZERO,
+            follow_speed: 0.08,        // Smooth following - adjust for feel (0.05-0.15 range)
+            update_threshold: 12.0,    // Trigger update every ~12 blocks (was 48)
             volume_origin: glam::IVec3::ZERO,
             initialized: false,
             force_full_update: false,
@@ -710,19 +720,17 @@ impl VoxelGI {
         shadow_debug: f32,
         held_light_emission: u8,
     ) {
-        // Snap camera position to voxel grid to prevent jitter
+        // Use smoothed_center for gradual transitions (already tracks camera smoothly)
         let snapped_center = Vec3::new(
-            camera_pos.x.floor(),
-            camera_pos.y.floor(),
-            camera_pos.z.floor(),
+            self.smoothed_center.x.floor(),
+            self.smoothed_center.y.floor(),
+            self.smoothed_center.z.floor(),
         );
 
-        // Check if we need a full refresh (camera moved or first time)
-        // Increased threshold from 24 to 48 blocks - reduces full refresh frequency
-        // Volume is 256 wide (128 radius), so 48 blocks = 37% shift is acceptable
-        let move_threshold = 48.0;
+        // Check if we need a full refresh - use smoothed center distance and configurable threshold
+        // Smaller threshold = more frequent but smaller updates = smoother transitions
         let distance_moved = (snapped_center - self.last_update_center).length();
-        let needs_full_refresh = !self.initialized || distance_moved >= move_threshold || self.force_full_update;
+        let needs_full_refresh = !self.initialized || distance_moved >= self.update_threshold || self.force_full_update;
 
         // Check for incremental updates (dirty blocks)
         let has_dirty_blocks = !self.dirty_blocks.is_empty();
@@ -761,18 +769,9 @@ impl VoxelGI {
             self.force_full_update = false;
             self.dirty_blocks.clear(); // GPU mode doesn't support incremental updates
 
-            // Only update tracking state if GPU fill actually happened this frame
-            // (needs_full_refresh was true when gpu_fill_volume was called)
-            if needs_full_refresh {
-                if !self.initialized {
-                    tracing::info!("Initial GPU voxel volume fill at {:?}", snapped_center);
-                    self.initialized = true;
-                }
-                self.volume_center = snapped_center;
-                self.last_update_center = snapped_center;
-            }
-            // else: We're here because of dirty blocks only - no GPU fill happened,
-            //       so keep using the existing volume center
+            // DON'T overwrite volume_center/last_update_center here!
+            // gpu_fill_volume() already set these correctly when it ran.
+            // We just need to update the uniform with the values gpu_fill_volume set.
 
             // Always use the actual volume center for uniforms (where the voxel data is)
             self.update_uniform(queue, self.last_update_center, sun_direction, sun_color, ambient_color, time_of_day, shadow_mode, shadow_debug, camera_pos, held_light_emission);
@@ -872,23 +871,25 @@ impl VoxelGI {
 
     /// Execute GPU voxel fill using compute shaders
     /// This replaces the CPU fill_voxel_cache path for better performance
+    /// Uses smoothed_center for gradual shadow transitions
     pub fn gpu_fill_volume(
         &mut self,
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
         queue: &wgpu::Queue,
         chunks: &Arc<RwLock<AHashMap<ChunkPos, Arc<Chunk>>>>,
-        camera_pos: Vec3,
+        _camera_pos: Vec3,  // Ignored - we use smoothed_center instead
     ) {
         use glam::IVec3;
 
         let fill_start = std::time::Instant::now();
 
-        // Snap camera to block coordinates for volume center
+        // Use smoothed center for gradual transitions
+        // IMPORTANT: Use .floor() for consistent negative number handling (as i32 truncates toward zero)
         let volume_center = IVec3::new(
-            camera_pos.x.floor() as i32,
-            camera_pos.y.floor() as i32,
-            camera_pos.z.floor() as i32,
+            self.smoothed_center.x.floor() as i32,
+            self.smoothed_center.y.floor() as i32,
+            self.smoothed_center.z.floor() as i32,
         );
 
         // Upload chunk data to GPU
@@ -941,16 +942,18 @@ impl VoxelGI {
             ],
         });
 
-        {
-            let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("Voxel Clear Pass"),
-                timestamp_writes: None,
-            });
-            compute_pass.set_pipeline(&self.clear_pipeline.pipeline);
-            compute_pass.set_bind_group(0, &clear_bind_group, &[]);
-            // 256 / 4 = 64 workgroups per dimension
-            compute_pass.dispatch_workgroups(64, 64, 64);
-        }
+        // SKIP CLEAR PASS - the fill shader writes to every voxel anyway
+        // This saves ~0.3ms per update. The clear_bind_group is still created above
+        // but not dispatched. Can remove the creation too if this works well.
+        // {
+        //     let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        //         label: Some("Voxel Clear Pass"),
+        //         timestamp_writes: None,
+        //     });
+        //     compute_pass.set_pipeline(&self.clear_pipeline.pipeline);
+        //     compute_pass.set_bind_group(0, &clear_bind_group, &[]);
+        //     compute_pass.dispatch_workgroups(64, 64, 64);
+        // }
 
         // Fill pass
         {
@@ -1168,18 +1171,43 @@ impl VoxelGI {
         (num_chunks, min_chunk)
     }
 
-    /// Check if GPU fill is needed based on camera movement
-    /// Uses same calculation as update_from_chunks() for consistency
-    pub fn needs_gpu_refresh(&self, camera_pos: Vec3) -> bool {
-        let current_center = Vec3::new(
+    /// Update the smoothed center to gradually follow the camera
+    /// Call this every frame before checking needs_gpu_refresh
+    /// Returns true if the smoothed center moved (for debug logging)
+    pub fn update_smoothed_center(&mut self, camera_pos: Vec3, delta_time: f32) -> bool {
+        let target = Vec3::new(
             camera_pos.x.floor(),
             camera_pos.y.floor(),
             camera_pos.z.floor(),
         );
 
-        // Use total distance (same as update_from_chunks) - not per-axis check
-        let distance_moved = (current_center - self.last_update_center).length();
-        !self.initialized || distance_moved >= 48.0 || self.force_full_update
+        // On first frame or if not initialized, snap to camera
+        if !self.initialized {
+            self.smoothed_center = target;
+            return true;
+        }
+
+        // Smooth interpolation toward camera position
+        // Use frame-rate independent lerp: lerp(a, b, 1 - e^(-speed * dt))
+        let t = 1.0 - (-self.follow_speed * delta_time * 60.0).exp();
+        let old_center = self.smoothed_center;
+        self.smoothed_center = old_center.lerp(target, t);
+
+        // Return true if we moved at all (for debugging)
+        (self.smoothed_center - old_center).length() > 0.01
+    }
+
+    /// Get the current smoothed center (for GPU fill to use as target)
+    pub fn get_smoothed_center(&self) -> Vec3 {
+        self.smoothed_center
+    }
+
+    /// Check if GPU fill is needed based on smoothed center movement
+    /// Uses smoothed_center (which follows camera) vs last_update_center (where volume is)
+    pub fn needs_gpu_refresh(&self, _camera_pos: Vec3) -> bool {
+        // Check distance from smoothed center to where volume actually is
+        let distance_moved = (self.smoothed_center - self.last_update_center).length();
+        !self.initialized || distance_moved >= self.update_threshold || self.force_full_update
     }
 
     /// Toggle between GPU and CPU fill modes

@@ -1023,6 +1023,11 @@ impl Renderer {
         let voxel_gi_start = std::time::Instant::now();
         let chunks = world.chunks();
 
+        // Update smoothed center for gradual shadow transitions
+        // This makes the volume smoothly follow the camera instead of snapping
+        let delta_time = debug_metrics.frame_time_ms / 1000.0; // Convert ms to seconds
+        self.voxel_gi.update_smoothed_center(camera.position, delta_time);
+
         // Use GPU fill for full refresh if enabled, CPU for incremental/fallback
         if self.voxel_gi.is_gpu_fill_enabled() && self.voxel_gi.needs_gpu_refresh(camera.position) {
             // GPU compute path - clears and fills voxel volume via compute shaders
