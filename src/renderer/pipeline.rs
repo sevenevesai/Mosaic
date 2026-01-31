@@ -138,6 +138,157 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     return out;
 }
 
+// ============================================================================
+// CUBE-MAP BASED SKY UTILITIES (for stable stars and moon)
+// ============================================================================
+
+struct CubeFace {
+    face_id: u32,
+    uv: vec2<f32>,
+}
+
+fn get_cube_face(dir: vec3<f32>) -> CubeFace {
+    let abs_dir = abs(dir);
+    var result: CubeFace;
+
+    if (abs_dir.x >= abs_dir.y && abs_dir.x >= abs_dir.z) {
+        if (dir.x > 0.0) {
+            result.face_id = 0u;
+            result.uv = vec2<f32>(-dir.z / dir.x, dir.y / dir.x);
+        } else {
+            result.face_id = 1u;
+            result.uv = vec2<f32>(dir.z / dir.x, dir.y / dir.x);
+        }
+    } else if (abs_dir.y >= abs_dir.x && abs_dir.y >= abs_dir.z) {
+        if (dir.y > 0.0) {
+            result.face_id = 2u;
+            result.uv = vec2<f32>(dir.x / dir.y, -dir.z / dir.y);
+        } else {
+            result.face_id = 3u;
+            result.uv = vec2<f32>(dir.x / dir.y, dir.z / dir.y);
+        }
+    } else {
+        if (dir.z > 0.0) {
+            result.face_id = 4u;
+            result.uv = vec2<f32>(dir.x / dir.z, dir.y / dir.z);
+        } else {
+            result.face_id = 5u;
+            result.uv = vec2<f32>(-dir.x / dir.z, dir.y / dir.z);
+        }
+    }
+
+    result.uv = result.uv * 0.5 + 0.5;
+    return result;
+}
+
+fn cube_face_to_dir(face_id: u32, uv: vec2<f32>) -> vec3<f32> {
+    let mapped_uv = uv * 2.0 - 1.0;
+
+    switch (face_id) {
+        case 0u: { return normalize(vec3<f32>( 1.0, mapped_uv.y, -mapped_uv.x)); }
+        case 1u: { return normalize(vec3<f32>(-1.0, mapped_uv.y,  mapped_uv.x)); }
+        case 2u: { return normalize(vec3<f32>(mapped_uv.x,  1.0, -mapped_uv.y)); }
+        case 3u: { return normalize(vec3<f32>(mapped_uv.x, -1.0,  mapped_uv.y)); }
+        case 4u: { return normalize(vec3<f32>(mapped_uv.x, mapped_uv.y,  1.0)); }
+        default: { return normalize(vec3<f32>(-mapped_uv.x, mapped_uv.y, -1.0)); }
+    }
+}
+
+fn hash_star(seed: f32) -> f32 {
+    return fract(sin(seed * 127.1 + 311.7) * 43758.5453);
+}
+
+fn hash_star_2d(seed: f32) -> vec2<f32> {
+    return vec2<f32>(
+        fract(sin(seed * 127.1 + 311.7) * 43758.5453),
+        fract(sin(seed * 269.5 + 183.3) * 43758.5453)
+    );
+}
+
+// Cube-map based star layer calculation
+fn calculate_star_layer(
+    view_dir: vec3<f32>,
+    face: CubeFace,
+    grid_scale: f32,
+    threshold: f32,
+    star_size: f32,
+    intensity: f32,
+    time: f32,
+    seed_offset: f32
+) -> vec3<f32> {
+    var result_color = vec3<f32>(0.0);
+
+    let cell_uv = face.uv * grid_scale;
+    let cell_x = floor(cell_uv.x);
+    let cell_y = floor(cell_uv.y);
+
+    // Check 3x3 neighborhood to prevent boundary popping
+    for (var dx: i32 = -1; dx <= 1; dx++) {
+        for (var dy: i32 = -1; dy <= 1; dy++) {
+            let check_x = cell_x + f32(dx);
+            let check_y = cell_y + f32(dy);
+
+            // Skip out-of-bounds cells
+            if (check_x < 0.0 || check_x >= grid_scale ||
+                check_y < 0.0 || check_y >= grid_scale) {
+                continue;
+            }
+
+            let cell_id = f32(face.face_id) * 1000000.0 + check_x * 1000.0 + check_y + seed_offset;
+            let star_hash = hash_star(cell_id);
+
+            if (star_hash > threshold) {
+                let star_offset = hash_star_2d(cell_id + 0.5);
+                let star_uv = (vec2<f32>(check_x, check_y) + star_offset) / grid_scale;
+                let star_dir = cube_face_to_dir(face.face_id, star_uv);
+
+                let star_dot = dot(view_dir, star_dir);
+                let angle_to_star = acos(clamp(star_dot, -1.0, 1.0));
+
+                if (angle_to_star < star_size) {
+                    let star_brightness = 1.0 - angle_to_star / star_size;
+                    let brightness_factor = (star_hash - threshold) / (1.0 - threshold);
+                    let twinkle = 0.85 + 0.15 * sin(star_hash * 100.0 + time * 2.0);
+
+                    var this_star_color = vec3<f32>(1.0, 1.0, 1.0);
+                    let color_hash = hash_star(cell_id + 100.0);
+                    if (color_hash < 0.3) {
+                        this_star_color = vec3<f32>(1.0, 0.95, 0.85);  // Warm
+                    } else if (color_hash < 0.4) {
+                        this_star_color = vec3<f32>(0.9, 0.95, 1.0);   // Blue
+                    }
+
+                    let height_factor = max(view_dir.y + 0.1, 0.0);
+                    result_color += this_star_color * star_brightness * brightness_factor *
+                                  intensity * twinkle * height_factor;
+                }
+            }
+        }
+    }
+
+    return result_color;
+}
+
+// Main cube-map star function
+fn calculate_stars_stable(view_dir: vec3<f32>, sun_intensity: f32, time: f32) -> vec3<f32> {
+    if (sun_intensity >= 0.3 || view_dir.y <= -0.1) {
+        return vec3<f32>(0.0);
+    }
+
+    let night_factor = 1.0 - sun_intensity * 3.5;
+    var star_color = vec3<f32>(0.0);
+
+    let face = get_cube_face(view_dir);
+
+    // Primary stars - 20x20 grid per face
+    star_color += calculate_star_layer(view_dir, face, 20.0, 0.85, 0.003, 0.9 * night_factor, time, 0.0);
+
+    // Secondary dimmer stars - 30x30 grid per face
+    star_color += calculate_star_layer(view_dir, face, 30.0, 0.90, 0.002, 0.4 * night_factor, time, 1000000.0);
+
+    return star_color;
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Unproject from NDC to world space to get view direction
@@ -212,135 +363,76 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         }
     }
 
-    // Moon rendering - textured with warm glow
+    // Moon rendering - textured with warm glow (stable UV calculation)
     if (moon_intensity > 0.05) {
         // Subtle outer halo - warm atmospheric glow
         let moon_halo = pow(max(moon_dot, 0.0), 8.0) * 0.08;
         sky_color += vec3<f32>(0.95, 0.80, 0.55) * moon_halo * moon_intensity;
 
-        // Moon disc - size in dot product space
-        let moon_size = 0.997;   // Larger moon disc
-        let moon_edge = 0.999;
+        // Moon angular radius (in radians, ~0.08 = larger moon)
+        let moon_angular_radius = 0.08;
 
-        if (moon_dot > moon_size) {
-            // Calculate UV coordinates for moon texture
-            // Build orthonormal basis around moon direction (handle pole case)
-            var right: vec3<f32>;
-            if (abs(moon_dir.y) > 0.99) {
-                // Moon near zenith/nadir - use X as reference
-                right = normalize(cross(vec3<f32>(1.0, 0.0, 0.0), moon_dir));
+        // Calculate angular distance from view direction to moon center
+        let angle_to_moon = acos(clamp(moon_dot, -1.0, 1.0));
+
+        if (angle_to_moon < moon_angular_radius) {
+            // Project view_dir onto plane perpendicular to moon_dir
+            let offset_vec = view_dir - moon_dir * moon_dot;
+            let offset_len = length(offset_vec);
+
+            var uv: vec2<f32>;
+
+            if (offset_len < 0.0001) {
+                // Looking directly at moon center
+                uv = vec2<f32>(0.5, 0.5);
             } else {
-                // Normal case - use Y as reference
-                right = normalize(cross(vec3<f32>(0.0, 1.0, 0.0), moon_dir));
+                // Choose reference vector based on moon position
+                // This avoids the degenerate case when moon is at zenith
+                let world_up = vec3<f32>(0.0, 1.0, 0.0);
+                let world_forward = vec3<f32>(0.0, 0.0, 1.0);
+
+                let up_dot = abs(dot(moon_dir, world_up));
+                let forward_dot = abs(dot(moon_dir, world_forward));
+
+                // Pick the reference that is more perpendicular to moon_dir
+                var reference: vec3<f32>;
+                if (up_dot < forward_dot) {
+                    reference = world_up;
+                } else {
+                    reference = world_forward;
+                }
+
+                // Gram-Schmidt orthogonalization for stable basis
+                let moon_right = normalize(cross(reference, moon_dir));
+                let moon_up = cross(moon_dir, moon_right);
+
+                let offset_norm = offset_vec / offset_len;
+                let local_x = dot(offset_norm, moon_right) * offset_len;
+                let local_y = dot(offset_norm, moon_up) * offset_len;
+
+                uv = vec2<f32>(
+                    local_x / moon_angular_radius * 0.5 + 0.5,
+                    -local_y / moon_angular_radius * 0.5 + 0.5
+                );
             }
-            let local_up = normalize(cross(moon_dir, right));
-
-            // Get the offset from moon center to view direction
-            let offset = view_dir - moon_dir * moon_dot;
-
-            // Project offset onto the local coordinate system
-            let local_x = dot(offset, right);
-            let local_y = dot(offset, local_up);
-
-            // Calculate distance from center in disc space
-            let disc_radius = sqrt(1.0 - moon_size * moon_size);  // Proper sphere radius
-
-            // Convert to UV [0,1] - center at 0.5, scale to fill texture
-            let uv = vec2<f32>(
-                local_x / disc_radius * 0.5 + 0.5,
-                -local_y / disc_radius * 0.5 + 0.5  // Flip Y for texture coords
-            );
 
             // Sample moon texture
             let moon_tex = textureSample(t_moon, s_moon, uv);
 
-            // Edge softening
-            let edge_blend = smoothstep(moon_size, moon_edge, moon_dot);
+            // Soft edge at disc boundary
+            let edge_softness = 0.01;
+            let edge_blend = 1.0 - smoothstep(moon_angular_radius - edge_softness, moon_angular_radius, angle_to_moon);
 
             // Apply moon texture
             if (moon_tex.a > 0.1) {
-                let moon_surface = moon_tex.rgb * 1.3;  // Brightness boost
+                let moon_surface = moon_tex.rgb * 1.3;
                 sky_color = mix(sky_color, moon_surface, edge_blend * moon_intensity * moon_tex.a);
-            } else {
-                // Fallback for transparent areas - warm disc color
-                let fallback_color = vec3<f32>(0.95, 0.85, 0.65);
-                sky_color = mix(sky_color, fallback_color, edge_blend * moon_intensity * 0.5);
             }
         }
     }
 
-    // Add stars at night (when sun is below horizon)
-    // Stars are fixed in the sky dome - use quantized direction for stable positions
-    if (sun_intensity < 0.3 && view_dir.y > -0.1) {
-        let night_factor = 1.0 - sun_intensity * 3.5;
-
-        // Quantize view direction to create stable star grid
-        // Higher multiplier = more stars, smaller = fewer larger star cells
-        let star_grid = floor(view_dir * 150.0);  // 150 = star density
-
-        // 3D hash for stable star positions (doesn't change with camera rotation)
-        let hash_input = star_grid.x * 127.1 + star_grid.y * 311.7 + star_grid.z * 74.7;
-        let star_hash = fract(sin(hash_input) * 43758.5453);
-
-        // Primary stars - bright, sparse
-        let star_threshold1 = 0.985;
-        if (star_hash > star_threshold1) {
-            let brightness = (star_hash - star_threshold1) / (1.0 - star_threshold1);
-
-            // Sub-cell position for star placement within grid cell
-            let cell_pos = fract(view_dir * 150.0);
-            let star_center = vec3<f32>(
-                fract(sin(hash_input * 1.1) * 12345.6),
-                fract(sin(hash_input * 1.2) * 23456.7),
-                fract(sin(hash_input * 1.3) * 34567.8)
-            );
-            let dist_to_star = length(cell_pos - star_center);
-
-            // Star is a small bright point
-            if (dist_to_star < 0.15) {
-                let star_intensity = 1.0 - dist_to_star / 0.15;
-                let star_intensity_sq = star_intensity * star_intensity;
-
-                // Gentle twinkling based on time
-                let twinkle = 0.9 + 0.1 * sin(star_hash * 100.0 + sky.sky_top_color.a * 3.0);
-
-                // Star colors based on hash
-                var star_color = vec3<f32>(1.0, 1.0, 1.0);  // White default
-                if (star_hash < 0.99) {
-                    star_color = vec3<f32>(1.0, 0.95, 0.85);  // Warm
-                }
-                if (star_hash < 0.9875) {
-                    star_color = vec3<f32>(0.9, 0.95, 1.0);   // Cool blue
-                }
-
-                let height_factor = max(view_dir.y + 0.1, 0.0);
-                sky_color += star_color * brightness * star_intensity_sq * 0.8 * night_factor * twinkle * height_factor;
-            }
-        }
-
-        // Secondary star layer - dimmer background stars
-        let star_grid2 = floor(view_dir * 300.0);
-        let hash_input2 = star_grid2.x * 73.1 + star_grid2.y * 157.3 + star_grid2.z * 213.5;
-        let star_hash2 = fract(sin(hash_input2) * 23421.631);
-
-        let star_threshold2 = 0.975;
-        if (star_hash2 > star_threshold2) {
-            let brightness = (star_hash2 - star_threshold2) / (1.0 - star_threshold2);
-            let cell_pos2 = fract(view_dir * 300.0);
-            let star_center2 = vec3<f32>(
-                fract(sin(hash_input2 * 1.4) * 45678.9),
-                fract(sin(hash_input2 * 1.5) * 56789.0),
-                fract(sin(hash_input2 * 1.6) * 67890.1)
-            );
-            let dist_to_star2 = length(cell_pos2 - star_center2);
-
-            if (dist_to_star2 < 0.12) {
-                let star_intensity = 1.0 - dist_to_star2 / 0.12;
-                let height_factor = max(view_dir.y + 0.1, 0.0);
-                sky_color += vec3<f32>(0.9, 0.92, 0.98) * brightness * star_intensity * 0.25 * night_factor * height_factor;
-            }
-        }
-    }
+    // Stars at night - using cube-map based grid for stability
+    sky_color += calculate_stars_stable(view_dir, sun_intensity, sky.sky_top_color.a);
 
     return vec4<f32>(sky_color, 1.0);
 }
