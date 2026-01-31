@@ -1208,8 +1208,8 @@ impl Renderer {
         self.queue
             .write_buffer(&self.light_buffer, 0, bytemuck::cast_slice(&[light_uniform]));
 
-        // Update sky uniform with day/night colors
-        let sky_uniform = SkyUniform::from_camera_and_time(camera, self.time_of_day);
+        // Update sky uniform with day/night colors and moon phase
+        let sky_uniform = SkyUniform::from_camera_and_time(camera, self.time_of_day, current_time);
         self.queue
             .write_buffer(&self.sky_buffer, 0, bytemuck::cast_slice(&[sky_uniform]));
 
@@ -1951,7 +1951,7 @@ impl Default for SkyUniform {
 }
 
 impl SkyUniform {
-    fn from_camera_and_time(camera: &Camera, time_of_day: f32) -> Self {
+    fn from_camera_and_time(camera: &Camera, time_of_day: f32, elapsed_time: f32) -> Self {
         let cycle = DayNightCycle::from_time(time_of_day);
 
         // Use rotation-only view matrix for sky rendering (no translation)
@@ -1960,12 +1960,18 @@ impl SkyUniform {
         let view_rotation_only = Mat4::look_to_rh(Vec3::ZERO, camera.forward(), Vec3::Y);
         let sky_view_proj = camera.projection_matrix() * view_rotation_only;
 
+        // Moon phase: cycles over ~5 minutes (300 seconds) for testing
+        // 0.0 = new moon, 0.5 = full moon, 1.0 = new moon again
+        // In production, tie this to in-game days (e.g., 29.5 day cycle)
+        let moon_phase_cycle = 300.0; // seconds per full lunar cycle
+        let moon_phase = (elapsed_time / moon_phase_cycle).fract();
+
         Self {
             inv_view_proj: sky_view_proj.inverse().to_cols_array_2d(),
             sun_direction: [cycle.sun_direction.x, cycle.sun_direction.y, cycle.sun_direction.z, cycle.sun_intensity],
             moon_direction: [cycle.moon_direction.x, cycle.moon_direction.y, cycle.moon_direction.z, cycle.moon_intensity],
             sky_top_color: [cycle.sky_top.x, cycle.sky_top.y, cycle.sky_top.z, time_of_day],
-            sky_horizon_color: [cycle.sky_horizon.x, cycle.sky_horizon.y, cycle.sky_horizon.z, 0.0],
+            sky_horizon_color: [cycle.sky_horizon.x, cycle.sky_horizon.y, cycle.sky_horizon.z, moon_phase],
         }
     }
 }

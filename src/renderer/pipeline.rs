@@ -380,53 +380,74 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             let offset_vec = view_dir - moon_dir * moon_dot;
             let offset_len = length(offset_vec);
 
-            var uv: vec2<f32>;
+            // === UV CALCULATION (stable tangent frame - no flipping) ===
+            // Use world forward (0,0,1) as fixed reference - safe because moon path
+            // never aligns with this direction (moon z-component is always < 0.866)
+            let reference = vec3<f32>(0.0, 0.0, 1.0);
+            var moon_right = normalize(cross(reference, moon_dir));
+            let moon_up = cross(moon_dir, moon_right);
 
+            var uv: vec2<f32>;
+            var disk_x: f32 = 0.0;
+            var disk_y: f32 = 0.0;
             if (offset_len < 0.0001) {
-                // Looking directly at moon center
                 uv = vec2<f32>(0.5, 0.5);
             } else {
-                // Choose reference vector based on moon position
-                // This avoids the degenerate case when moon is at zenith
-                let world_up = vec3<f32>(0.0, 1.0, 0.0);
-                let world_forward = vec3<f32>(0.0, 0.0, 1.0);
-
-                let up_dot = abs(dot(moon_dir, world_up));
-                let forward_dot = abs(dot(moon_dir, world_forward));
-
-                // Pick the reference that is more perpendicular to moon_dir
-                var reference: vec3<f32>;
-                if (up_dot < forward_dot) {
-                    reference = world_up;
-                } else {
-                    reference = world_forward;
-                }
-
-                // Gram-Schmidt orthogonalization for stable basis
-                let moon_right = normalize(cross(reference, moon_dir));
-                let moon_up = cross(moon_dir, moon_right);
-
                 let offset_norm = offset_vec / offset_len;
-                let local_x = dot(offset_norm, moon_right) * offset_len;
-                let local_y = dot(offset_norm, moon_up) * offset_len;
-
+                let local_x = dot(offset_norm, moon_right);
+                let local_y = dot(offset_norm, moon_up);
+                // Position on unit disk (-1 to 1)
+                disk_x = local_x * offset_len / moon_angular_radius;
+                disk_y = local_y * offset_len / moon_angular_radius;
                 uv = vec2<f32>(
-                    local_x / moon_angular_radius * 0.5 + 0.5,
-                    -local_y / moon_angular_radius * 0.5 + 0.5
+                    disk_x * 0.5 + 0.5,
+                    -disk_y * 0.5 + 0.5
                 );
             }
 
-            // Sample moon texture
             let moon_tex = textureSample(t_moon, s_moon, uv);
 
-            // Soft edge at disc boundary
             let edge_softness = 0.01;
             let edge_blend = 1.0 - smoothstep(moon_angular_radius - edge_softness, moon_angular_radius, angle_to_moon);
 
-            // Apply moon texture
+            // === PHASE ILLUMINATION (spherical geometry for crescent shape) ===
+            let moon_phase = sky.sky_horizon_color.a;
+
+            // Calculate 3D position on unit sphere for this point on the visible disk
+            // disk_x, disk_y are coordinates on the 2D disk (-1 to 1)
+            // sphere_z is the depth (front face of sphere)
+            let r_sq = disk_x * disk_x + disk_y * disk_y;
+            let sphere_z = sqrt(max(1.0 - r_sq, 0.0));
+
+            // Phase determines light direction (rotates around the moon)
+            // phase 0.0 = new moon (light from behind: -z)
+            // phase 0.25 = first quarter (light from right: +x)
+            // phase 0.5 = full moon (light from front: +z)
+            // phase 0.75 = last quarter (light from left: -x)
+            let phase_angle = moon_phase * 6.28318;
+            let light_x = sin(phase_angle);
+            let light_z = -cos(phase_angle);
+
+            // Illumination = dot(surface_normal, light_dir)
+            // For unit sphere, surface normal at (x,y,z) is just (x,y,z)
+            let illumination = disk_x * light_x + sphere_z * light_z;
+
+            // Soft terminator for realistic falloff
+            let lit_amount = smoothstep(-0.05, 0.15, illumination);
+
+            // Very subtle earthshine for shadow side - mostly invisible
+            let earthshine = 0.015;
+
             if (moon_tex.a > 0.1) {
-                let moon_surface = moon_tex.rgb * 1.3;
-                sky_color = mix(sky_color, moon_surface, edge_blend * moon_intensity * moon_tex.a);
+                let lit_color = moon_tex.rgb * 1.3;
+                let shadow_color = moon_tex.rgb * earthshine * vec3<f32>(0.7, 0.8, 1.0);
+                let moon_surface = mix(shadow_color, lit_color, lit_amount);
+
+                // Visibility depends on how much of this point is lit
+                // Unlit portions fade toward invisible (blend with sky)
+                let point_visibility = lit_amount + earthshine;
+                let alpha = edge_blend * moon_intensity * moon_tex.a * point_visibility;
+                sky_color = mix(sky_color, moon_surface, alpha);
             }
         }
     }
