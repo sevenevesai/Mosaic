@@ -316,6 +316,19 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let moon_intensity = sky.moon_direction.w;
     let moon_dot = dot(view_dir, moon_dir);
 
+    // Moon phase determines how much of the moon is illuminated
+    // Used to scale halo/glow and affect night sky brightness
+    let moon_phase = sky.sky_horizon_color.a;
+    let phase_angle_global = moon_phase * 6.28318;
+    // lit_fraction: 0 at new moon, 1 at full moon, 0.5 at quarters
+    let moon_lit_fraction = (1.0 - cos(phase_angle_global)) * 0.5;
+
+    // Darken night sky when moon provides less light
+    // Only applies at night (when sun is down and moon is up)
+    let night_factor = (1.0 - sun_intensity) * moon_intensity;
+    let moon_sky_dim = mix(0.4, 1.0, moon_lit_fraction); // 40% brightness at new moon
+    sky_color *= mix(1.0, moon_sky_dim, night_factor);
+
     // Sun rendering - warmer at horizon, larger near sunrise/sunset
     if (sun_intensity > 0.05) {
         // Calculate how close sun is to horizon (0 = horizon, 1 = high in sky)
@@ -364,9 +377,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     // Moon rendering - textured with warm glow (stable UV calculation)
-    if (moon_intensity > 0.05) {
-        // Subtle outer halo - warm atmospheric glow
-        let moon_halo = pow(max(moon_dot, 0.0), 8.0) * 0.08;
+    // Only render when moon is up AND has visible illumination
+    if (moon_intensity > 0.05 && moon_lit_fraction > 0.02) {
+        // Subtle outer halo - warm atmospheric glow, scaled by how lit the moon is
+        let moon_halo = pow(max(moon_dot, 0.0), 8.0) * 0.08 * moon_lit_fraction;
         sky_color += vec3<f32>(0.95, 0.80, 0.55) * moon_halo * moon_intensity;
 
         // Moon angular radius (in radians, ~0.08 = larger moon)
@@ -380,11 +394,26 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             let offset_vec = view_dir - moon_dir * moon_dot;
             let offset_len = length(offset_vec);
 
-            // === UV CALCULATION (stable tangent frame - no flipping) ===
-            // Use world forward (0,0,1) as fixed reference - safe because moon path
-            // never aligns with this direction (moon z-component is always < 0.866)
-            let reference = vec3<f32>(0.0, 0.0, 1.0);
-            var moon_right = normalize(cross(reference, moon_dir));
+            // === WORLD-SPACE TANGENT FRAME ===
+            // Use a fixed world-space reference to avoid any flipping at zenith.
+            // "Right" on the moon = East direction (1,0,0) projected onto moon's tangent plane
+            // This gives consistent orientation regardless of where moon is in sky.
+            let world_east = vec3<f32>(1.0, 0.0, 0.0);
+
+            // Project east onto plane perpendicular to moon_dir
+            var moon_right = world_east - moon_dir * dot(world_east, moon_dir);
+            let right_len = length(moon_right);
+
+            if (right_len > 0.001) {
+                moon_right = moon_right / right_len;
+            } else {
+                // Moon is directly east or west - use north as fallback
+                let world_north = vec3<f32>(0.0, 0.0, -1.0);
+                moon_right = world_north - moon_dir * dot(world_north, moon_dir);
+                moon_right = normalize(moon_right);
+            }
+
+            // moon_up completes the orthonormal frame (perpendicular to both moon_dir and moon_right)
             let moon_up = cross(moon_dir, moon_right);
 
             var uv: vec2<f32>;
@@ -410,34 +439,22 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             let edge_softness = 0.01;
             let edge_blend = 1.0 - smoothstep(moon_angular_radius - edge_softness, moon_angular_radius, angle_to_moon);
 
-            // === PHASE ILLUMINATION (world-space light for stable terminator) ===
+            // === PHASE ILLUMINATION (in horizon-aligned local coords) ===
             let moon_phase = sky.sky_horizon_color.a;
 
             // Calculate 3D position on unit sphere for this point on the visible disk
             let r_sq = disk_x * disk_x + disk_y * disk_y;
             let sphere_z = sqrt(max(1.0 - r_sq, 0.0));
 
-            // Phase light direction in WORLD SPACE (not rotating local frame)
-            // This keeps the terminator oriented consistently as moon traverses sky
-            // Light comes from world-east at quarters, from front/back at full/new
-            let world_east = vec3<f32>(1.0, 0.0, 0.0);
-
+            // Phase determines light direction in the horizon-aligned local frame
+            // This is now stable because moon_right is always horizontal
             let phase_angle = moon_phase * 6.28318;
-            let from_side = sin(phase_angle);    // ±1 at quarters, 0 at new/full
-            let from_front = -cos(phase_angle);  // +1 at full, -1 at new
+            let light_x = sin(phase_angle);   // ±1 at quarters, 0 at new/full
+            let light_z = -cos(phase_angle);  // +1 at full (front), -1 at new (behind)
 
-            // World-space light direction
-            // moon_dir points from camera toward moon, so -moon_dir is "toward camera"
-            let light_world = normalize(world_east * from_side - moon_dir * from_front);
-
-            // Transform world light direction to moon-local coordinates
-            // Local coords: x = moon_right, y = moon_up, z = toward camera (-moon_dir)
-            let light_local_x = dot(light_world, moon_right);
-            let light_local_y = dot(light_world, moon_up);
-            let light_local_z = -dot(light_world, moon_dir);
-
-            // Surface normal in local coords is (disk_x, disk_y, sphere_z)
-            let illumination = disk_x * light_local_x + disk_y * light_local_y + sphere_z * light_local_z;
+            // Illumination on spherical surface
+            // disk_x = horizontal position, sphere_z = depth toward viewer
+            let illumination = disk_x * light_x + sphere_z * light_z;
 
             // Soft terminator for realistic falloff
             let lit_amount = smoothstep(-0.05, 0.15, illumination);

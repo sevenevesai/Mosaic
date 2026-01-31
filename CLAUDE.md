@@ -9,7 +9,7 @@ cargo build --release
 ./target/release/mosaic.exe
 ```
 
-**Controls:** WASD move, Space jump/fly-up, Shift fly-down, Ctrl sprint, F fly mode, F3 debug, T day/night speed, Y shadow mode, U shadow debug, V volumetric light shafts, 1-8 blocks (1=Stone, 2=Dirt, 3=Grass, 4=StoneDirt, 5=Brick, 6=Wood, 7=Leaves, 8=Torch), LMB break, RMB place, P perf log, Esc release mouse.
+**Controls:** WASD move, Space jump/fly-up, Shift fly-down, Ctrl sprint, F fly mode, E inventory, 1-9 hotbar slots, Scroll wheel cycle slots, LMB break, RMB place, F3 debug, T day/night speed, Y shadow mode, U shadow debug, V volumetric light shafts, P perf log, Esc menu.
 
 ## Commands
 
@@ -27,9 +27,14 @@ cargo build --release
 src/
 ├── app.rs           # Main loop, input handling
 ├── lib.rs           # Constants: RENDER_DISTANCE, LOD thresholds, physics
+├── inventory/
+│   ├── mod.rs       # Module exports
+│   ├── item.rs      # Item types, tags, rarity, stacking
+│   └── inventory.rs # Slots, hotbar, sorting, Quick Stack
 ├── renderer/
 │   ├── mod.rs       # GPU state, render passes, day/night cycle
 │   ├── pipeline.rs  # WGSL shaders (chunk, water, sky, UI)
+│   ├── inventory_ui.rs # Hotbar/inventory UI rendering
 │   ├── voxel_gi.rs  # Voxel GI: 256³ volume, DDA shadows, VCT
 │   ├── volumetrics.rs # Volumetric light shafts (god rays)
 │   └── chunk_pool.rs # MDI mega-buffers
@@ -41,7 +46,7 @@ src/
 │   ├── generation.rs # Biomes, caves, terrain, trees
 │   ├── lighting.rs  # BFS flood fill propagation
 │   └── storage/     # Region files, zstd compression
-└── player/mod.rs    # AABB collision, raycast, block interaction
+└── player/mod.rs    # AABB collision, raycast, inventory integration
 ```
 
 ## Biome System
@@ -167,6 +172,33 @@ Depth-based distribution in `get_ore_or_stone_fast()`:
 - **Hash slots**: Each position gets ONE ore type based on `hash % 1000` slot ranges
 - **Coal special**: Uses lower frequency noise (0.06) for chunkier 4-8 block veins
 - **Depth tiers**: Very rare (Y<16), rare (Y<32), uncommon (Y<50), common (Y<70)
+
+## Inventory System
+
+Player inventory with hotbar and item management (`inventory/` module):
+
+**Structure:**
+- 9-slot hotbar (slots 0-8) + 27-slot main inventory = 36 total slots
+- Items stack up to 64 (configurable per item type)
+- Locked slots protected during sorting
+- Drag-and-drop item movement when inventory open
+
+**Controls:**
+- **E**: Toggle inventory open/closed (releases mouse cursor)
+- **1-9**: Select hotbar slot directly
+- **Scroll wheel**: Cycle through hotbar slots
+- **LMB on slot**: Pick up / put down item stack
+- **RMB on slot**: Pick up half stack or place one item
+
+**Item Tags** (for future sorting/filtering/Quick Stack):
+- Categories: `RawMaterial`, `ProcessedMaterial`, `BuildingBlock`, `Ore`, `Wood`, `Stone`, `Soil`, `Organic`
+- Usage: `Combustible`, `Tool`, `Weapon`, `Armor`, `Consumable`, `LightSource`, `Decoration`
+- Rarity: `Common`, `Uncommon`, `Rare`, `Epic`, `Legendary` (affects sort order and UI color)
+
+**Block Interactions:**
+- Breaking blocks adds items to inventory (if space available)
+- Placing blocks consumes from selected hotbar slot
+- Only blocks with `Item::from_block()` returning `Some` drop items (Air, Water, Bedrock don't drop)
 
 ## Common Tasks
 

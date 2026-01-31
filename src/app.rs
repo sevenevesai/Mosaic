@@ -275,6 +275,20 @@ impl App {
                         KeyCode::KeyP if pressed => {
                             self.profiler.toggle_verbose();
                         }
+                        KeyCode::KeyE if pressed && !self.settings_menu.is_open => {
+                            // Toggle inventory with cursor grab handling
+                            let was_open = self.player.is_inventory_open();
+                            self.player.handle_key(key_code, pressed);
+                            let is_open = self.player.is_inventory_open();
+
+                            if !was_open && is_open && self.cursor_grabbed {
+                                // Inventory opened: release cursor
+                                self.toggle_cursor_grab();
+                            } else if was_open && !is_open && !self.cursor_grabbed {
+                                // Inventory closed: re-grab cursor
+                                self.toggle_cursor_grab();
+                            }
+                        }
                         _ => {
                             self.player.handle_key(key_code, pressed);
                         }
@@ -291,6 +305,21 @@ impl App {
                         // Note: display mode changes are applied at start of next frame
                         // to avoid race conditions with the render pipeline
                     }
+                } else if self.player.is_inventory_open() {
+                    // Handle inventory clicks
+                    let size = self.window.inner_size();
+                    let (mx, my) = self.player.inventory.mouse_pos();
+                    if state == ElementState::Pressed {
+                        match button {
+                            MouseButton::Left => {
+                                self.player.inventory.handle_click(mx, my, size.width as f32, size.height as f32);
+                            }
+                            MouseButton::Right => {
+                                self.player.inventory.handle_right_click(mx, my, size.width as f32, size.height as f32);
+                            }
+                            _ => {}
+                        }
+                    }
                 } else if !self.cursor_grabbed {
                     if state == ElementState::Pressed {
                         self.toggle_cursor_grab();
@@ -301,9 +330,26 @@ impl App {
                 }
             }
 
+            WindowEvent::MouseWheel { delta, .. } => {
+                use winit::event::MouseScrollDelta;
+                if !self.settings_menu.is_open && !self.player.is_inventory_open() {
+                    let scroll = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => y,
+                        MouseScrollDelta::PixelDelta(pos) => (pos.y / 50.0) as f32,
+                    };
+                    self.player.handle_scroll(scroll);
+                }
+            }
+
             WindowEvent::CursorMoved { position, .. } => {
+                let (x, y) = (position.x as f32, position.y as f32);
                 if self.settings_menu.is_open {
-                    self.settings_menu.update_mouse(position.x as f32, position.y as f32);
+                    self.settings_menu.update_mouse(x, y);
+                }
+                if self.player.is_inventory_open() {
+                    let size = self.window.inner_size();
+                    self.player.inventory.update_mouse(x, y);
+                    self.player.inventory.update_hover(x, y, size.width as f32, size.height as f32);
                 }
             }
 
@@ -351,7 +397,7 @@ impl App {
             // Process block break/place interactions
             let interaction = self.player.process_block_interactions(&mut self.world);
             match interaction {
-                BlockInteraction::Break { x, y, z } => {
+                BlockInteraction::Break { x, y, z, .. } => {
                     // Mark only the affected block for voxel GI update (incremental)
                     self.renderer.mark_voxel_dirty_at(x, y, z);
                     if let Some(ref mut audio) = self.audio {
@@ -452,7 +498,7 @@ impl App {
         // Render
         self.profiler.begin_section("render");
         let held_light = self.player.selected_block().light_emission();
-        match self.renderer.render(&self.player.camera, &mut self.world, &self.profiler, target_block, &debug_metrics, held_light, &self.settings_menu) {
+        match self.renderer.render(&self.player.camera, &mut self.world, &self.profiler, target_block, &debug_metrics, held_light, &self.settings_menu, &self.player.inventory) {
             Ok(_) => {
                 // Update profiler with render stats
                 self.profiler.update_render_stats(self.renderer.stats.clone());

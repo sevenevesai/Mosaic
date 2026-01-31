@@ -7,6 +7,7 @@ mod camera;
 mod chunk_pool;
 mod debug_overlay;
 mod gpu_culling;
+mod inventory_ui;
 mod pipeline;
 mod texture;
 pub mod voxel_gi;
@@ -153,6 +154,7 @@ pub struct Renderer {
     // Day/night cycle
     time_of_day: f32,      // 0.0 = midnight, 0.25 = dawn, 0.5 = noon, 0.75 = dusk
     cycle_speed: f32,      // Multiplier for cycle speed (1.0 = 10 min day, higher = faster)
+    day_count: u32,        // Number of complete days elapsed (for moon phase)
 
     // Shadow mode: -1.0 = off, 0.0 = hard shadows, 1.0 = soft shadows
     shadow_mode: f32,
@@ -184,6 +186,9 @@ pub struct Renderer {
 
     // Settings menu dimmer overlay
     dimmer_pipeline: wgpu::RenderPipeline,
+
+    // Inventory UI
+    inventory_ui: inventory_ui::InventoryUI,
 }
 
 impl Renderer {
@@ -618,6 +623,9 @@ impl Renderer {
             &water_bind_group_layout,
         );
 
+        // Create inventory UI renderer
+        let inventory_ui = inventory_ui::InventoryUI::new(&device, surface_format, &texture_bind_group_layout);
+
         Self {
             surface,
             device,
@@ -656,6 +664,7 @@ impl Renderer {
             start_time: std::time::Instant::now(),
             time_of_day: 0.35,   // Start at mid-morning
             cycle_speed: 10.0,   // 10x speed for testing (1 min = 1 day cycle)
+            day_count: 0,        // Start at day 0
             shadow_mode: 0.0,    // Start with hard shadows (-1=off, 0=hard, 1=soft)
             shadow_debug: 0.0,   // Shadow debug off by default
             bloom_enabled: true,
@@ -671,6 +680,7 @@ impl Renderer {
             volumetrics,
             volumetric_uniform_buffer,
             dimmer_pipeline,
+            inventory_ui,
         }
     }
 
@@ -691,6 +701,7 @@ impl Renderer {
             self.surface.configure(&self.device, &self.config);
             self.depth_texture = Self::create_depth_texture(&self.device, &self.config);
             self.debug_overlay.update_screen_size(new_size.width as f32, new_size.height as f32);
+            self.inventory_ui.update_screen_size(new_size.width as f32, new_size.height as f32);
 
             // Resize scene texture for bloom
             self.scene_texture = self.device.create_texture(&wgpu::TextureDescriptor {
@@ -743,7 +754,18 @@ impl Renderer {
         // Base cycle: 600 seconds (10 minutes) for a full day
         let base_cycle_duration = 600.0;
         let time_increment = dt / base_cycle_duration * self.cycle_speed;
+        let old_time = self.time_of_day;
         self.time_of_day = (self.time_of_day + time_increment) % 1.0;
+
+        // Detect day wrap (time went from high to low)
+        if self.time_of_day < old_time && time_increment > 0.0 {
+            self.day_count = self.day_count.wrapping_add(1);
+        }
+    }
+
+    /// Get current day count (for moon phase calculation)
+    pub fn day_count(&self) -> u32 {
+        self.day_count
     }
 
     /// Toggle through cycle speed presets
@@ -1164,6 +1186,7 @@ impl Renderer {
         debug_metrics: &DebugMetrics,
         held_light_emission: u8,  // Light emission of held item (0 = none, 14 = torch)
         settings_menu: &crate::settings_menu::SettingsMenu,
+        inventory: &crate::inventory::Inventory,
     ) -> Result<(), wgpu::SurfaceError> {
         let render_start = std::time::Instant::now();
 
@@ -1209,7 +1232,7 @@ impl Renderer {
             .write_buffer(&self.light_buffer, 0, bytemuck::cast_slice(&[light_uniform]));
 
         // Update sky uniform with day/night colors and moon phase
-        let sky_uniform = SkyUniform::from_camera_and_time(camera, self.time_of_day, current_time);
+        let sky_uniform = SkyUniform::from_camera_and_time(camera, self.time_of_day, self.day_count);
         self.queue
             .write_buffer(&self.sky_buffer, 0, bytemuck::cast_slice(&[sky_uniform]));
 
@@ -1336,6 +1359,9 @@ impl Renderer {
         } else {
             None
         };
+
+        // Build inventory UI vertices (before render pass borrow)
+        self.inventory_ui.build_vertices(&self.queue, inventory);
 
         // === MAIN RENDER PASS (render to scene texture for bloom) ===
         {
@@ -1561,10 +1587,15 @@ impl Renderer {
                 render_pass.draw(0..24, 0..1);
             }
 
-            // Render crosshair (UI, no depth)
-            render_pass.set_pipeline(&self.ui_pipeline);
-            render_pass.set_vertex_buffer(0, self.crosshair_vertex_buffer.slice(..));
-            render_pass.draw(0..12, 0..1);
+            // Render crosshair (UI, no depth) - hide when inventory is open
+            if !inventory.is_open {
+                render_pass.set_pipeline(&self.ui_pipeline);
+                render_pass.set_vertex_buffer(0, self.crosshair_vertex_buffer.slice(..));
+                render_pass.draw(0..12, 0..1);
+            }
+
+            // Render inventory UI (hotbar always, full inventory when open)
+            self.inventory_ui.render(&mut render_pass, &self.texture_bind_group);
 
             // Render debug overlay and optionally settings menu
             self.debug_overlay.render(
@@ -1951,7 +1982,7 @@ impl Default for SkyUniform {
 }
 
 impl SkyUniform {
-    fn from_camera_and_time(camera: &Camera, time_of_day: f32, elapsed_time: f32) -> Self {
+    fn from_camera_and_time(camera: &Camera, time_of_day: f32, day_count: u32) -> Self {
         let cycle = DayNightCycle::from_time(time_of_day);
 
         // Use rotation-only view matrix for sky rendering (no translation)
@@ -1960,11 +1991,11 @@ impl SkyUniform {
         let view_rotation_only = Mat4::look_to_rh(Vec3::ZERO, camera.forward(), Vec3::Y);
         let sky_view_proj = camera.projection_matrix() * view_rotation_only;
 
-        // Moon phase: cycles over ~5 minutes (300 seconds) for testing
+        // Moon phase: based on day count, not continuous time
+        // Phase stays constant within a single night, changes between days
         // 0.0 = new moon, 0.5 = full moon, 1.0 = new moon again
-        // In production, tie this to in-game days (e.g., 29.5 day cycle)
-        let moon_phase_cycle = 300.0; // seconds per full lunar cycle
-        let moon_phase = (elapsed_time / moon_phase_cycle).fract();
+        let lunar_cycle_days = 8; // 8 game days per full lunar cycle
+        let moon_phase = (day_count % lunar_cycle_days) as f32 / lunar_cycle_days as f32;
 
         Self {
             inv_view_proj: sky_view_proj.inverse().to_cols_array_2d(),

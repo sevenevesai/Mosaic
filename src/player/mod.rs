@@ -1,6 +1,6 @@
 //! Player module
 //!
-//! Handles player input, movement, and camera control.
+//! Handles player input, movement, camera control, and inventory management.
 
 use std::time::Duration;
 
@@ -14,6 +14,7 @@ use crate::constants::{
     PLAYER_WIDTH, PLAYER_HEIGHT, PLAYER_EYE_HEIGHT,
     GRAVITY, JUMP_VELOCITY, TERMINAL_VELOCITY, PLAYER_REACH,
 };
+use crate::inventory::{Inventory, Item};
 use crate::renderer::Camera;
 use crate::world::{Block, WorldManager, raycast};
 
@@ -23,7 +24,7 @@ pub enum BlockInteraction {
     /// No interaction occurred
     None,
     /// A block was broken at the given world position
-    Break { x: i32, y: i32, z: i32 },
+    Break { x: i32, y: i32, z: i32, block: Block },
     /// A block was placed at the given world position
     Place { x: i32, y: i32, z: i32 },
 }
@@ -76,7 +77,9 @@ pub struct Player {
     // Block interaction
     break_requested: bool,
     place_requested: bool,
-    selected_block: Block,
+
+    /// Player inventory (holds items, manages selection)
+    pub inventory: Inventory,
 
     // Physics
     on_ground: bool,
@@ -103,7 +106,7 @@ impl Player {
             sprint: false,
             break_requested: false,
             place_requested: false,
-            selected_block: Block::Stone,
+            inventory: Inventory::new(),
             on_ground: false,
             in_water: false,
             fly_mode: false,
@@ -114,9 +117,9 @@ impl Player {
         self.camera.position
     }
 
-    /// Get the currently selected block (for placement and held light)
+    /// Get the currently selected block (from inventory, for placement and held light)
     pub fn selected_block(&self) -> Block {
-        self.selected_block
+        self.inventory.selected_block().unwrap_or(Block::Air)
     }
 
     /// Get horizontal movement speed (for footstep audio)
@@ -143,6 +146,11 @@ impl Player {
         self.in_water
     }
 
+    /// Check if inventory is open (affects input handling)
+    pub fn is_inventory_open(&self) -> bool {
+        self.inventory.is_open
+    }
+
     /// Get the block currently being targeted (for rendering outline)
     pub fn get_target_block(&self, world: &WorldManager) -> Option<[i32; 3]> {
         let origin = self.camera.position;
@@ -151,6 +159,17 @@ impl Player {
     }
 
     pub fn handle_key(&mut self, key: KeyCode, pressed: bool) {
+        // E key toggles inventory regardless of other state
+        if key == KeyCode::KeyE && pressed {
+            self.inventory.toggle();
+            return;
+        }
+
+        // When inventory is open, ignore most gameplay keys
+        if self.inventory.is_open {
+            return;
+        }
+
         match key {
             KeyCode::KeyW => self.move_forward = pressed,
             KeyCode::KeyS => self.move_backward = pressed,
@@ -165,26 +184,51 @@ impl Player {
                     tracing::info!("Fly mode: {}", if self.fly_mode { "ON" } else { "OFF" });
                 }
             }
-            // Block selection with number keys
-            KeyCode::Digit1 => if pressed { self.selected_block = Block::Stone; }
-            KeyCode::Digit2 => if pressed { self.selected_block = Block::Dirt; }
-            KeyCode::Digit3 => if pressed { self.selected_block = Block::Grass; }
-            KeyCode::Digit4 => if pressed { self.selected_block = Block::StoneDirt; }
-            KeyCode::Digit5 => if pressed { self.selected_block = Block::Brick; }
-            KeyCode::Digit6 => if pressed { self.selected_block = Block::Wood; }
-            KeyCode::Digit7 => if pressed { self.selected_block = Block::Leaves; }
-            KeyCode::Digit8 => if pressed { self.selected_block = Block::Torch; }
+            // Hotbar selection with number keys
+            KeyCode::Digit1 => if pressed { self.inventory.select_slot(0); }
+            KeyCode::Digit2 => if pressed { self.inventory.select_slot(1); }
+            KeyCode::Digit3 => if pressed { self.inventory.select_slot(2); }
+            KeyCode::Digit4 => if pressed { self.inventory.select_slot(3); }
+            KeyCode::Digit5 => if pressed { self.inventory.select_slot(4); }
+            KeyCode::Digit6 => if pressed { self.inventory.select_slot(5); }
+            KeyCode::Digit7 => if pressed { self.inventory.select_slot(6); }
+            KeyCode::Digit8 => if pressed { self.inventory.select_slot(7); }
+            KeyCode::Digit9 => if pressed { self.inventory.select_slot(8); }
             _ => {}
         }
     }
 
+    /// Handle mouse scroll for hotbar slot selection
+    pub fn handle_scroll(&mut self, delta: f32) {
+        if self.inventory.is_open {
+            return; // Could be used for inventory scrolling later
+        }
+
+        if delta > 0.0 {
+            self.inventory.prev_slot();
+        } else if delta < 0.0 {
+            self.inventory.next_slot();
+        }
+    }
+
     pub fn handle_mouse_motion(&mut self, delta_x: f32, delta_y: f32) {
+        // Don't rotate camera when inventory is open
+        if self.inventory.is_open {
+            return;
+        }
+
         const SENSITIVITY: f32 = 0.002;
         self.camera.rotate(delta_x, delta_y, SENSITIVITY);
     }
 
     pub fn handle_mouse_button(&mut self, button: MouseButton, pressed: bool) {
         if !pressed {
+            return;
+        }
+
+        // If inventory is open, don't process world clicks here
+        // (inventory clicks are handled separately)
+        if self.inventory.is_open {
             return;
         }
 
@@ -206,8 +250,8 @@ impl Player {
     pub fn process_block_interactions(&mut self, world: &mut WorldManager) -> BlockInteraction {
         if self.break_requested {
             self.break_requested = false;
-            if let Some((x, y, z)) = self.try_break_block(world) {
-                return BlockInteraction::Break { x, y, z };
+            if let Some((x, y, z, block)) = self.try_break_block(world) {
+                return BlockInteraction::Break { x, y, z, block };
             }
         }
 
@@ -221,7 +265,7 @@ impl Player {
         BlockInteraction::None
     }
 
-    fn try_break_block(&self, world: &mut WorldManager) -> Option<(i32, i32, i32)> {
+    fn try_break_block(&mut self, world: &mut WorldManager) -> Option<(i32, i32, i32, Block)> {
         let origin = self.camera.position;
         let direction = self.camera.forward();
 
@@ -231,15 +275,28 @@ impl Player {
             if let Some(block) = world.get_block(x, y, z) {
                 if block != Block::Bedrock {
                     world.set_block(x, y, z, Block::Air);
-                    tracing::debug!("Broke block at ({}, {}, {})", x, y, z);
-                    return Some((x, y, z));
+
+                    // Add the broken block to inventory
+                    if let Some(item) = Item::from_block(block) {
+                        let overflow = self.inventory.add_item(item, 1);
+                        if overflow > 0 {
+                            tracing::debug!("Inventory full, dropped {} items", overflow);
+                            // TODO: Spawn dropped item entity
+                        }
+                    }
+
+                    tracing::debug!("Broke {:?} at ({}, {}, {})", block, x, y, z);
+                    return Some((x, y, z, block));
                 }
             }
         }
         None
     }
 
-    fn try_place_block(&self, world: &mut WorldManager) -> Option<(i32, i32, i32)> {
+    fn try_place_block(&mut self, world: &mut WorldManager) -> Option<(i32, i32, i32)> {
+        // Check if we have a block to place
+        let block_to_place = self.inventory.selected_block()?;
+
         let origin = self.camera.position;
         let direction = self.camera.forward();
 
@@ -269,10 +326,14 @@ impl Player {
 
             if !intersects {
                 // Place if target is air or water (can replace water with solid blocks)
-                if let Some(block) = world.get_block(x, y, z) {
-                    if block == Block::Air || block == Block::Water {
-                        world.set_block(x, y, z, self.selected_block);
-                        tracing::debug!("Placed {:?} at ({}, {}, {})", self.selected_block, x, y, z);
+                if let Some(target_block) = world.get_block(x, y, z) {
+                    if target_block == Block::Air || target_block == Block::Water {
+                        world.set_block(x, y, z, block_to_place);
+
+                        // Consume the item from inventory
+                        self.inventory.consume_selected();
+
+                        tracing::debug!("Placed {:?} at ({}, {}, {})", block_to_place, x, y, z);
                         return Some((x, y, z));
                     }
                 }
@@ -561,6 +622,7 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::inventory::HOTBAR_SIZE;
 
     #[test]
     fn test_lerp() {
@@ -623,6 +685,7 @@ mod tests {
         assert!(!player.is_flying());
         assert!(!player.is_on_ground());
         assert!(!player.is_sprinting());
+        assert!(!player.is_inventory_open());
     }
 
     #[test]
@@ -639,14 +702,22 @@ mod tests {
 
     #[test]
     fn test_player_selected_block() {
+        let player = Player::new(Vec3::new(0.0, 100.0, 0.0));
+
+        // Default inventory has stone in slot 0
+        assert_eq!(player.selected_block(), Block::Stone);
+    }
+
+    #[test]
+    fn test_player_inventory_integration() {
         let mut player = Player::new(Vec3::new(0.0, 100.0, 0.0));
 
-        // Default is Stone
-        assert_eq!(player.selected_block(), Block::Stone);
-
-        // Can change
-        player.selected_block = Block::Torch;
+        // Select different slot
+        player.inventory.select_slot(7); // Torch
         assert_eq!(player.selected_block(), Block::Torch);
+
+        // Add item to inventory
+        assert!(player.inventory.add_block(Block::DiamondOre));
     }
 
     #[test]
@@ -674,14 +745,47 @@ mod tests {
     }
 
     #[test]
-    fn test_player_block_selection_keys() {
+    fn test_player_hotbar_selection_keys() {
         let mut player = Player::new(Vec3::ZERO);
 
-        player.handle_key(KeyCode::Digit2, true);
-        assert_eq!(player.selected_block, Block::Dirt);
+        player.handle_key(KeyCode::Digit1, true);
+        assert_eq!(player.inventory.selected_index(), 0);
 
-        player.handle_key(KeyCode::Digit8, true);
-        assert_eq!(player.selected_block, Block::Torch);
+        player.handle_key(KeyCode::Digit5, true);
+        assert_eq!(player.inventory.selected_index(), 4);
+
+        player.handle_key(KeyCode::Digit9, true);
+        assert_eq!(player.inventory.selected_index(), 8);
+    }
+
+    #[test]
+    fn test_player_inventory_toggle() {
+        let mut player = Player::new(Vec3::ZERO);
+
+        assert!(!player.is_inventory_open());
+        player.handle_key(KeyCode::KeyE, true);
+        assert!(player.is_inventory_open());
+        player.handle_key(KeyCode::KeyE, true);
+        assert!(!player.is_inventory_open());
+    }
+
+    #[test]
+    fn test_player_scroll_changes_slot() {
+        let mut player = Player::new(Vec3::ZERO);
+
+        assert_eq!(player.inventory.selected_index(), 0);
+
+        // Scroll down (next slot)
+        player.handle_scroll(-1.0);
+        assert_eq!(player.inventory.selected_index(), 1);
+
+        // Scroll up (previous slot)
+        player.handle_scroll(1.0);
+        assert_eq!(player.inventory.selected_index(), 0);
+
+        // Wrap around
+        player.handle_scroll(1.0);
+        assert_eq!(player.inventory.selected_index(), HOTBAR_SIZE - 1);
     }
 
     #[test]
@@ -707,15 +811,16 @@ mod tests {
     #[test]
     fn test_block_interaction_enum() {
         let none = BlockInteraction::None;
-        let brk = BlockInteraction::Break { x: 1, y: 2, z: 3 };
+        let brk = BlockInteraction::Break { x: 1, y: 2, z: 3, block: Block::Stone };
         let place = BlockInteraction::Place { x: 4, y: 5, z: 6 };
 
         assert_eq!(none, BlockInteraction::None);
         assert_ne!(brk, none);
         assert_ne!(place, none);
 
-        if let BlockInteraction::Break { x, y, z } = brk {
+        if let BlockInteraction::Break { x, y, z, block } = brk {
             assert_eq!((x, y, z), (1, 2, 3));
+            assert_eq!(block, Block::Stone);
         } else {
             panic!("Expected Break variant");
         }
