@@ -410,27 +410,34 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             let edge_softness = 0.01;
             let edge_blend = 1.0 - smoothstep(moon_angular_radius - edge_softness, moon_angular_radius, angle_to_moon);
 
-            // === PHASE ILLUMINATION (spherical geometry for crescent shape) ===
+            // === PHASE ILLUMINATION (world-space light for stable terminator) ===
             let moon_phase = sky.sky_horizon_color.a;
 
             // Calculate 3D position on unit sphere for this point on the visible disk
-            // disk_x, disk_y are coordinates on the 2D disk (-1 to 1)
-            // sphere_z is the depth (front face of sphere)
             let r_sq = disk_x * disk_x + disk_y * disk_y;
             let sphere_z = sqrt(max(1.0 - r_sq, 0.0));
 
-            // Phase determines light direction (rotates around the moon)
-            // phase 0.0 = new moon (light from behind: -z)
-            // phase 0.25 = first quarter (light from right: +x)
-            // phase 0.5 = full moon (light from front: +z)
-            // phase 0.75 = last quarter (light from left: -x)
-            let phase_angle = moon_phase * 6.28318;
-            let light_x = sin(phase_angle);
-            let light_z = -cos(phase_angle);
+            // Phase light direction in WORLD SPACE (not rotating local frame)
+            // This keeps the terminator oriented consistently as moon traverses sky
+            // Light comes from world-east at quarters, from front/back at full/new
+            let world_east = vec3<f32>(1.0, 0.0, 0.0);
 
-            // Illumination = dot(surface_normal, light_dir)
-            // For unit sphere, surface normal at (x,y,z) is just (x,y,z)
-            let illumination = disk_x * light_x + sphere_z * light_z;
+            let phase_angle = moon_phase * 6.28318;
+            let from_side = sin(phase_angle);    // ±1 at quarters, 0 at new/full
+            let from_front = -cos(phase_angle);  // +1 at full, -1 at new
+
+            // World-space light direction
+            // moon_dir points from camera toward moon, so -moon_dir is "toward camera"
+            let light_world = normalize(world_east * from_side - moon_dir * from_front);
+
+            // Transform world light direction to moon-local coordinates
+            // Local coords: x = moon_right, y = moon_up, z = toward camera (-moon_dir)
+            let light_local_x = dot(light_world, moon_right);
+            let light_local_y = dot(light_world, moon_up);
+            let light_local_z = -dot(light_world, moon_dir);
+
+            // Surface normal in local coords is (disk_x, disk_y, sphere_z)
+            let illumination = disk_x * light_local_x + disk_y * light_local_y + sphere_z * light_local_z;
 
             // Soft terminator for realistic falloff
             let lit_amount = smoothstep(-0.05, 0.15, illumination);
