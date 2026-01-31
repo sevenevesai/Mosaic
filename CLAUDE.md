@@ -179,6 +179,7 @@ Player inventory with hotbar and item management (`inventory/` module):
 
 **Structure:**
 - 9-slot hotbar (slots 0-8) + 27-slot main inventory = 36 total slots
+- **Player starts with empty inventory** - must collect blocks by breaking them
 - Items stack up to 64 (configurable per item type)
 - Locked slots protected during sorting
 - Drag-and-drop item movement when inventory open
@@ -190,6 +191,11 @@ Player inventory with hotbar and item management (`inventory/` module):
 - **LMB on slot**: Pick up / put down item stack
 - **RMB on slot**: Pick up half stack or place one item
 
+**UI Rendering** (`renderer/inventory_ui.rs`):
+- Stack counts use 7-segment style digits (white on dark background)
+- Item icons use front face texture from block atlas
+- Selected slot has golden highlight border
+
 **Item Tags** (for future sorting/filtering/Quick Stack):
 - Categories: `RawMaterial`, `ProcessedMaterial`, `BuildingBlock`, `Ore`, `Wood`, `Stone`, `Soil`, `Organic`
 - Usage: `Combustible`, `Tool`, `Weapon`, `Armor`, `Consumable`, `LightSource`, `Decoration`
@@ -199,6 +205,7 @@ Player inventory with hotbar and item management (`inventory/` module):
 - Breaking blocks adds items to inventory (if space available)
 - Placing blocks consumes from selected hotbar slot
 - Only blocks with `Item::from_block()` returning `Some` drop items (Air, Water, Bedrock don't drop)
+- Use `Inventory::new_empty()` for survival mode, `Inventory::new()` for creative/testing
 
 ## Common Tasks
 

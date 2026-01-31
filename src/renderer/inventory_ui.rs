@@ -446,30 +446,85 @@ impl InventoryUI {
         vertices.push(v(x, y + h, 0.0, 1.0));
     }
 
-    /// Add stack count display (simple digit rendering)
+    /// Add stack count display using 7-segment style digits
     fn add_stack_count(&self, vertices: &mut Vec<InventoryVertex>, x: f32, y: f32, count: u8) {
-        // Simple approach: render count as small colored rectangles forming digits
-        // For a more sophisticated approach, would use a font texture
         let count_str = count.to_string();
-        let digit_width = 6.0;
-        let digit_height = 9.0;
-        let spacing = 1.0;
+        let digit_width = 7.0;
+        let digit_height = 10.0;
+        let spacing = 2.0;
 
         let total_width = count_str.len() as f32 * (digit_width + spacing) - spacing;
         let start_x = x - total_width;
         let start_y = y - digit_height;
 
-        // White background for readability
-        self.add_rect(vertices, start_x - 1.0, start_y - 1.0, total_width + 2.0, digit_height + 2.0, [0.0, 0.0, 0.0, 0.6]);
+        // Dark background for readability
+        self.add_rect(vertices, start_x - 2.0, start_y - 2.0, total_width + 4.0, digit_height + 4.0, [0.0, 0.0, 0.0, 0.7]);
 
-        // Render each digit as a simple number indicator
+        // Render each digit
         for (i, ch) in count_str.chars().enumerate() {
             let dx = start_x + i as f32 * (digit_width + spacing);
-            // For simplicity, just render a colored block with intensity based on digit
-            // A proper implementation would use a font texture
-            let digit = ch.to_digit(10).unwrap_or(0) as f32;
-            let intensity = 0.5 + digit * 0.05;
-            self.add_rect(vertices, dx, start_y, digit_width, digit_height, [intensity, intensity, intensity, 1.0]);
+            let digit = ch.to_digit(10).unwrap_or(0) as u8;
+            self.add_digit(vertices, dx, start_y, digit_width, digit_height, digit);
+        }
+    }
+
+    /// Render a single digit using 7-segment style
+    /// Segment layout:
+    ///   AAA
+    ///  F   B
+    ///   GGG
+    ///  E   C
+    ///   DDD
+    fn add_digit(&self, vertices: &mut Vec<InventoryVertex>, x: f32, y: f32, w: f32, h: f32, digit: u8) {
+        let color = [1.0, 1.0, 1.0, 1.0]; // White digits
+        let seg_thickness = 2.0;
+        let seg_len_h = w - 2.0;  // Horizontal segment length
+        let seg_len_v = (h - 3.0 * seg_thickness) / 2.0 + seg_thickness; // Vertical segment length
+
+        // Segment definitions: which segments are on for each digit (A,B,C,D,E,F,G)
+        // 0=off, 1=on
+        let segments: [[bool; 7]; 10] = [
+            [true,  true,  true,  true,  true,  true,  false], // 0
+            [false, true,  true,  false, false, false, false], // 1
+            [true,  true,  false, true,  true,  false, true],  // 2
+            [true,  true,  true,  true,  false, false, true],  // 3
+            [false, true,  true,  false, false, true,  true],  // 4
+            [true,  false, true,  true,  false, true,  true],  // 5
+            [true,  false, true,  true,  true,  true,  true],  // 6
+            [true,  true,  true,  false, false, false, false], // 7
+            [true,  true,  true,  true,  true,  true,  true],  // 8
+            [true,  true,  true,  true,  false, true,  true],  // 9
+        ];
+
+        let segs = segments[digit as usize % 10];
+
+        // A - top horizontal
+        if segs[0] {
+            self.add_rect(vertices, x + 1.0, y, seg_len_h, seg_thickness, color);
+        }
+        // B - top right vertical
+        if segs[1] {
+            self.add_rect(vertices, x + w - seg_thickness, y + seg_thickness, seg_thickness, seg_len_v, color);
+        }
+        // C - bottom right vertical
+        if segs[2] {
+            self.add_rect(vertices, x + w - seg_thickness, y + h / 2.0, seg_thickness, seg_len_v, color);
+        }
+        // D - bottom horizontal
+        if segs[3] {
+            self.add_rect(vertices, x + 1.0, y + h - seg_thickness, seg_len_h, seg_thickness, color);
+        }
+        // E - bottom left vertical
+        if segs[4] {
+            self.add_rect(vertices, x, y + h / 2.0, seg_thickness, seg_len_v, color);
+        }
+        // F - top left vertical
+        if segs[5] {
+            self.add_rect(vertices, x, y + seg_thickness, seg_thickness, seg_len_v, color);
+        }
+        // G - middle horizontal
+        if segs[6] {
+            self.add_rect(vertices, x + 1.0, y + h / 2.0 - seg_thickness / 2.0, seg_len_h, seg_thickness, color);
         }
     }
 

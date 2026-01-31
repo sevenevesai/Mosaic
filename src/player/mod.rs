@@ -106,7 +106,7 @@ impl Player {
             sprint: false,
             break_requested: false,
             place_requested: false,
-            inventory: Inventory::new(),
+            inventory: Inventory::new_empty(),
             on_ground: false,
             in_water: false,
             fly_mode: false,
