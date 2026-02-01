@@ -84,12 +84,47 @@ Strong reflections at grazing angles, transparent looking down.
 
 ## Rendering Pipeline
 
-1. Opaque chunks render first (write depth buffer)
-2. Water pass:
+1. Opaque chunks render first (write depth buffer) → scene_texture
+2. **Scene copy** for refraction (if refraction enabled)
+3. Water pass:
    - Alpha blending enabled
    - Depth test: enabled
    - Depth write: disabled (prevents sorting issues)
-3. Separate bind groups for camera, light, water uniforms
+   - Samples refraction_source_texture for underwater distortion
+4. Separate bind groups for camera, light, water uniforms + refraction textures
+
+## Water Refraction System
+
+**Architecture** (`renderer/refraction.rs`, `renderer/pipeline.rs`):
+- Scene texture copied before water renders → `refraction_source_texture`
+- Water shader samples scene at UV offset based on wave normals
+- Depth-aware: distortion fades with water depth
+- Optional chromatic aberration (High/Ultra only)
+
+**Quality Presets** (ESC menu → WATER REFRACTION):
+| Preset | Strength | Distortion | Chromatic |
+|--------|----------|------------|-----------|
+| Off | 0.0 | 0% | None |
+| Low | 0.3 | 2% | None |
+| Medium | 0.5 | 4% | None |
+| High | 0.7 | 6% | 0.3% |
+| Ultra | 1.0 | 8% | 0.6% |
+
+**Shader Implementation**:
+```wgsl
+// Sample scene with wave-based distortion
+let distortion = wave_normal.xz * refraction_distortion * refraction_strength;
+let depth_fade = 1.0 - smoothstep(0.0, refraction_depth_fade, depth);
+let refracted_uv = base_uv + distortion * depth_fade;
+// Chromatic aberration (High/Ultra): sample RGB at different offsets
+```
+
+**Key Files**:
+| File | Purpose |
+|------|---------|
+| `renderer/refraction.rs` | `RefractionQuality` enum, `RefractionParams` |
+| `renderer/pipeline.rs` | Water shader with scene sampling |
+| `renderer/mod.rs` | Render pass split, texture copy |
 
 ## Underwater Effect
 
@@ -106,8 +141,9 @@ When camera Y < water surface Y:
 | `world/water_meshing.rs` | Mesh generation, `WaterVertex`, skirt geometry |
 | `world/water_flow.rs` | Pipe-model flow simulation engine |
 | `world/generation.rs` | Water heightfield generation |
-| `renderer/pipeline.rs` | Water shader (ripples, Fresnel, depth color) |
-| `renderer/mod.rs` | Water render pass, underwater detection |
+| `renderer/pipeline.rs` | Water shader (ripples, Fresnel, refraction, depth color) |
+| `renderer/refraction.rs` | `RefractionQuality`, `RefractionParams` structs |
+| `renderer/mod.rs` | Water render pass, scene copy for refraction |
 
 ## Adding Water Features
 

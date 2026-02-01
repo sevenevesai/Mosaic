@@ -144,6 +144,7 @@ World (root Chunk)
 | SSR | No | Yes (31KB shader) |
 | DOF | **Yes** (CoC + Bokeh, 2K LOC) | Yes (CoC + blur) |
 | God Rays | **Yes** (volumetric) | No |
+| Water Refraction | **Yes** (5 presets, chromatic) | Basic UV offset |
 | Deferred G-Buffer | No (forward) | Yes |
 
 ---
@@ -439,7 +440,7 @@ World (root Chunk)
 
 ### Phase 4: Optional Polish
 9. **Variable-Size Chunks** - Storage optimization
-10. **Water Refraction** - Scene distortion through water
+10. ~~**Water Refraction**~~ ✅ DONE - Scene distortion, chromatic aberration, 5 quality presets
 
 ---
 

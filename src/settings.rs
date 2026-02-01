@@ -29,6 +29,8 @@ pub struct Settings {
     pub ssao_quality: String,
     /// DoF quality preset: OFF, LOW, MEDIUM, HIGH, ULTRA
     pub dof_quality: String,
+    /// Water refraction quality preset: OFF, LOW, MEDIUM, HIGH, ULTRA
+    pub refraction_quality: String,
 }
 
 impl Default for Settings {
@@ -49,6 +51,7 @@ impl Default for Settings {
             torch_shadows: false,    // Default OFF for performance
             ssao_quality: "MEDIUM".to_string(), // Default SSAO quality
             dof_quality: "LOW".to_string(),     // Default DoF quality
+            refraction_quality: "MEDIUM".to_string(), // Default water refraction quality
         }
     }
 }
@@ -149,6 +152,9 @@ impl Settings {
                     "dof_quality" => {
                         settings.dof_quality = value.to_string();
                     }
+                    "refraction_quality" => {
+                        settings.refraction_quality = value.to_string();
+                    }
                     _ => {}
                 }
             }
@@ -176,7 +182,8 @@ impl Settings {
              shadow_update_step={}\n\
              torch_shadows={}\n\
              ssao_quality={}\n\
-             dof_quality={}\n",
+             dof_quality={}\n\
+             refraction_quality={}\n",
             self.render_distance,
             self.shadow_mode,
             self.bloom_enabled,
@@ -192,6 +199,7 @@ impl Settings {
             self.torch_shadows,
             self.ssao_quality,
             self.dof_quality,
+            self.refraction_quality,
         );
 
         if let Err(e) = fs::write(Self::FILE_PATH, content) {

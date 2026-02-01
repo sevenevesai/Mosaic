@@ -105,6 +105,11 @@ impl SettingsMenu {
                 get_value: |r| format!("{} BLOCKS", r.dof_focus_range() as i32),
                 toggle: |r| { r.cycle_dof_focus_range(); },
             },
+            MenuItem {
+                label: "WATER REFRACTION",
+                get_value: |r| r.refraction_quality().as_str().to_string(),
+                toggle: |r| { r.cycle_refraction_quality(); },
+            },
             // === GPU SETTINGS ===
             MenuItem {
                 label: "GPU GI",

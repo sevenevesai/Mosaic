@@ -11,6 +11,7 @@ mod inventory_ui;
 mod item_renderer;
 mod pipeline;
 mod prop_renderer;
+mod refraction;
 mod ssao;
 mod dof;
 mod texture;
@@ -24,6 +25,7 @@ pub use chunk_pool::ChunkPool;
 pub use debug_overlay::{DebugOverlay, DebugMetrics};
 pub use item_renderer::{ItemRenderer, ItemInstanceData};
 pub use prop_renderer::{PropRenderer, PropInstance};
+pub use refraction::{RefractionQuality, RefractionParams};
 pub use ssao::{Ssao, SsaoQuality, SsaoParams};
 pub use dof::{Dof, DofQuality, DofParams, FocusMode, NearBlur, BokehShape};
 pub use texture::TextureAtlas;
@@ -154,6 +156,13 @@ pub struct Renderer {
     water_buffer: wgpu::Buffer,
     water_bind_group: wgpu::BindGroup,
     water_light_bind_group: wgpu::BindGroup,
+    water_bind_group_layout: wgpu::BindGroupLayout,
+
+    // Water refraction
+    refraction_source_texture: wgpu::Texture,
+    refraction_source_view: wgpu::TextureView,
+    refraction_sampler: wgpu::Sampler,
+    refraction_quality: RefractionQuality,
 
     // Stats from last frame
     pub stats: RenderStats,
@@ -578,7 +587,7 @@ impl Renderer {
         });
 
         // === BLOOM POST-PROCESSING ===
-        // Scene texture for off-screen rendering (needed for bloom)
+        // Scene texture for off-screen rendering (needed for bloom and water refraction)
         // Uses surface format for compatibility with existing pipelines
         let scene_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("scene_texture"),
@@ -591,7 +600,8 @@ impl Renderer {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: surface_format, // Use surface format for pipeline compatibility
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            // COPY_SRC needed for water refraction (copy to refraction_source_texture)
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
         let scene_texture_view = scene_texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -638,14 +648,57 @@ impl Renderer {
             contents: bytemuck::cast_slice(&[WaterUniform::default()]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
+
+        // Create refraction source texture (copy of scene before water renders)
+        let refraction_source_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("refraction_source_texture"),
+            size: wgpu::Extent3d {
+                width: size.width,
+                height: size.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: surface_format,
+            usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let refraction_source_view = refraction_source_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Create refraction sampler (linear filtering for smooth distortion)
+        let refraction_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Refraction Sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
+        // Create water bind group with refraction textures
+        // Note: depth texture not included - uses water_depth from vertex data instead
         let water_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Water Bind Group"),
             layout: &water_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: water_buffer.as_entire_binding(),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: water_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&refraction_source_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&refraction_sampler),
+                },
+            ],
         });
+
         // Create water pipeline (uses water_light_bind_group_layout for lighting)
         let water_pipeline = create_water_pipeline(
             &device,
@@ -714,6 +767,11 @@ impl Renderer {
             water_buffer,
             water_bind_group,
             water_light_bind_group,
+            water_bind_group_layout,
+            refraction_source_texture,
+            refraction_source_view,
+            refraction_sampler,
+            refraction_quality: RefractionQuality::default(),
             stats: RenderStats::default(),
             start_time: std::time::Instant::now(),
             time_of_day: 0.35,   // Start at mid-morning
@@ -761,7 +819,7 @@ impl Renderer {
             self.debug_overlay.update_screen_size(new_size.width as f32, new_size.height as f32);
             self.inventory_ui.update_screen_size(new_size.width as f32, new_size.height as f32);
 
-            // Resize scene texture for bloom
+            // Resize scene texture for bloom and water refraction
             self.scene_texture = self.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("scene_texture"),
                 size: wgpu::Extent3d {
@@ -773,7 +831,8 @@ impl Renderer {
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: self.config.format, // Use surface format
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                // COPY_SRC needed for water refraction
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
                 view_formats: &[],
             });
             self.scene_texture_view = self.scene_texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -790,6 +849,43 @@ impl Renderer {
 
             // Resize DoF textures
             self.dof.resize(&self.device, new_size.width, new_size.height);
+
+            // Resize refraction source texture and recreate water bind group
+            self.refraction_source_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("refraction_source_texture"),
+                size: wgpu::Extent3d {
+                    width: new_size.width,
+                    height: new_size.height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: self.config.format,
+                usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            self.refraction_source_view = self.refraction_source_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+            // Recreate water bind group with new texture views
+            self.water_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Water Bind Group"),
+                layout: &self.water_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.water_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&self.refraction_source_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&self.refraction_sampler),
+                    },
+                ],
+            });
         }
     }
 
@@ -1099,6 +1195,30 @@ impl Renderer {
         next
     }
 
+    // === Water Refraction Settings ===
+
+    /// Get current water refraction quality
+    pub fn refraction_quality(&self) -> RefractionQuality {
+        self.refraction_quality
+    }
+
+    /// Cycle water refraction quality: Off -> Low -> Medium -> High -> Ultra -> Off
+    pub fn cycle_refraction_quality(&mut self) -> RefractionQuality {
+        self.refraction_quality = self.refraction_quality.next();
+        tracing::info!("Water Refraction: {}", self.refraction_quality.as_str());
+        self.refraction_quality
+    }
+
+    /// Set water refraction quality directly
+    pub fn set_refraction_quality(&mut self, quality: RefractionQuality) {
+        self.refraction_quality = quality;
+    }
+
+    /// Check if water refraction is enabled
+    pub fn is_refraction_enabled(&self) -> bool {
+        self.refraction_quality != RefractionQuality::Off
+    }
+
     /// Get current render distance
     pub fn render_distance(&self) -> i32 {
         self.render_distance
@@ -1195,6 +1315,17 @@ impl Renderer {
             _ => DofQuality::Low,
         };
         self.dof.set_quality(dof_quality);
+
+        // Apply water refraction quality setting
+        let refraction_quality = match settings.refraction_quality.to_uppercase().as_str() {
+            "OFF" => RefractionQuality::Off,
+            "LOW" => RefractionQuality::Low,
+            "MEDIUM" => RefractionQuality::Medium,
+            "HIGH" => RefractionQuality::High,
+            "ULTRA" => RefractionQuality::Ultra,
+            _ => RefractionQuality::Medium,
+        };
+        self.refraction_quality = refraction_quality;
     }
 
     /// Collect current settings into a Settings struct
@@ -1215,6 +1346,7 @@ impl Renderer {
             torch_shadows: self.torch_shadows,
             ssao_quality: self.ssao.quality.as_str().to_string(),
             dof_quality: self.dof.quality.as_str().to_string(),
+            refraction_quality: self.refraction_quality.as_str().to_string(),
         }
     }
 
@@ -1419,9 +1551,14 @@ impl Renderer {
         self.queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[camera_uniform]));
 
-        // Update water uniform with current time for wave animation
+        // Update water uniform with current time and refraction parameters
+        let refraction_params = RefractionParams::from_quality(self.refraction_quality);
         let water_uniform = WaterUniform {
             time: current_time,
+            refraction_strength: refraction_params.strength,
+            refraction_distortion: refraction_params.distortion_scale,
+            chromatic_aberration: refraction_params.chromatic,
+            refraction_depth_fade: refraction_params.depth_fade_end,
             ..WaterUniform::default()
         };
         self.queue
@@ -1757,6 +1894,58 @@ impl Renderer {
                 &mut render_pass,
                 &self.camera_bind_group,
             );
+
+            // End opaque pass to allow scene texture copy for water refraction
+        }
+
+        // === COPY SCENE FOR WATER REFRACTION ===
+        // Copy the current scene (before water) so water shader can sample it for refraction
+        if self.refraction_quality != RefractionQuality::Off {
+            encoder.copy_texture_to_texture(
+                wgpu::ImageCopyTexture {
+                    texture: &self.scene_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::ImageCopyTexture {
+                    texture: &self.refraction_source_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d {
+                    width: self.size.width,
+                    height: self.size.height,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+
+        // === WATER AND TRANSPARENT PASS ===
+        // Continue rendering with water and block outline
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Water Render Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.scene_texture_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load, // Keep the opaque scene
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_texture,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load, // Keep existing depth
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
 
             // === WATER RENDER PASS ===
             // Render water meshes with transparency (after opaque geometry)

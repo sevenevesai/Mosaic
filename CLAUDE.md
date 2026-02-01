@@ -166,12 +166,23 @@ Post-process effect for soft contact shadows (`renderer/ssao.rs`):
 
 ## Water Rendering
 
-Heightfield-based water with realistic reflections (`world/water_meshing.rs`, `renderer/pipeline.rs`):
+Heightfield-based water with realistic reflections and refraction (`world/water_meshing.rs`, `renderer/pipeline.rs`, `renderer/refraction.rs`):
 - **Surface**: Smooth sine-wave ripples (not Gerstner waves) for calm, reflective look
 - **Skirt geometry**: Vertical walls at water boundaries prevent gaps during wave animation
 - **Fresnel reflections**: Strong sky reflections at grazing angles, transparent when looking down
 - **Depth coloring**: Shallow=clear, deep=blue-gray with light absorption
+- **Refraction**: Scene texture sampling with wave-based UV distortion for underwater view
+- **Chromatic aberration**: RGB separation at High/Ultra quality for prismatic effect
 - **Flow system**: `water_flow.rs` exists for simulation (uniform visual flow for seamless rendering)
+
+**Refraction Quality Presets** (ESC menu → WATER REFRACTION):
+| Preset | Distortion | Chromatic | Depth Fade |
+|--------|------------|-----------|------------|
+| Off | 0% | None | - |
+| Low | 2% | None | 12 blocks |
+| Medium | 4% | None | 12 blocks |
+| High | 6% | Subtle | 12 blocks |
+| Ultra | 8% | Full | 12 blocks |
 
 **Gotcha**: Per-vertex flow angles cause interference patterns - use uniform flow (0.0) for visuals.
 

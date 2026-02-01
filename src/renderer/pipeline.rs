@@ -1747,7 +1747,8 @@ pub fn create_line_pipeline(
 // WATER SHADER
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Water shader with Gerstner waves, fresnel reflection, and foam
+/// Water shader with refraction, fresnel reflection, and foam
+/// Supports scene texture sampling for real underwater distortion
 const WATER_SHADER: &str = r#"
 // Camera uniform (same as chunk shader)
 struct CameraUniform {
@@ -1766,7 +1767,7 @@ struct LightUniform {
     ambient_color: vec4<f32>,
 };
 
-// Water-specific uniform
+// Water-specific uniform with refraction parameters
 struct WaterUniform {
     // Wave parameters
     time: f32,
@@ -1781,6 +1782,11 @@ struct WaterUniform {
     foam_threshold: f32,
     refraction_strength: f32,
     transparency: f32,
+    // Refraction quality parameters
+    refraction_distortion: f32,    // UV distortion scale
+    chromatic_aberration: f32,     // RGB separation strength
+    refraction_depth_fade: f32,    // Depth fade distance
+    _padding: f32,
 };
 
 @group(0) @binding(0)
@@ -1791,6 +1797,15 @@ var<uniform> light: LightUniform;
 
 @group(2) @binding(0)
 var<uniform> water: WaterUniform;
+
+@group(2) @binding(1)
+var scene_texture: texture_2d<f32>;
+
+@group(2) @binding(2)
+var scene_sampler: sampler;
+
+// Note: depth_texture removed - using water_depth from vertex data instead
+// This avoids resource conflict (can't read depth while writing to it)
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -1808,23 +1823,9 @@ struct VertexOutput {
     @location(4) block_light: f32,
     @location(5) sky_light: f32,
     @location(6) view_dir: vec3<f32>,
-    @location(7) flow_angle: f32,  // Flow direction in radians (0 = +X)
+    @location(7) flow_angle: f32,
+    @location(8) screen_uv: vec2<f32>,  // Screen-space UV for refraction sampling
 };
-
-// Gerstner wave function for realistic water motion
-fn gerstner_wave(pos: vec2<f32>, time: f32, dir: vec2<f32>, wavelength: f32, steepness: f32) -> vec3<f32> {
-    let k = 2.0 * 3.14159 / wavelength;
-    let c = sqrt(9.8 / k);
-    let d = normalize(dir);
-    let f = k * (dot(d, pos) - c * time);
-    let a = steepness / k;
-
-    return vec3<f32>(
-        d.x * a * cos(f),
-        a * sin(f),
-        d.y * a * cos(f)
-    );
-}
 
 // Rotate a 2D vector by an angle (in radians)
 fn rotate_2d(v: vec2<f32>, angle: f32) -> vec2<f32> {
@@ -1836,65 +1837,38 @@ fn rotate_2d(v: vec2<f32>, angle: f32) -> vec2<f32> {
     );
 }
 
-// Unified wave calculation - all waves flow in direction based on flow_angle
-// flow_angle: direction of water flow in radians (0 = +X, PI/2 = +Z)
-fn calculate_waves(pos: vec2<f32>, time: f32, flow_angle: f32) -> vec3<f32> {
-    // Base direction from flow simulation
-    let flow_dir = vec2<f32>(cos(flow_angle), sin(flow_angle));
-
-    // Primary wave follows flow direction
-    let primary_dir = flow_dir;
-
-    // All waves flow in similar directions - subtle angular variation only
-    var total = vec3<f32>(0.0);
-
-    // Primary wave - longest, visible but controlled height
-    total += gerstner_wave(pos, time, primary_dir, 14.0, 0.22);
-
-    // Secondary wave - adds natural variation (~30 degrees offset)
-    let secondary_dir = rotate_2d(flow_dir, 0.52);  // ~30 degrees
-    total += gerstner_wave(pos, time * 0.9, secondary_dir, 9.0, 0.15);
-
-    // Tertiary wave - smaller ripples for detail (~-15 degrees offset)
-    let tertiary_dir = rotate_2d(flow_dir, -0.26);   // ~-15 degrees
-    total += gerstner_wave(pos, time * 1.15, tertiary_dir, 6.0, 0.10);
-
-    return total;
-}
-
-// Legacy version for code that doesn't have flow_angle yet
-fn calculate_waves_default(pos: vec2<f32>, time: f32) -> vec3<f32> {
-    return calculate_waves(pos, time, 0.0);  // Default to +X direction
-}
-
-// Calculate combined wave height at a position (for foam calculation)
-fn gerstner_wave_height(pos: vec2<f32>, time: f32, flow_angle: f32) -> f32 {
-    return calculate_waves(pos, time, flow_angle).y;
-}
-
-// Smooth noise for subtle water surface variation
+// Smooth noise for water surface variation
 fn water_noise(p: vec2<f32>) -> f32 {
     return fract(sin(dot(p, vec2<f32>(12.9898, 78.233))) * 43758.5453);
 }
 
-// Multi-octave smooth ripple noise for realistic water surface
-fn ripple_height(pos: vec2<f32>, time: f32) -> f32 {
-    var height = 0.0;
+// Multi-octave wave normal calculation for refraction distortion
+fn calculate_wave_normal(pos: vec2<f32>, time: f32, flow_angle: f32) -> vec3<f32> {
+    let flow_dir = vec2<f32>(cos(flow_angle), sin(flow_angle));
 
-    // Large gentle swells
-    let p1 = pos * 0.04 + vec2<f32>(time * 0.02, time * 0.015);
-    height += sin(p1.x * 2.0 + p1.y * 1.5) * 0.4;
-    height += sin(p1.x * 1.2 - p1.y * 2.1) * 0.3;
+    var dx = 0.0;
+    var dz = 0.0;
 
-    // Medium ripples
-    let p2 = pos * 0.12 + vec2<f32>(-time * 0.03, time * 0.025);
-    height += sin(p2.x * 3.0 + p2.y * 2.5) * 0.2;
+    // Wave layer 1 - large swells
+    let p1 = pos * 0.04 + flow_dir * time * 0.5;
+    dx += cos(p1.x * 2.0 + p1.y * 1.5 + time * 0.3) * 0.4;
+    dz += cos(p1.y * 2.0 - p1.x * 1.2 + time * 0.25) * 0.4;
 
-    // Small detail ripples
-    let p3 = pos * 0.25 + vec2<f32>(time * 0.04, -time * 0.03);
-    height += sin(p3.x * 4.0 + p3.y * 3.5) * 0.1;
+    // Wave layer 2 - medium ripples
+    let p2 = pos * 0.12 + rotate_2d(flow_dir, 0.5) * time * 0.7;
+    dx += cos(p2.x * 3.0 + p2.y * 2.5 + time * 0.5) * 0.25;
+    dz += cos(p2.y * 2.8 - p2.x * 2.2 + time * 0.4) * 0.25;
 
-    return height;
+    // Wave layer 3 - small detail (High/Ultra quality)
+    let p3 = pos * 0.25 + rotate_2d(flow_dir, -0.3) * time * 0.9;
+    dx += cos(p3.x * 4.0 + p3.y * 3.5 + time * 0.7) * 0.15;
+    dz += cos(p3.y * 3.8 - p3.x * 4.2 + time * 0.6) * 0.15;
+
+    // Scale by wave strength
+    dx *= water.wave_strength;
+    dz *= water.wave_strength;
+
+    return normalize(vec3<f32>(-dx, 1.0, -dz));
 }
 
 @vertex
@@ -1902,7 +1876,6 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
 
     var pos = in.position;
-    let world_xz = pos.xz;
     let t = camera.anim_data.x * water.wave_speed;
 
     // Unpack foam factor, depth, and flow_angle from uv_data
@@ -1910,22 +1883,24 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     out.foam_factor = uv_bytes.x;
     out.water_depth = uv_bytes.y * 255.0;
 
-    // Unpack flow angle (kept for compatibility but using subtle ripples now)
+    // Unpack flow angle
     let flow_lo = u32(uv_bytes.z * 255.0);
     let flow_hi = u32(uv_bytes.w * 255.0);
     let flow_u16 = flow_lo | (flow_hi << 8u);
     let flow_angle = f32(flow_u16) / 65535.0 * 6.28318;
     out.flow_angle = flow_angle;
 
-    // Water waves disabled for now - flat surface
-    // pos.y += ripple * water.wave_strength * 0.3;
+    // Calculate wave normal for this vertex
+    let wave_normal = calculate_wave_normal(pos.xz, t, flow_angle);
+    out.normal = wave_normal;
 
-    // Flat normal (no wave perturbation)
-    let flat_normal = vec3<f32>(0.0, 1.0, 0.0);
-
-    out.clip_position = camera.view_proj * vec4<f32>(pos, 1.0);
+    let clip_pos = camera.view_proj * vec4<f32>(pos, 1.0);
+    out.clip_position = clip_pos;
     out.world_position = pos;
-    out.normal = flat_normal;
+
+    // Calculate screen UV for refraction sampling
+    let ndc = clip_pos.xyz / clip_pos.w;
+    out.screen_uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
 
     // Unpack light data
     let light_bytes = unpack4x8unorm(in.light_data);
@@ -1938,25 +1913,46 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     return out;
 }
 
-// Schlick's fresnel approximation - physically accurate
+// Schlick's fresnel approximation
 fn schlick_fresnel(cos_theta: f32, f0: f32) -> f32 {
     return f0 + (1.0 - f0) * pow(1.0 - cos_theta, 5.0);
 }
 
-// Smooth caustic-like light pattern
-fn caustic_noise(p: vec2<f32>, time: f32) -> f32 {
-    // Multiple overlapping smooth sine waves for organic look
-    let p1 = p * 0.25 + vec2<f32>(time * 0.015, time * 0.012);
-    let p2 = p * 0.35 + vec2<f32>(-time * 0.013, time * 0.016);
-    let p3 = p * 0.18 + vec2<f32>(time * 0.01, -time * 0.008);
+// Sample scene with refraction distortion
+fn sample_refracted_scene(base_uv: vec2<f32>, wave_normal: vec3<f32>, depth: f32) -> vec3<f32> {
+    // Skip refraction if strength is zero
+    if (water.refraction_strength <= 0.001) {
+        return textureSample(scene_texture, scene_sampler, base_uv).rgb;
+    }
 
-    let n1 = sin(p1.x * 2.5 + p1.y * 2.0) * cos(p1.y * 2.2 - p1.x * 1.3);
-    let n2 = sin(p2.x * 1.8 - p2.y * 2.4) * cos(p2.y * 1.6 + p2.x * 2.1);
-    let n3 = sin(p3.x * 1.4 + p3.y * 1.7) * cos(p3.y * 1.2 - p3.x * 0.9);
+    // Calculate UV offset based on wave normal (XZ components create distortion)
+    let distortion = wave_normal.xz * water.refraction_distortion * water.refraction_strength;
 
-    // Smooth blend with softened edges
-    let combined = (n1 + n2 * 0.7 + n3 * 0.5) / 2.2;
-    return smoothstep(-0.3, 0.3, combined) * 0.6 + 0.2;
+    // Fade distortion with depth (less distortion for deep water)
+    let depth_fade = 1.0 - smoothstep(0.0, water.refraction_depth_fade, depth);
+    let scaled_distortion = distortion * depth_fade;
+
+    // Apply chromatic aberration if enabled
+    if (water.chromatic_aberration > 0.001) {
+        // Sample RGB at slightly different offsets for prismatic effect
+        let r_offset = scaled_distortion * (1.0 + water.chromatic_aberration * 30.0);
+        let g_offset = scaled_distortion;
+        let b_offset = scaled_distortion * (1.0 - water.chromatic_aberration * 30.0);
+
+        let r_uv = clamp(base_uv + r_offset, vec2<f32>(0.001), vec2<f32>(0.999));
+        let g_uv = clamp(base_uv + g_offset, vec2<f32>(0.001), vec2<f32>(0.999));
+        let b_uv = clamp(base_uv + b_offset, vec2<f32>(0.001), vec2<f32>(0.999));
+
+        let r = textureSample(scene_texture, scene_sampler, r_uv).r;
+        let g = textureSample(scene_texture, scene_sampler, g_uv).g;
+        let b = textureSample(scene_texture, scene_sampler, b_uv).b;
+
+        return vec3<f32>(r, g, b);
+    } else {
+        // Simple refraction without chromatic aberration
+        let refracted_uv = clamp(base_uv + scaled_distortion, vec2<f32>(0.001), vec2<f32>(0.999));
+        return textureSample(scene_texture, scene_sampler, refracted_uv).rgb;
+    }
 }
 
 @fragment
@@ -1970,9 +1966,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let optical_depth = in.water_depth / view_dot;
 
     // === FRESNEL (Schlick approximation) ===
-    // Water F0 = 0.02, but boost for more visible reflections
     let n_dot_v = max(dot(normal, view_dir), 0.0);
     let fresnel = schlick_fresnel(n_dot_v, 0.02);
+
+    // === REFRACTION - Sample underwater scene with distortion ===
+    let refracted_color = sample_refracted_scene(in.screen_uv, normal, optical_depth);
 
     // === SKY/ENVIRONMENT REFLECTION ===
     let reflect_dir = reflect(-view_dir, normal);
@@ -1980,44 +1978,45 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Rich sky gradient for reflections
     let sky_brightness = max(light.sun_direction.w, 0.15);
     let sky_up = mix(
-        vec3<f32>(0.12, 0.18, 0.35),   // Night sky - deeper blue
-        vec3<f32>(0.45, 0.68, 0.98),   // Day sky zenith - vibrant blue
+        vec3<f32>(0.12, 0.18, 0.35),   // Night sky
+        vec3<f32>(0.45, 0.68, 0.98),   // Day sky zenith
         sky_brightness
     );
     let sky_horizon = mix(
         vec3<f32>(0.08, 0.12, 0.22),   // Night horizon
-        vec3<f32>(0.65, 0.78, 0.92),   // Day horizon - bright warm
+        vec3<f32>(0.65, 0.78, 0.92),   // Day horizon
         sky_brightness
     );
 
-    // Smooth gradient based on reflection direction
     let sky_blend = pow(max(reflect_dir.y, 0.0), 0.6);
     var sky_reflection = mix(sky_horizon, sky_up, sky_blend);
 
-    // Sun specular highlight - bright and sharp
+    // Sun specular highlight
     let sun_dir = normalize(light.sun_direction.xyz);
     let sun_intensity = light.sun_direction.w;
     let sun_reflect = max(dot(reflect_dir, sun_dir), 0.0);
 
-    // Layered specular for realistic sun reflection
-    let spec_core = smoothstep(0.997, 1.0, sun_reflect) * 2.5;     // Bright core
-    let spec_inner = smoothstep(0.98, 0.997, sun_reflect) * 0.8;   // Inner glow
-    let spec_outer = smoothstep(0.92, 0.98, sun_reflect) * 0.25;   // Soft outer halo
+    let spec_core = smoothstep(0.997, 1.0, sun_reflect) * 2.5;
+    let spec_inner = smoothstep(0.98, 0.997, sun_reflect) * 0.8;
+    let spec_outer = smoothstep(0.92, 0.98, sun_reflect) * 0.25;
     let sun_specular = (spec_core + spec_inner + spec_outer) * sun_intensity;
     sky_reflection += vec3<f32>(1.0, 0.98, 0.92) * sun_specular;
 
     // === WATER COLOR WITH DEPTH ===
     let absorption_depth = clamp(optical_depth / 10.0, 0.0, 1.0);
 
-    // Clean water colors - emphasize clarity
-    let surface_color = vec3<f32>(0.06, 0.10, 0.12);   // Nearly clear
-    let mid_color = vec3<f32>(0.10, 0.18, 0.26);       // Subtle teal
-    let deep_color = vec3<f32>(0.05, 0.10, 0.18);      // Deep blue-gray
+    let surface_color = vec3<f32>(0.06, 0.10, 0.12);
+    let mid_color = vec3<f32>(0.10, 0.18, 0.26);
+    let deep_color_tint = vec3<f32>(0.05, 0.10, 0.18);
 
     let shallow_blend = smoothstep(0.0, 0.4, absorption_depth);
     let deep_blend = smoothstep(0.25, 1.0, absorption_depth);
-    var water_color = mix(surface_color, mid_color, shallow_blend);
-    water_color = mix(water_color, deep_color, deep_blend);
+    var water_tint = mix(surface_color, mid_color, shallow_blend);
+    water_tint = mix(water_tint, deep_color_tint, deep_blend);
+
+    // Blend refracted scene with water tint based on depth
+    let underwater_visibility = exp(-optical_depth * 0.15);
+    var water_color = mix(water_tint, refracted_color * 0.85 + water_tint * 0.15, underwater_visibility);
 
     // === SUBSURFACE SCATTERING ===
     let sun_through = max(dot(-view_dir, sun_dir), 0.0);
@@ -2025,20 +2024,18 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let scatter_color = vec3<f32>(0.20, 0.30, 0.28);
     water_color += scatter_color * scatter_amount * sun_intensity;
 
-    // === COMBINE REFLECTION AND WATER COLOR ===
-    // Strong Fresnel-based reflections - realistic water behavior
-    // At grazing angles, water is almost mirror-like
-    let fresnel_boost = pow(fresnel, 0.7);  // Boost Fresnel effect
+    // === COMBINE REFLECTION AND REFRACTION ===
+    let fresnel_boost = pow(fresnel, 0.7);
     let depth_boost = smoothstep(0.0, 0.5, absorption_depth) * 0.15;
     let reflection_strength = fresnel_boost * 0.85 + depth_boost + 0.08;
     var final_color = mix(water_color, sky_reflection, clamp(reflection_strength, 0.0, 0.95));
 
-    // === SUBTLE FOAM (shorelines only) ===
+    // === FOAM (shorelines only) ===
     let base_foam = in.foam_factor;
     if (base_foam > water.foam_threshold) {
         let foam_intensity = (base_foam - water.foam_threshold) / (1.0 - water.foam_threshold);
         let noise_pos = in.world_position.xz * 0.4 + vec2<f32>(time * 0.03, time * 0.025);
-        let foam_noise = fract(sin(dot(noise_pos, vec2<f32>(12.9898, 78.233))) * 43758.5453);
+        let foam_noise = water_noise(noise_pos);
 
         let foam_color = vec3<f32>(0.95, 0.96, 0.94);
         let foam_blend = foam_intensity * foam_intensity * (0.4 + foam_noise * 0.15);
@@ -2047,7 +2044,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // === LIGHTING ===
     let ambient = light.ambient_color.rgb * 0.6;
-    let sun_diffuse = max(dot(normal, sun_dir), 0.0) * 0.25;
+    let sun_diffuse = max(dot(vec3<f32>(0.0, 1.0, 0.0), sun_dir), 0.0) * 0.25;
     let sun_contrib = light.sun_color.rgb * sun_diffuse * sun_intensity;
 
     let torch_color = vec3<f32>(1.0, 0.80, 0.55);
@@ -2064,10 +2061,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     final_color = mix(final_color, fog_color, clamp(fog_factor, 0.0, 0.15));
 
     // === TRANSPARENCY ===
-    // Clearer shallow water, more opaque with depth
     let depth_opacity = 1.0 - exp(-optical_depth * 0.06);
-    let base_alpha = mix(0.20, 0.70, depth_opacity);
-    let alpha = mix(base_alpha, 0.85, fresnel * 0.4);
+    let base_alpha = mix(0.25, 0.75, depth_opacity);
+    let alpha = mix(base_alpha, 0.90, fresnel * 0.4);
 
     return vec4<f32>(final_color, alpha);
 }
@@ -2087,6 +2083,11 @@ pub struct WaterUniform {
     pub foam_threshold: f32,
     pub refraction_strength: f32,
     pub transparency: f32,
+    // Refraction quality parameters
+    pub refraction_distortion: f32,    // UV distortion scale (0.0 - 0.1)
+    pub chromatic_aberration: f32,     // RGB separation strength (0.0 - 0.01)
+    pub refraction_depth_fade: f32,    // Depth at which refraction fades (blocks)
+    pub _padding: f32,                 // Alignment padding
 }
 
 impl Default for WaterUniform {
@@ -2101,8 +2102,12 @@ impl Default for WaterUniform {
             deep_color: [0.08, 0.14, 0.22, 0.70],     // Deep muted blue-gray
             fresnel_power: 4.0,  // Balanced reflection curve
             foam_threshold: 0.55, // Slightly lower - foam a bit more visible
-            refraction_strength: 0.04,
+            refraction_strength: 0.5,   // Medium refraction by default
             transparency: 0.80,
+            refraction_distortion: 0.04,  // Medium distortion
+            chromatic_aberration: 0.0,    // No chromatic by default
+            refraction_depth_fade: 12.0,  // Fade out at 12 blocks depth
+            _padding: 0.0,
         }
     }
 }
@@ -2112,6 +2117,7 @@ pub fn create_water_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupL
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("Water Bind Group Layout"),
         entries: &[
+            // binding 0: Water uniform buffer
             wgpu::BindGroupLayoutEntry {
                 binding: 0,
                 visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
@@ -2122,6 +2128,26 @@ pub fn create_water_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupL
                 },
                 count: None,
             },
+            // binding 1: Scene texture for refraction
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            // binding 2: Scene sampler for refraction
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+            // Note: Depth texture removed - water_depth from vertex data is used instead
+            // This avoids the resource conflict of reading depth while writing to it
         ],
     })
 }
