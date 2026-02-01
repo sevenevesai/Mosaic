@@ -2,6 +2,10 @@
 //!
 //! Handles player input, movement, camera control, and inventory management.
 
+mod persistence;
+
+pub use persistence::{PlayerData, PlayerDataError};
+
 use std::time::Duration;
 
 use glam::Vec3;
@@ -613,6 +617,53 @@ impl Player {
         }
         false
     }
+
+    // ========== PERSISTENCE ==========
+
+    /// Create a PlayerData snapshot for saving
+    pub fn to_save_data(&self) -> PlayerData {
+        PlayerData::from_player(
+            self.camera.position.into(),
+            [self.camera.yaw, self.camera.pitch],
+            self.inventory.selected_index() as u8,
+            self.fly_mode,
+            &self.inventory,
+        )
+    }
+
+    /// Restore player state from saved data
+    pub fn restore_from_save(&mut self, data: &PlayerData) {
+        // Restore position
+        self.camera.position = Vec3::from_array(data.position);
+        self.feet_pos = Vec3::new(
+            data.position[0],
+            data.position[1] - PLAYER_EYE_HEIGHT,
+            data.position[2],
+        );
+
+        // Restore rotation
+        self.camera.yaw = data.rotation[0];
+        self.camera.pitch = data.rotation[1];
+
+        // Restore fly mode
+        self.fly_mode = data.fly_mode;
+
+        // Restore inventory
+        data.apply_to_inventory(&mut self.inventory);
+
+        tracing::info!(
+            "Restored player: pos=({:.1}, {:.1}, {:.1}), fly={}",
+            data.position[0], data.position[1], data.position[2], data.fly_mode
+        );
+    }
+
+    /// Create a new player from saved data
+    pub fn from_save_data(data: &PlayerData) -> Self {
+        let position = Vec3::from_array(data.position);
+        let mut player = Self::new(position);
+        player.restore_from_save(data);
+        player
+    }
 }
 
 fn lerp(a: f32, b: f32, t: f32) -> f32 {
@@ -702,9 +753,13 @@ mod tests {
 
     #[test]
     fn test_player_selected_block() {
-        let player = Player::new(Vec3::new(0.0, 100.0, 0.0));
+        let mut player = Player::new(Vec3::new(0.0, 100.0, 0.0));
 
-        // Default inventory has stone in slot 0
+        // Empty inventory returns Air
+        assert_eq!(player.selected_block(), Block::Air);
+
+        // Add stone and check selection
+        player.inventory.add_block(Block::Stone);
         assert_eq!(player.selected_block(), Block::Stone);
     }
 
@@ -712,11 +767,14 @@ mod tests {
     fn test_player_inventory_integration() {
         let mut player = Player::new(Vec3::new(0.0, 100.0, 0.0));
 
-        // Select different slot
-        player.inventory.select_slot(7); // Torch
-        assert_eq!(player.selected_block(), Block::Torch);
+        // Add items to inventory
+        player.inventory.add_block(Block::Stone);
+        player.inventory.add_block(Block::Torch);
 
-        // Add item to inventory
+        // First slot has stone
+        assert_eq!(player.selected_block(), Block::Stone);
+
+        // Can add more items
         assert!(player.inventory.add_block(Block::DiamondOre));
     }
 

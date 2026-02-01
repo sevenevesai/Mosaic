@@ -12,7 +12,7 @@ use winit::{
 };
 
 use crate::audio::AudioManager;
-use crate::player::{Player, BlockInteraction};
+use crate::player::{Player, PlayerData, BlockInteraction};
 use crate::renderer::{DisplayMode, Renderer, DebugMetrics};
 use crate::settings::Settings;
 use crate::settings_menu::SettingsMenu;
@@ -67,17 +67,35 @@ impl App {
             }
         };
 
-        // Load spawn position from storage
-        let spawn_pos = if let Some(spawn) = world.spawn_position() {
-            glam::Vec3::new(spawn[0], spawn[1], spawn[2])
+        // Try to load player data, fall back to spawn position
+        let player_path = save_dir.join("player.dat");
+        let player = if PlayerData::exists(&player_path) {
+            match PlayerData::load(&player_path) {
+                Ok(data) => {
+                    tracing::info!("Loaded player save data");
+                    Player::from_save_data(&data)
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to load player data: {}, using spawn position", e);
+                    let spawn_pos = world.spawn_position()
+                        .map(|s| glam::Vec3::new(s[0], s[1], s[2]))
+                        .unwrap_or(glam::Vec3::new(0.0, 80.0, 0.0));
+                    Player::new(spawn_pos)
+                }
+            }
         } else {
-            glam::Vec3::new(0.0, 80.0, 0.0)
+            // New world - use spawn position from world metadata
+            let spawn_pos = world.spawn_position()
+                .map(|s| glam::Vec3::new(s[0], s[1], s[2]))
+                .unwrap_or(glam::Vec3::new(0.0, 80.0, 0.0));
+            tracing::info!("New player spawning at ({:.1}, {:.1}, {:.1})", spawn_pos.x, spawn_pos.y, spawn_pos.z);
+            Player::new(spawn_pos)
         };
-        tracing::info!("Player spawning at ({:.1}, {:.1}, {:.1})", spawn_pos.x, spawn_pos.y, spawn_pos.z);
 
         // Trigger initial chunk loading - distance-prioritized, non-blocking
-        // Chunks will load progressively outward from spawn position
-        world.update(&spawn_pos);
+        // Chunks will load progressively outward from player position
+        let player_pos = player.position();
+        world.update(&player_pos);
 
         // Initialize audio system
         let audio = AudioManager::new();
@@ -91,7 +109,7 @@ impl App {
             window,
             renderer,
             world,
-            player: Player::new(spawn_pos),
+            player,
             profiler: FrameProfiler::new(),
             last_frame: Instant::now(),
             cursor_grabbed: false,
@@ -181,10 +199,17 @@ impl App {
         match event {
             WindowEvent::CloseRequested => {
                 tracing::info!("Shutting down...");
-                // Save player position before exit
+
+                // Save player data (position, rotation, inventory)
+                let player_data = self.player.to_save_data();
+                let player_path = std::path::PathBuf::from("saves/world1/player.dat");
+                if let Err(e) = player_data.save(&player_path) {
+                    tracing::error!("Failed to save player data: {}", e);
+                }
+
+                // Also update spawn in world metadata
                 let pos = self.player.position();
                 self.world.set_spawn(pos.x, pos.y, pos.z);
-                tracing::info!("Saved player position: ({:.1}, {:.1}, {:.1})", pos.x, pos.y, pos.z);
 
                 // Save settings before exit
                 let settings = self.renderer.collect_settings((self.windowed_size.width, self.windowed_size.height));

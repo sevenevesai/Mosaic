@@ -562,15 +562,19 @@ fn sample_voxel_opacity(world_pos: vec3<f32>) -> f32 {
 
 // Simple shadow test: march toward sun and check for occlusion
 // Returns 1.0 if in light, 0.0 if in shadow
+// Uses snapped positions for world-stable results
 fn shadow_test(world_pos: vec3<f32>, sun_dir: vec3<f32>) -> f32 {
     let max_distance = 48.0;  // Maximum shadow ray distance
     let num_steps = 12;       // Shadow ray steps (reduced for performance)
     let step_size = max_distance / f32(num_steps);
+    let snap_grid = 1.0;      // Snap to 1-block grid for stability
 
     var pos = world_pos + sun_dir * 1.0; // Start slightly offset to avoid self-shadowing
 
     for (var i = 0; i < num_steps; i++) {
-        let opacity = sample_voxel_opacity(pos);
+        // Snap to world grid for stable shadow queries
+        let snapped = floor(pos / snap_grid + 0.5) * snap_grid;
+        let opacity = sample_voxel_opacity(snapped);
         if (opacity > 0.5) {
             return 0.0; // Hit solid voxel = in shadow
         }
@@ -587,11 +591,11 @@ fn henyey_greenstein(cos_theta: f32, g: f32) -> f32 {
     return (1.0 - g2) / (4.0 * 3.14159 * pow(denom, 1.5));
 }
 
-// Interleaved gradient noise - much better than Bayer for volumetrics
-// Produces less visible patterns than regular dithering
-fn interleaved_gradient_noise(pixel: vec2<f32>) -> f32 {
-    let magic = vec3<f32>(0.06711056, 0.00583715, 52.9829189);
-    return fract(magic.z * fract(dot(pixel, magic.xy)));
+// World-space 3D noise for stable dithering
+// Uses world position so rays don't jitter as camera moves
+fn world_space_noise(world_pos: vec3<f32>) -> f32 {
+    let magic = vec3<f32>(12.9898, 78.233, 45.164);
+    return fract(sin(dot(floor(world_pos * 0.5), magic)) * 43758.5453);
 }
 
 // Check if there's any occlusion above a point (for outdoor suppression)
@@ -660,12 +664,17 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let cos_theta = dot(ray_dir, sun_dir);
     let phase = henyey_greenstein(cos_theta, 0.2);
 
-    // Interleaved gradient noise dithering
-    let noise = interleaved_gradient_noise(in.position.xy);
+    // World-space noise dithering anchored to surface position (stable as camera moves)
+    let noise = world_space_noise(world_pos);
     pos += ray_dir * step_size * noise;
 
     for (var i = 0; i < num_steps; i++) {
         pos += ray_dir * step_size;
+
+        // Snap sample position to world grid for stability
+        // This ensures the same world locations are sampled regardless of camera angle
+        let snap_grid = 0.5;
+        let snapped_pos = floor(pos / snap_grid + 0.5) * snap_grid;
 
         // Check if we've passed the surface
         let dist_from_cam = length(pos - camera_pos);
@@ -673,13 +682,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             break;
         }
 
-        // Sample voxel opacity at this position
-        let opacity = sample_voxel_opacity(pos);
+        // Sample voxel opacity at snapped position for stable shadows
+        let opacity = sample_voxel_opacity(snapped_pos);
 
         // Only process in air
         if (opacity < 0.3) {
-            // Check if this point can see the sun
-            let in_light = shadow_test(pos, sun_dir);
+            // Check if this point can see the sun (use snapped position for stability)
+            let in_light = shadow_test(snapped_pos, sun_dir);
 
             // Track if we've encountered shadow
             if (in_light < 0.5) {
