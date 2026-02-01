@@ -25,6 +25,8 @@ pub struct Settings {
     pub shadow_update_step: f32,
     /// Whether torches cast shadows (more immersive but higher GPU cost)
     pub torch_shadows: bool,
+    /// SSAO quality preset: OFF, LOW, MEDIUM, HIGH, ULTRA
+    pub ssao_quality: String,
 }
 
 impl Default for Settings {
@@ -43,6 +45,7 @@ impl Default for Settings {
             windowed_height: 720,
             shadow_update_step: 2.0, // Frequent small updates (options: 2, 4, 8, 16, 32, 48)
             torch_shadows: false,    // Default OFF for performance
+            ssao_quality: "MEDIUM".to_string(), // Default SSAO quality
         }
     }
 }
@@ -137,6 +140,9 @@ impl Settings {
                     "torch_shadows" => {
                         settings.torch_shadows = value == "true";
                     }
+                    "ssao_quality" => {
+                        settings.ssao_quality = value.to_string();
+                    }
                     _ => {}
                 }
             }
@@ -162,7 +168,8 @@ impl Settings {
              windowed_width={}\n\
              windowed_height={}\n\
              shadow_update_step={}\n\
-             torch_shadows={}\n",
+             torch_shadows={}\n\
+             ssao_quality={}\n",
             self.render_distance,
             self.shadow_mode,
             self.bloom_enabled,
@@ -176,6 +183,7 @@ impl Settings {
             self.windowed_height,
             self.shadow_update_step,
             self.torch_shadows,
+            self.ssao_quality,
         );
 
         if let Err(e) = fs::write(Self::FILE_PATH, content) {

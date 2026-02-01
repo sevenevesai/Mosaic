@@ -188,6 +188,30 @@ World (root Chunk)
 
 ---
 
+#### Chunk Delta Upload ✅ IMPLEMENTED
+
+**Status**: Completed Feb 2026
+
+**What**: Track which chunks are already uploaded to GPU; only upload NEW chunks on camera movement.
+
+**Implementation** (`src/renderer/voxel_gi.rs`):
+- `uploaded_chunks: AHashMap<ChunkPos, u32>` - Maps chunk position → buffer slot
+- `free_slots: Vec<u32>` - Recycled slots for reuse when chunks leave volume
+- `upload_chunk_data_for_gpu_delta()` - Incremental upload function
+- Slot allocator with defragmentation when buffer gets fragmented
+- Auto-invalidation when blocks change via `invalidate_chunk()`
+
+**Results**:
+- **94-100% chunk reuse** during normal gameplay
+- **Upload time: 13ms → 0.15ms** when stationary (86x faster)
+- **Upload time: 13ms → 0.4ms** when moving (32x faster)
+- **Data saved: 11MB+ per update** (was uploading ~8MB every 2 blocks)
+
+**Files Modified**:
+- `src/renderer/voxel_gi.rs` - Added delta tracking, slot allocator, incremental upload
+
+---
+
 #### Flow-Based Foam
 **From**: `voxelot/shaders/water.wgsl`
 
@@ -263,19 +287,31 @@ World (root Chunk)
 
 ---
 
-#### SSAO
-**From**: `voxelot/shaders/ssao_blur.wgsl`
+#### SSAO ✅ IMPLEMENTED
 
-**What**: Screen-space ambient occlusion for depth perception.
+**Status**: Completed Feb 2026
 
-**Key Concepts**:
-- Sample depth buffer in hemisphere around fragment
-- Count occluded samples
-- Blur result for smooth appearance
+**What**: Screen-space ambient occlusion for depth perception and contact shadows.
 
-**Impact**: Modern visual quality, better depth perception
-**Effort**: Medium (3-4 days)
-**Files**: New post-process pass
+**Implementation** (`src/renderer/ssao.rs`):
+- Hemisphere sampling with 12-64 samples (quality presets)
+- Depth-based normal reconstruction (no G-buffer needed)
+- Bilateral blur with depth-aware edge preservation
+- Multiplicative blend onto scene texture
+- Quality presets: Off, Low, Medium, High, Ultra
+- Half-resolution option for performance (Low/Medium)
+- Distance fade (60-100 blocks)
+
+**Results**:
+- Soft contact shadows at corners and object bases
+- Settings menu toggle (ESC → SSAO)
+- Persists to settings.cfg
+
+**Files Modified**:
+- `src/renderer/ssao.rs` - New SSAO module (~1,100 LOC)
+- `src/renderer/mod.rs` - Integration into render pipeline
+- `src/settings.rs` - Quality preset persistence
+- `src/settings_menu.rs` - UI toggle
 
 ---
 
@@ -377,7 +413,8 @@ World (root Chunk)
 
 ### Phase 1: Quick Performance Wins
 1. ~~**Visibility Cache**~~ ✅ DONE - 88% hit rate achieved
-2. **Flow-Based Foam** - Visual polish
+2. ~~**Chunk Delta Upload**~~ ✅ DONE - 94-100% reuse, 32x faster uploads
+3. **Flow-Based Foam** - Visual polish
 
 ### Phase 2: Extended View Distance
 3. **Impostor Rendering** - 2x render distance
@@ -385,7 +422,7 @@ World (root Chunk)
 
 ### Phase 3: Visual Quality
 5. **SSR for Water** - Environment reflections
-6. **SSAO** - Depth perception
+6. ~~**SSAO**~~ ✅ DONE - Contact shadows, 5 quality presets
 7. **Dual Kawase Bloom** - Better glow
 
 ### Phase 4: Optional Polish

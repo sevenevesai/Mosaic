@@ -80,6 +80,11 @@ impl SettingsMenu {
                 },
                 toggle: |r| { r.toggle_torch_shadows(); },
             },
+            MenuItem {
+                label: "SSAO",
+                get_value: |r| r.ssao_quality().as_str().to_string(),
+                toggle: |r| { r.cycle_ssao_quality(); },
+            },
             // === GPU SETTINGS ===
             MenuItem {
                 label: "GPU GI",

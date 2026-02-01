@@ -37,6 +37,7 @@ src/
 │   ├── inventory_ui.rs # Hotbar/inventory UI rendering
 │   ├── gpu_culling.rs # GPU frustum culling + visibility cache (88% hit rate)
 │   ├── voxel_gi.rs  # Voxel GI: 256³ volume, DDA shadows, VCT
+│   ├── ssao.rs      # Screen-space ambient occlusion
 │   ├── volumetrics.rs # Volumetric light shafts (god rays)
 │   └── chunk_pool.rs # MDI mega-buffers
 ├── world/
@@ -131,6 +132,7 @@ Voxel-based global illumination using `renderer/voxel_gi.rs`:
 - **Sky Occlusion**: Gradual light falloff into caves (0.08 opacity per voxel)
 - **Cave Ambient**: 10% minimum ambient, 7% minimum shadow light
 - **Voxel Cone Tracing (VCT)**: 5-cone diffuse GI from radiance volume
+- **Chunk Delta Upload**: Only uploads NEW chunks to GPU (94-100% reuse, 32x faster)
 
 **Shadow Modes** (Y key to toggle):
 | Mode | Style | Best For |
@@ -139,6 +141,28 @@ Voxel-based global illumination using `renderer/voxel_gi.rs`:
 | **Soft** | Gradient, painterly, darker caves | Atmosphere, artistic |
 
 **Shadow Debug** (U key): Visualizes R=sun-facing, G=shadow value, B=was-traced
+
+## SSAO (Screen-Space Ambient Occlusion)
+
+Post-process effect for soft contact shadows (`renderer/ssao.rs`):
+- **Hemisphere sampling**: 12-64 samples based on quality preset
+- **Depth-based normals**: Reconstructed from depth buffer (no G-buffer needed)
+- **Bilateral blur**: Edge-preserving blur using depth discontinuity detection
+- **Distance fade**: AO fades out 60-100 blocks from camera
+
+**Quality Presets** (ESC menu → SSAO):
+| Preset | Samples | Resolution | Blur |
+|--------|---------|------------|------|
+| Off | 0 | - | - |
+| Low | 12 | Half | 3-tap |
+| Medium | 24 | Half | 7-tap |
+| High | 32 | Full | 7-tap |
+| Ultra | 64 | Full | 11-tap |
+
+**Runtime Parameters** (in `SsaoParams`):
+- `radius`: World-space sample radius (default 2.0 blocks)
+- `intensity`: AO strength multiplier (default 0.55)
+- `bias`: Surface bias to prevent self-occlusion (default 0.025)
 
 ## Water Rendering
 

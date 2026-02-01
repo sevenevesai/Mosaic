@@ -11,6 +11,7 @@ mod inventory_ui;
 mod item_renderer;
 mod pipeline;
 mod prop_renderer;
+mod ssao;
 mod texture;
 pub mod voxel_gi;
 mod volumetrics;
@@ -22,6 +23,7 @@ pub use chunk_pool::ChunkPool;
 pub use debug_overlay::{DebugOverlay, DebugMetrics};
 pub use item_renderer::{ItemRenderer, ItemInstanceData};
 pub use prop_renderer::{PropRenderer, PropInstance};
+pub use ssao::{Ssao, SsaoQuality, SsaoParams};
 pub use texture::TextureAtlas;
 pub use voxel_gi::VoxelGI;
 pub use vox_loader::{VoxModel, VoxMesh};
@@ -189,6 +191,9 @@ pub struct Renderer {
     // Volumetric light shafts (god rays)
     volumetrics: VolumetricLighting,
     volumetric_uniform_buffer: wgpu::Buffer,
+
+    // SSAO (screen-space ambient occlusion)
+    ssao: Ssao,
 
     // Settings menu dimmer overlay
     dimmer_pipeline: wgpu::RenderPipeline,
@@ -611,6 +616,11 @@ impl Renderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
+        // Create SSAO system
+        let ssao = Ssao::new(&device, size.width, size.height, surface_format);
+        // Upload noise texture data
+        ssao.upload_noise_texture(&queue);
+
         // Create water uniform bind group layout and buffer
         let water_bind_group_layout = create_water_bind_group_layout(&device);
         let water_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -713,6 +723,7 @@ impl Renderer {
             scene_texture_view,
             volumetrics,
             volumetric_uniform_buffer,
+            ssao,
             dimmer_pipeline,
             inventory_ui,
             item_renderer,
@@ -762,6 +773,9 @@ impl Renderer {
 
             // Resize volumetrics textures
             self.volumetrics.resize(&self.device, new_size.width, new_size.height);
+
+            // Resize SSAO textures
+            self.ssao.resize(&self.device, new_size.width, new_size.height);
         }
     }
 
@@ -956,6 +970,33 @@ impl Renderer {
         self.torch_shadows
     }
 
+    /// Check if SSAO is enabled
+    pub fn is_ssao_enabled(&self) -> bool {
+        self.ssao.is_enabled()
+    }
+
+    /// Get current SSAO quality
+    pub fn ssao_quality(&self) -> SsaoQuality {
+        self.ssao.quality
+    }
+
+    /// Cycle SSAO quality: Off -> Low -> Medium -> High -> Ultra -> Off
+    pub fn cycle_ssao_quality(&mut self) -> SsaoQuality {
+        let new_quality = self.ssao.cycle_quality(&self.device, self.size.width, self.size.height);
+        tracing::info!("SSAO: {}", new_quality.as_str());
+        new_quality
+    }
+
+    /// Set SSAO quality directly
+    pub fn set_ssao_quality(&mut self, quality: SsaoQuality) {
+        self.ssao.set_quality(&self.device, self.size.width, self.size.height, quality);
+    }
+
+    /// Get mutable access to SSAO params for advanced settings
+    pub fn ssao_params_mut(&mut self) -> &mut SsaoParams {
+        &mut self.ssao.params
+    }
+
     /// Get current render distance
     pub fn render_distance(&self) -> i32 {
         self.render_distance
@@ -1031,6 +1072,16 @@ impl Renderer {
         self.display_mode = settings.display_mode;
         self.voxel_gi.set_update_threshold(settings.shadow_update_step);
         self.torch_shadows = settings.torch_shadows;
+        // Apply SSAO quality setting
+        let ssao_quality = match settings.ssao_quality.to_uppercase().as_str() {
+            "OFF" => SsaoQuality::Off,
+            "LOW" => SsaoQuality::Low,
+            "MEDIUM" => SsaoQuality::Medium,
+            "HIGH" => SsaoQuality::High,
+            "ULTRA" => SsaoQuality::Ultra,
+            _ => SsaoQuality::Medium,
+        };
+        self.ssao.set_quality(&self.device, self.size.width, self.size.height, ssao_quality);
     }
 
     /// Collect current settings into a Settings struct
@@ -1049,6 +1100,7 @@ impl Renderer {
             windowed_height: windowed_size.1,
             shadow_update_step: self.voxel_gi.get_update_threshold(),
             torch_shadows: self.torch_shadows,
+            ssao_quality: self.ssao.quality.as_str().to_string(),
         }
     }
 
@@ -1283,6 +1335,17 @@ impl Renderer {
         };
         self.queue
             .write_buffer(&self.volumetric_uniform_buffer, 0, bytemuck::cast_slice(&[volumetric_uniform]));
+
+        // Update SSAO uniforms
+        self.ssao.update_uniforms(
+            &self.queue,
+            camera.projection_matrix().inverse(),
+            camera.projection_matrix(),
+            0.1,   // near plane
+            1000.0, // far plane
+            self.size.width,
+            self.size.height,
+        );
 
         let uniforms_elapsed = uniforms_start.elapsed();
 
@@ -1660,6 +1723,12 @@ impl Renderer {
                 if menu_lines.is_some() { Some(&self.dimmer_pipeline) } else { None },
             );
         }
+
+        // === SSAO (Screen-Space Ambient Occlusion) ===
+        // Compute AO from depth buffer and apply to scene
+        // This runs after main pass (needs depth) and before volumetrics/bloom
+        self.ssao.create_bind_groups(&self.device, &self.depth_texture);
+        self.ssao.render(&mut encoder, &self.scene_texture_view);
 
         // === VOLUMETRIC LIGHT SHAFTS ===
         // Render god rays using raymarching through voxel volume
