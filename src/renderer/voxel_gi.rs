@@ -125,7 +125,10 @@ const MAX_DIRTY_BLOCKS: usize = 64;
 
 /// Maximum chunks that can overlap the 256^3 voxel volume
 /// Volume spans 16 chunks per axis, but can straddle boundaries → 17 max
-const MAX_OVERLAPPING_CHUNKS: u32 = 2048; // Increased to capture more Y levels (~7 levels vs ~1.7)
+/// Maximum chunk slots in the GPU buffer for delta uploads
+/// Need headroom beyond the ~2048 visible chunks to handle churn during movement
+/// Extra slots allow old chunks to coexist briefly with new chunks during transitions
+const MAX_OVERLAPPING_CHUNKS: u32 = 3072; // 2048 visible + 1024 headroom for delta churn
 
 /// GPU-side chunk metadata for voxel filling
 #[repr(C)]
@@ -260,6 +263,20 @@ pub struct VoxelGI {
     shadow_blend: f32,
     /// How fast shadows fade in after an update (higher = faster)
     shadow_fade_speed: f32,
+
+    // === Chunk Delta Upload System ===
+    // Tracks which chunks are already uploaded to GPU to avoid redundant uploads
+
+    /// Maps ChunkPos to slot index in chunk_blocks_buffer (for delta uploads)
+    uploaded_chunks: AHashMap<ChunkPos, u32>,
+    /// Free slot indices available for reuse when chunks leave the volume
+    free_slots: Vec<u32>,
+    /// Next slot index to allocate if free_slots is empty
+    next_slot: u32,
+    /// Last volume center used for chunk tracking (integer, for stability)
+    last_chunk_volume_center: glam::IVec3,
+    /// Whether delta upload mode is active (requires stable volume tracking)
+    delta_upload_enabled: bool,
 }
 
 impl VoxelGI {
@@ -463,6 +480,12 @@ impl VoxelGI {
             use_gpu_fill: true, // Enable GPU fill by default
             shadow_blend: 1.0,  // Start fully blended
             shadow_fade_speed: 4.0, // Fade in over ~0.25 seconds
+            // Chunk delta upload system
+            uploaded_chunks: AHashMap::with_capacity(MAX_OVERLAPPING_CHUNKS as usize),
+            free_slots: Vec::with_capacity(256), // Pre-allocate for typical churn
+            next_slot: 0,
+            last_chunk_volume_center: glam::IVec3::ZERO,
+            delta_upload_enabled: true, // Enable by default
         }
     }
 
@@ -474,9 +497,19 @@ impl VoxelGI {
 
     /// Mark a specific block as dirty for incremental update
     /// This is much faster than full update - only updates one voxel + light radius
-    /// In GPU mode, this triggers a full refresh since incremental GPU updates aren't supported yet
+    /// In GPU mode, this invalidates the chunk in delta tracking so it gets re-uploaded
     pub fn mark_dirty_at(&mut self, x: i32, y: i32, z: i32) {
-        // In GPU mode, trigger full refresh since incremental updates aren't supported
+        // Invalidate the chunk in delta tracking so it gets re-uploaded
+        if self.delta_upload_enabled {
+            let chunk_pos = ChunkPos {
+                x: x.div_euclid(CHUNK_SIZE_I32),
+                y: y.div_euclid(CHUNK_SIZE_I32),
+                z: z.div_euclid(CHUNK_SIZE_I32),
+            };
+            self.invalidate_chunk(chunk_pos);
+        }
+
+        // In GPU mode, trigger full refresh since incremental GPU updates aren't supported yet
         if self.use_gpu_fill {
             self.force_full_update = true;
             return;
@@ -489,6 +522,21 @@ impl VoxelGI {
             return;
         }
         self.dirty_blocks.push(DirtyBlock { x, y, z });
+    }
+
+    /// Invalidate a chunk in the delta tracking system
+    /// The chunk will be re-uploaded on the next frame
+    pub fn invalidate_chunk(&mut self, chunk_pos: ChunkPos) {
+        if let Some(slot) = self.uploaded_chunks.remove(&chunk_pos) {
+            self.free_slots.push(slot);
+        }
+    }
+
+    /// Invalidate all chunks (e.g., when world is reset)
+    pub fn invalidate_all_chunks(&mut self) {
+        self.uploaded_chunks.clear();
+        self.free_slots.clear();
+        self.next_slot = 0;
     }
 
     fn create_update_pipeline(device: &wgpu::Device, _bind_group_layout: &wgpu::BindGroupLayout) -> wgpu::ComputePipeline {
@@ -1095,15 +1143,25 @@ impl VoxelGI {
             self.smoothed_center.z.floor() as i32,
         );
 
-        // Upload chunk data to GPU
+        // Upload chunk data to GPU using delta tracking
         let upload_start = std::time::Instant::now();
-        let (num_chunks, min_chunk_pos) = self.upload_chunk_data_for_gpu(device, queue, chunks, volume_center);
+        let (num_chunks, _min_chunk_pos, chunks_uploaded, chunks_reused) = if self.delta_upload_enabled {
+            self.upload_chunk_data_for_gpu_delta(device, queue, chunks, volume_center)
+        } else {
+            // Fallback to full upload (for comparison/debugging)
+            let (n, m) = self.upload_chunk_data_for_gpu(device, queue, chunks, volume_center);
+            (n, m, n, 0)
+        };
         let upload_time = upload_start.elapsed();
 
         if num_chunks == 0 {
             tracing::warn!("GPU voxel fill: no chunks to process");
             return;
         }
+
+        // Calculate upload savings
+        let bytes_uploaded = chunks_uploaded as usize * 4096;
+        let bytes_saved = chunks_reused as usize * 4096;
 
         // Create bind group with all resources
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1187,14 +1245,30 @@ impl VoxelGI {
         // Note: shadow_blend no longer reset here - using edge-distance fade instead
 
         let fill_time = fill_start.elapsed();
-        tracing::info!(
-            "GPU voxel fill: upload={:.2}ms, total={:.2}ms | {} chunks, center=({},{},{}), min_chunk=({},{},{})",
-            upload_time.as_secs_f64() * 1000.0,
-            fill_time.as_secs_f64() * 1000.0,
-            num_chunks,
-            volume_center.x, volume_center.y, volume_center.z,
-            min_chunk_pos.x, min_chunk_pos.y, min_chunk_pos.z
-        );
+
+        // Log with delta upload statistics
+        if self.delta_upload_enabled && chunks_reused > 0 {
+            let reuse_pct = (chunks_reused as f32 / num_chunks as f32) * 100.0;
+            tracing::info!(
+                "GPU voxel fill: upload={:.2}ms, total={:.2}ms | {} chunks ({} new, {} reused={:.0}%), {}KB uploaded, {}KB saved",
+                upload_time.as_secs_f64() * 1000.0,
+                fill_time.as_secs_f64() * 1000.0,
+                num_chunks,
+                chunks_uploaded,
+                chunks_reused,
+                reuse_pct,
+                bytes_uploaded / 1024,
+                bytes_saved / 1024,
+            );
+        } else {
+            tracing::info!(
+                "GPU voxel fill: upload={:.2}ms, total={:.2}ms | {} chunks, center=({},{},{})",
+                upload_time.as_secs_f64() * 1000.0,
+                fill_time.as_secs_f64() * 1000.0,
+                num_chunks,
+                volume_center.x, volume_center.y, volume_center.z,
+            );
+        }
     }
 
     /// Upload chunk data to GPU buffers for compute shader processing
@@ -1383,6 +1457,343 @@ impl VoxelGI {
         (num_chunks, min_chunk)
     }
 
+    /// Upload chunk data using delta tracking - only uploads NEW chunks
+    /// Returns (num_chunks, min_chunk_pos, chunks_uploaded, chunks_reused)
+    fn upload_chunk_data_for_gpu_delta(
+        &mut self,
+        _device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        chunks: &Arc<RwLock<AHashMap<ChunkPos, Arc<Chunk>>>>,
+        volume_center: glam::IVec3,
+    ) -> (u32, glam::IVec3, u32, u32) {
+        use glam::IVec3;
+
+        let half_size = 128i32;
+        let min_block = volume_center - IVec3::splat(half_size);
+        let max_block = volume_center + IVec3::splat(half_size - 1);
+
+        // Calculate chunk range that overlaps the volume
+        let min_chunk = IVec3::new(
+            min_block.x.div_euclid(CHUNK_SIZE_I32),
+            min_block.y.div_euclid(CHUNK_SIZE_I32),
+            min_block.z.div_euclid(CHUNK_SIZE_I32),
+        );
+        let max_chunk = IVec3::new(
+            max_block.x.div_euclid(CHUNK_SIZE_I32),
+            max_block.y.div_euclid(CHUNK_SIZE_I32),
+            max_block.z.div_euclid(CHUNK_SIZE_I32),
+        );
+
+        // Build set of chunks needed for current volume
+        let mut needed_chunks: AHashMap<ChunkPos, ()> = AHashMap::with_capacity(MAX_OVERLAPPING_CHUNKS as usize);
+        for cy in min_chunk.y..=max_chunk.y {
+            for cz in min_chunk.z..=max_chunk.z {
+                for cx in min_chunk.x..=max_chunk.x {
+                    needed_chunks.insert(ChunkPos { x: cx, y: cy, z: cz }, ());
+                }
+            }
+        }
+
+        // Find chunks to remove (uploaded but no longer needed)
+        let chunks_to_remove: Vec<ChunkPos> = self.uploaded_chunks
+            .keys()
+            .filter(|pos| !needed_chunks.contains_key(pos))
+            .copied()
+            .collect();
+
+        // Free slots from removed chunks
+        for pos in &chunks_to_remove {
+            if let Some(slot) = self.uploaded_chunks.remove(pos) {
+                self.free_slots.push(slot);
+            }
+        }
+
+        // Defragment if we're getting close to the limit but have free slots
+        // This resets next_slot to allow reuse of freed slots more efficiently
+        if self.next_slot > MAX_OVERLAPPING_CHUNKS / 2 && self.free_slots.len() > 256 {
+            // Sort free_slots to find the highest slot we can safely reset to
+            self.free_slots.sort_unstable();
+            // Reset next_slot to just past the highest used slot
+            let max_used = self.uploaded_chunks.values().max().copied().unwrap_or(0);
+            self.next_slot = max_used + 1;
+            tracing::debug!(
+                "Delta upload defrag: reset next_slot to {}, {} free slots",
+                self.next_slot, self.free_slots.len()
+            );
+        }
+
+        // Prepare metadata and lookup data
+        let mut metadata_vec: Vec<GpuChunkMetadata> = Vec::with_capacity(MAX_OVERLAPPING_CHUNKS as usize);
+        let lookup_size = 17 * 17 * 17;
+        let mut lookup_data: Vec<u32> = vec![0xFFFFFFFF; lookup_size];
+
+        let chunks_read = chunks.read();
+        let mut chunks_uploaded = 0u32;
+        let mut chunks_reused = 0u32;
+        let mut total_chunks = 0u32;
+
+        // Calculate center chunk for prioritized iteration
+        let center_chunk = IVec3::new(
+            volume_center.x.div_euclid(CHUNK_SIZE_I32),
+            volume_center.y.div_euclid(CHUNK_SIZE_I32),
+            volume_center.z.div_euclid(CHUNK_SIZE_I32),
+        );
+
+        // Iterate from center outward in Y
+        let y_range = max_chunk.y - min_chunk.y + 1;
+        let mut y_offsets: Vec<i32> = Vec::with_capacity(y_range as usize);
+        for d in 0..=y_range {
+            if d == 0 {
+                y_offsets.push(0);
+            } else {
+                y_offsets.push(d);
+                y_offsets.push(-d);
+            }
+        }
+
+        'outer: for dy in y_offsets {
+            let cy = center_chunk.y + dy;
+            if cy < min_chunk.y || cy > max_chunk.y {
+                continue;
+            }
+
+            for cz in min_chunk.z..=max_chunk.z {
+                for cx in min_chunk.x..=max_chunk.x {
+                    let pos = ChunkPos { x: cx, y: cy, z: cz };
+
+                    if let Some(chunk) = chunks_read.get(&pos) {
+                        // Check if chunk already has a slot
+                        let slot = if let Some(&existing_slot) = self.uploaded_chunks.get(&pos) {
+                            // Reuse existing slot - no upload needed
+                            chunks_reused += 1;
+                            existing_slot
+                        } else {
+                            // Need to allocate a new slot and upload
+                            let new_slot = if let Some(recycled) = self.free_slots.pop() {
+                                recycled
+                            } else {
+                                let s = self.next_slot;
+                                self.next_slot += 1;
+                                if self.next_slot >= MAX_OVERLAPPING_CHUNKS {
+                                    // Buffer full - fall back to full upload
+                                    tracing::warn!("Chunk slot buffer full, resetting delta tracking");
+                                    self.uploaded_chunks.clear();
+                                    self.free_slots.clear();
+                                    self.next_slot = 0;
+                                    drop(chunks_read);
+                                    return self.upload_chunk_data_for_gpu_full_reset(queue, chunks, volume_center);
+                                }
+                                s
+                            };
+
+                            // Upload this chunk's block data at the specific slot offset
+                            let offset = new_slot as u64 * 4096;
+                            queue.write_buffer(
+                                &self.fill_pipeline.chunk_blocks_buffer,
+                                offset,
+                                chunk.blocks_as_bytes(),
+                            );
+
+                            self.uploaded_chunks.insert(pos, new_slot);
+                            chunks_uploaded += 1;
+                            new_slot
+                        };
+
+                        // Add metadata (always needed for current frame)
+                        let world_origin = [cx * CHUNK_SIZE_I32, cy * CHUNK_SIZE_I32, cz * CHUNK_SIZE_I32];
+                        metadata_vec.push(GpuChunkMetadata {
+                            world_origin,
+                            chunk_index: slot,
+                        });
+
+                        // Update lookup texture
+                        let lx = (cx - min_chunk.x) as usize;
+                        let ly = (cy - min_chunk.y) as usize;
+                        let lz = (cz - min_chunk.z) as usize;
+                        if lx < 17 && ly < 17 && lz < 17 {
+                            let lookup_idx = lx + ly * 17 + lz * 17 * 17;
+                            lookup_data[lookup_idx] = slot;
+                        }
+
+                        total_chunks += 1;
+
+                        if total_chunks >= MAX_OVERLAPPING_CHUNKS {
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+        }
+        drop(chunks_read);
+
+        // Upload uniforms
+        let uniforms = VoxelFillUniforms {
+            volume_center: [volume_center.x, volume_center.y, volume_center.z, 0],
+            min_chunk_pos: [min_chunk.x, min_chunk.y, min_chunk.z, total_chunks as i32],
+        };
+        queue.write_buffer(
+            &self.fill_pipeline.uniform_buffer,
+            0,
+            bytemuck::cast_slice(&[uniforms]),
+        );
+
+        // Upload metadata (small - always upload)
+        if !metadata_vec.is_empty() {
+            queue.write_buffer(
+                &self.fill_pipeline.chunk_metadata_buffer,
+                0,
+                bytemuck::cast_slice(&metadata_vec),
+            );
+        }
+
+        // Upload lookup texture (small - always upload)
+        queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &self.fill_pipeline.chunk_lookup_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytemuck::cast_slice(&lookup_data),
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(17 * 4),
+                rows_per_image: Some(17),
+            },
+            wgpu::Extent3d {
+                width: 17,
+                height: 17,
+                depth_or_array_layers: 17,
+            },
+        );
+
+        // Update tracking
+        self.last_chunk_volume_center = volume_center;
+
+        (total_chunks, min_chunk, chunks_uploaded, chunks_reused)
+    }
+
+    /// Full reset fallback - clears delta tracking and uploads everything
+    fn upload_chunk_data_for_gpu_full_reset(
+        &mut self,
+        queue: &wgpu::Queue,
+        chunks: &Arc<RwLock<AHashMap<ChunkPos, Arc<Chunk>>>>,
+        volume_center: glam::IVec3,
+    ) -> (u32, glam::IVec3, u32, u32) {
+        use glam::IVec3;
+
+        // Clear all tracking
+        self.uploaded_chunks.clear();
+        self.free_slots.clear();
+        self.next_slot = 0;
+
+        let half_size = 128i32;
+        let min_block = volume_center - IVec3::splat(half_size);
+        let max_block = volume_center + IVec3::splat(half_size - 1);
+
+        let min_chunk = IVec3::new(
+            min_block.x.div_euclid(CHUNK_SIZE_I32),
+            min_block.y.div_euclid(CHUNK_SIZE_I32),
+            min_block.z.div_euclid(CHUNK_SIZE_I32),
+        );
+        let max_chunk = IVec3::new(
+            max_block.x.div_euclid(CHUNK_SIZE_I32),
+            max_block.y.div_euclid(CHUNK_SIZE_I32),
+            max_block.z.div_euclid(CHUNK_SIZE_I32),
+        );
+
+        let mut metadata_vec: Vec<GpuChunkMetadata> = Vec::with_capacity(MAX_OVERLAPPING_CHUNKS as usize);
+        let mut blocks_vec: Vec<u8> = Vec::with_capacity(MAX_OVERLAPPING_CHUNKS as usize * 4096);
+        let lookup_size = 17 * 17 * 17;
+        let mut lookup_data: Vec<u32> = vec![0xFFFFFFFF; lookup_size];
+
+        let chunks_read = chunks.read();
+        let mut chunk_index = 0u32;
+
+        for cy in min_chunk.y..=max_chunk.y {
+            for cz in min_chunk.z..=max_chunk.z {
+                for cx in min_chunk.x..=max_chunk.x {
+                    let pos = ChunkPos { x: cx, y: cy, z: cz };
+
+                    if let Some(chunk) = chunks_read.get(&pos) {
+                        let world_origin = [cx * CHUNK_SIZE_I32, cy * CHUNK_SIZE_I32, cz * CHUNK_SIZE_I32];
+                        metadata_vec.push(GpuChunkMetadata {
+                            world_origin,
+                            chunk_index,
+                        });
+
+                        blocks_vec.extend_from_slice(chunk.blocks_as_bytes());
+
+                        let lx = (cx - min_chunk.x) as usize;
+                        let ly = (cy - min_chunk.y) as usize;
+                        let lz = (cz - min_chunk.z) as usize;
+                        if lx < 17 && ly < 17 && lz < 17 {
+                            let lookup_idx = lx + ly * 17 + lz * 17 * 17;
+                            lookup_data[lookup_idx] = chunk_index;
+                        }
+
+                        // Track in delta system
+                        self.uploaded_chunks.insert(pos, chunk_index);
+
+                        chunk_index += 1;
+                        if chunk_index >= MAX_OVERLAPPING_CHUNKS {
+                            break;
+                        }
+                    }
+                }
+                if chunk_index >= MAX_OVERLAPPING_CHUNKS {
+                    break;
+                }
+            }
+            if chunk_index >= MAX_OVERLAPPING_CHUNKS {
+                break;
+            }
+        }
+        drop(chunks_read);
+
+        self.next_slot = chunk_index;
+        let num_chunks = chunk_index;
+
+        // Upload everything
+        let uniforms = VoxelFillUniforms {
+            volume_center: [volume_center.x, volume_center.y, volume_center.z, 0],
+            min_chunk_pos: [min_chunk.x, min_chunk.y, min_chunk.z, num_chunks as i32],
+        };
+        queue.write_buffer(&self.fill_pipeline.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
+
+        if !metadata_vec.is_empty() {
+            queue.write_buffer(&self.fill_pipeline.chunk_metadata_buffer, 0, bytemuck::cast_slice(&metadata_vec));
+        }
+
+        if !blocks_vec.is_empty() {
+            queue.write_buffer(&self.fill_pipeline.chunk_blocks_buffer, 0, &blocks_vec);
+        }
+
+        queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &self.fill_pipeline.chunk_lookup_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytemuck::cast_slice(&lookup_data),
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(17 * 4),
+                rows_per_image: Some(17),
+            },
+            wgpu::Extent3d {
+                width: 17,
+                height: 17,
+                depth_or_array_layers: 17,
+            },
+        );
+
+        self.last_chunk_volume_center = volume_center;
+
+        (num_chunks, min_chunk, num_chunks, 0) // All uploaded, none reused
+    }
+
     /// Update the smoothed center to gradually follow the camera
     /// Call this every frame before checking needs_gpu_refresh
     /// Returns true if the smoothed center moved (for debug logging)
@@ -1443,6 +1854,28 @@ impl VoxelGI {
     /// Get current fill mode
     pub fn is_gpu_fill_enabled(&self) -> bool {
         self.use_gpu_fill
+    }
+
+    /// Toggle delta upload mode (incremental chunk uploads)
+    pub fn set_delta_upload_enabled(&mut self, enabled: bool) {
+        self.delta_upload_enabled = enabled;
+        if !enabled {
+            // Clear tracking when disabling
+            self.uploaded_chunks.clear();
+            self.free_slots.clear();
+            self.next_slot = 0;
+        }
+        tracing::info!("Delta upload mode: {}", if enabled { "enabled" } else { "disabled" });
+    }
+
+    /// Check if delta upload mode is enabled
+    pub fn is_delta_upload_enabled(&self) -> bool {
+        self.delta_upload_enabled
+    }
+
+    /// Get delta upload statistics
+    pub fn get_delta_stats(&self) -> (usize, usize, u32) {
+        (self.uploaded_chunks.len(), self.free_slots.len(), self.next_slot)
     }
 
     /// Set the shadow update threshold (how many blocks before triggering an update)
