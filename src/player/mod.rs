@@ -116,6 +116,8 @@ impl Player {
                 let mut inv = Inventory::new_empty();
                 // Give player a chest for testing
                 inv.add_item(crate::inventory::Item::Block(Block::Chest), 5);
+                // Give player torches for lighting
+                inv.add_item(crate::inventory::Item::Block(Block::Torch), 64);
                 inv
             },
             on_ground: false,

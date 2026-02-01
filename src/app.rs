@@ -561,9 +561,11 @@ impl App {
         use crate::renderer::PropInstance;
         let chest_instances: Vec<PropInstance> = self.chests.positions()
             .map(|(pos, data)| {
+                // Chest is 2 blocks wide, center between this block and +X neighbor
+                // Rotate 90 degrees counterclockwise from stored rotation
                 PropInstance::new(
-                    glam::Vec3::new(pos.x as f32 + 0.5, pos.y as f32, pos.z as f32 + 0.5),
-                    data.rotation,
+                    glam::Vec3::new(pos.x as f32 + 1.0, pos.y as f32, pos.z as f32 + 0.5),
+                    data.rotation + std::f32::consts::FRAC_PI_2,
                     1.0,
                 )
             })

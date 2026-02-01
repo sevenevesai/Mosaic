@@ -591,11 +591,23 @@ fn henyey_greenstein(cos_theta: f32, g: f32) -> f32 {
     return (1.0 - g2) / (4.0 * 3.14159 * pow(denom, 1.5));
 }
 
+// Integer hash for deterministic noise
+fn hash_int(n: u32) -> u32 {
+    var x = n;
+    x = x ^ (x >> 16u);
+    x = x * 0x7feb352du;
+    x = x ^ (x >> 15u);
+    x = x * 0x846ca68bu;
+    x = x ^ (x >> 16u);
+    return x;
+}
+
 // World-space 3D noise for stable dithering
-// Uses world position so rays don't jitter as camera moves
-fn world_space_noise(world_pos: vec3<f32>) -> f32 {
-    let magic = vec3<f32>(12.9898, 78.233, 45.164);
-    return fract(sin(dot(floor(world_pos * 0.5), magic)) * 43758.5453);
+// Uses integer world position so rays don't jitter as camera moves
+fn world_space_noise(world_pos: vec3<i32>) -> f32 {
+    // Use integer hash based on world grid cell
+    let hash_val = hash_int(u32(world_pos.x + 7919) ^ hash_int(u32(world_pos.y + 4967) ^ hash_int(u32(world_pos.z + 6971))));
+    return f32(hash_val & 0xFFFFu) / 65535.0;
 }
 
 // Check if there's any occlusion above a point (for outdoor suppression)
@@ -665,7 +677,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let phase = henyey_greenstein(cos_theta, 0.2);
 
     // World-space noise dithering anchored to surface position (stable as camera moves)
-    let noise = world_space_noise(world_pos);
+    let noise = world_space_noise(vec3<i32>(floor(world_pos)));
     pos += ray_dir * step_size * noise;
 
     for (var i = 0; i < num_steps; i++) {

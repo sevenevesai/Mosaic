@@ -653,10 +653,10 @@ impl Renderer {
             &camera_bind_group_layout,
         );
 
-        // Load chest prop (model is 19x8x9 voxels, scale to ~1 block wide)
-        // At 1/12 scale: 19/12 = 1.6 blocks wide, 8/12 = 0.67 blocks tall
+        // Load chest prop (model is 19x8x9 voxels, scale to 2 blocks wide)
+        // At 2/19 scale: 19 * (2/19) = 2 blocks wide, 8 * (2/19) = 0.84 blocks tall
         let chest_path = std::path::Path::new("assets/props/furniture/chest/prop_chest_light_brown/prop_chest_light_brown.vox");
-        if let Err(e) = prop_renderer.load_prop(&device, "chest", chest_path, 1.0 / 12.0) {
+        if let Err(e) = prop_renderer.load_prop(&device, "chest", chest_path, 2.0 / 19.0) {
             tracing::warn!("Failed to load chest prop: {}", e);
         }
 
@@ -1379,13 +1379,16 @@ impl Renderer {
             // Extract frustum planes for GPU
             let frustum_planes = frustum.planes_as_array();
 
-            // Run GPU culling compute shader
-            self.gpu_culler.cull(
+            // Run GPU culling compute shader with visibility caching
+            // Skips compute dispatch if camera hasn't moved significantly
+            self.gpu_culler.cull_with_cache(
                 &self.device,
                 &self.queue,
                 &mut encoder,
                 &frustum_planes,
                 crate::constants::CHUNK_SIZE_F32,
+                camera.position,
+                camera.forward(),
             );
         }
 

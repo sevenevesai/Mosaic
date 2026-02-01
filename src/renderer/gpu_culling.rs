@@ -9,9 +9,83 @@
 
 use std::num::NonZeroU64;
 use ahash::AHashMap;
+use glam::Vec3;
 
 use crate::world::ChunkPos;
 use super::chunk_pool::ChunkSlot;
+
+// ============================================================================
+// VISIBILITY CACHE
+// ============================================================================
+
+/// Visibility cache for frame-to-frame culling reuse
+#[derive(Debug)]
+pub struct VisibilityCache {
+    last_camera_pos: Vec3,
+    last_camera_forward: Vec3,
+    last_draw_count: u32,
+    valid: bool,
+    cache_hits: u64,
+    cache_misses: u64,
+}
+
+impl Default for VisibilityCache {
+    fn default() -> Self { Self::new() }
+}
+
+impl VisibilityCache {
+    const POSITION_THRESHOLD: f32 = 2.0;
+    const ROTATION_THRESHOLD: f32 = 0.087;
+
+    pub fn new() -> Self {
+        Self {
+            last_camera_pos: Vec3::ZERO,
+            last_camera_forward: Vec3::NEG_Z,
+            last_draw_count: 0,
+            valid: false,
+            cache_hits: 0,
+            cache_misses: 0,
+        }
+    }
+
+    fn camera_moved(&self, camera_pos: Vec3, camera_forward: Vec3) -> bool {
+        let pos_delta = (camera_pos - self.last_camera_pos).length();
+        let forward_delta = (camera_forward.normalize() - self.last_camera_forward.normalize()).length();
+        pos_delta > Self::POSITION_THRESHOLD || forward_delta > Self::ROTATION_THRESHOLD
+    }
+
+    pub fn try_use_cache(&mut self, camera_pos: Vec3, camera_forward: Vec3) -> Option<u32> {
+        if !self.valid { self.cache_misses += 1; return None; }
+        if self.camera_moved(camera_pos, camera_forward) { 
+            self.valid = false; 
+            self.cache_misses += 1; 
+            tracing::trace!("Visibility cache MISS (camera moved)");
+            return None; 
+        }
+        self.cache_hits += 1;
+        tracing::trace!("Visibility cache HIT (skipping compute dispatch)");
+        Some(self.last_draw_count)
+    }
+
+    pub fn update(&mut self, camera_pos: Vec3, camera_forward: Vec3, draw_count: u32) {
+        self.last_camera_pos = camera_pos;
+        self.last_camera_forward = camera_forward.normalize();
+        self.last_draw_count = draw_count;
+        self.valid = true;
+    }
+
+    pub fn invalidate(&mut self) { self.valid = false; }
+    pub fn hit_rate(&self) -> f32 {
+        let total = self.cache_hits + self.cache_misses;
+        if total == 0 { 0.0 } else { self.cache_hits as f32 / total as f32 }
+    }
+    pub fn stats(&self) -> (u64, u64) { (self.cache_hits, self.cache_misses) }
+    pub fn is_valid(&self) -> bool { self.valid }
+}
+
+// ============================================================================
+// GPU CULLING STRUCTS
+// ============================================================================
 
 /// Maximum chunks that can be culled (must match chunk pool)
 const MAX_CHUNKS: u32 = 2200;
@@ -80,6 +154,9 @@ pub struct GpuCuller {
     slot_to_bounds_idx: AHashMap<u32, u32>,
     /// Whether bounds buffer needs rebuild
     dirty: bool,
+
+    /// Visibility cache for skipping redundant culls
+    visibility_cache: VisibilityCache,
 }
 
 impl GpuCuller {
@@ -197,6 +274,7 @@ impl GpuCuller {
             chunk_count: 0,
             slot_to_bounds_idx: AHashMap::new(),
             dirty: true,
+            visibility_cache: VisibilityCache::new(),
         }
     }
 
@@ -261,6 +339,63 @@ impl GpuCuller {
         }
 
         self.dirty = false;
+
+        // Invalidate visibility cache since chunk bounds changed
+        self.visibility_cache.invalidate();
+    }
+
+    /// Run GPU culling with visibility caching
+    pub fn cull_with_cache(
+        &mut self,
+        _device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        frustum_planes: &[[f32; 4]; 6],
+        chunk_size: f32,
+        camera_pos: Vec3,
+        camera_forward: Vec3,
+    ) -> Option<u32> {
+        if self.chunk_count == 0 { return Some(0); }
+
+        // Check visibility cache first
+        if let Some(cached_count) = self.visibility_cache.try_use_cache(camera_pos, camera_forward) {
+            return Some(cached_count);
+        }
+
+        // Cache miss - run full culling
+        let bind_group = self.bind_group.as_ref()?;
+        let uniforms = CullUniforms {
+            frustum_planes: *frustum_planes,
+            chunk_size,
+            chunk_count: self.chunk_count,
+            _padding: [0.0; 2],
+        };
+        queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
+        queue.write_buffer(&self.count_buffer, 0, bytemuck::bytes_of(&0u32));
+
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("GPU Cull Pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, bind_group, &[]);
+            let workgroups = (self.chunk_count + 63) / 64;
+            pass.dispatch_workgroups(workgroups, 1, 1);
+        }
+
+        encoder.copy_buffer_to_buffer(&self.count_buffer, 0, &self.count_staging, 0, 4);
+        self.visibility_cache.update(camera_pos, camera_forward, self.chunk_count);
+        
+        // Log cache stats every 300 frames
+        let (hits, misses) = self.visibility_cache.stats();
+        let total = hits + misses;
+        if total > 0 && total % 300 == 0 {
+            let hit_rate = hits as f32 / total as f32 * 100.0;
+            tracing::info!("Visibility cache: {:.1}% hit rate ({} hits / {} total)", hit_rate, hits, total);
+        }
+        
+        Some(self.chunk_count)
     }
 
     /// Run GPU culling and return draw count
@@ -323,6 +458,7 @@ impl GpuCuller {
     #[allow(dead_code)]
     pub fn mark_dirty(&mut self) {
         self.dirty = true;
+        self.visibility_cache.invalidate();
     }
 
     /// Check if bounds need rebuild
@@ -339,6 +475,21 @@ impl GpuCuller {
     /// Get current chunk count (for stats)
     pub fn chunk_count(&self) -> u32 {
         self.chunk_count
+    }
+
+    /// Get visibility cache hit rate (0.0 - 1.0)
+    pub fn cache_hit_rate(&self) -> f32 {
+        self.visibility_cache.hit_rate()
+    }
+
+    /// Get visibility cache statistics (hits, misses)
+    pub fn cache_stats(&self) -> (u64, u64) {
+        self.visibility_cache.stats()
+    }
+
+    /// Invalidate visibility cache
+    pub fn invalidate_cache(&mut self) {
+        self.visibility_cache.invalidate();
     }
 }
 

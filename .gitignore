@@ -104,3 +104,6 @@ tarpaulin-report.html
 # Benchmark results
 /criterion/
 /benches/target/
+
+# Archive folder for reference repos
+archive/
