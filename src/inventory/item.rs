@@ -469,6 +469,7 @@ impl BlockItemExt for Block {
             Block::PineLog => "Pine Log",
             Block::JungleLog => "Jungle Log",
             Block::SpruceLeaves => "Spruce Leaves",
+            Block::Chest => "Chest",
         }
     }
 }

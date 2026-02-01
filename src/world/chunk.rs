@@ -377,6 +377,9 @@ pub enum Block {
     PineLog = 52,       // Pine tree log
     JungleLog = 53,     // Jungle tree log
     SpruceLeaves = 54,  // Spruce/pine needles
+
+    // Storage/furniture
+    Chest = 55,         // Storage container (rendered as vox prop)
 }
 
 impl Block {
@@ -413,6 +416,12 @@ impl Block {
     /// Currently disabled - all blocks render as cubes
     pub fn is_cross_billboard(&self) -> bool {
         false
+    }
+
+    /// Returns true if this block is rendered as a voxel prop (not chunk meshed)
+    /// Prop blocks are rendered separately using VoxModel meshes
+    pub fn is_prop(&self) -> bool {
+        matches!(self, Block::Chest)
     }
 
     /// Returns true if this block is foliage (renders all 6 faces, no neighbor culling)
@@ -518,6 +527,9 @@ impl Block {
             Block::PineLog => [8, 8, 54, 54, 54, 54],   // Pine bark
             Block::JungleLog => [8, 8, 55, 55, 55, 55], // Jungle bark
             Block::SpruceLeaves => [56; 6],    // Blue-green needles
+
+            // Storage/furniture
+            Block::Chest => [7; 6],            // Wood planks (rendered as vox prop)
         }
     }
 
@@ -621,6 +633,7 @@ impl From<u8> for Block {
             52 => Block::PineLog,
             53 => Block::JungleLog,
             54 => Block::SpruceLeaves,
+            55 => Block::Chest,
             _ => Block::Air,
         }
     }

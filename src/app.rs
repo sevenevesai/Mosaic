@@ -12,12 +12,13 @@ use winit::{
 };
 
 use crate::audio::AudioManager;
+use crate::inventory::Item;
 use crate::player::{Player, PlayerData, BlockInteraction};
 use crate::renderer::{DisplayMode, Renderer, DebugMetrics};
 use crate::settings::Settings;
 use crate::settings_menu::SettingsMenu;
 use crate::utils::profiler::FrameProfiler;
-use crate::world::{WorldManager, ChunkPos, MESH_STATS};
+use crate::world::{WorldManager, ChunkPos, ItemEntityManager, ChestManager, Block, MESH_STATS, save_items, load_items};
 
 /// Main application state
 pub struct App {
@@ -25,6 +26,8 @@ pub struct App {
     renderer: Renderer,
     world: WorldManager,
     player: Player,
+    item_entities: ItemEntityManager,
+    chests: ChestManager,
     profiler: FrameProfiler,
     last_frame: Instant,
     cursor_grabbed: bool,
@@ -105,11 +108,24 @@ impl App {
         let mut settings_menu = SettingsMenu::new();
         settings_menu.update_screen_size(window_size.width as f32, window_size.height as f32);
 
+        // Load item entities from disk
+        let mut item_entities = ItemEntityManager::new();
+        let items_path = save_dir.join("items.dat");
+        if let Err(e) = load_items(&items_path, &mut item_entities) {
+            tracing::warn!("Failed to load item entities: {}", e);
+        }
+
+        // Initialize chest manager
+        // TODO: Load chests from disk
+        let chests = ChestManager::new();
+
         let mut app = App {
             window,
             renderer,
             world,
             player,
+            item_entities,
+            chests,
             profiler: FrameProfiler::new(),
             last_frame: Instant::now(),
             cursor_grabbed: false,
@@ -205,6 +221,12 @@ impl App {
                 let player_path = std::path::PathBuf::from("saves/world1/player.dat");
                 if let Err(e) = player_data.save(&player_path) {
                     tracing::error!("Failed to save player data: {}", e);
+                }
+
+                // Save item entities
+                let items_path = std::path::PathBuf::from("saves/world1/items.dat");
+                if let Err(e) = save_items(&items_path, &self.item_entities) {
+                    tracing::error!("Failed to save item entities: {}", e);
                 }
 
                 // Also update spawn in world metadata
@@ -422,14 +444,39 @@ impl App {
             // Process block break/place interactions
             let interaction = self.player.process_block_interactions(&mut self.world);
             match interaction {
-                BlockInteraction::Break { x, y, z, .. } => {
+                BlockInteraction::Break { x, y, z, block } => {
+                    // If breaking a chest, drop its contents first
+                    if block == Block::Chest {
+                        let chest_pos = glam::IVec3::new(x, y, z);
+                        if let Some(chest_data) = self.chests.remove_chest(chest_pos) {
+                            // Drop all items from the chest
+                            for (_, stack) in chest_data.container.iter() {
+                                if let Some(stack) = stack {
+                                    self.item_entities.spawn_from_block([x, y, z], stack.item, stack.count);
+                                }
+                            }
+                        }
+                    }
+                    // Spawn item entity for broken block
+                    if let Some(item) = Item::from_block(block) {
+                        self.item_entities.spawn_from_block([x, y, z], item, 1);
+                    }
                     // Mark only the affected block for voxel GI update (incremental)
                     self.renderer.mark_voxel_dirty_at(x, y, z);
                     if let Some(ref mut audio) = self.audio {
                         audio.play_block_break();
                     }
                 }
-                BlockInteraction::Place { x, y, z } => {
+                BlockInteraction::Place { x, y, z, block } => {
+                    // If placing a chest, register it in ChestManager
+                    if block == Block::Chest {
+                        let chest_pos = glam::IVec3::new(x, y, z);
+                        // Chest faces toward player (opposite of player's forward direction)
+                        // Use a fixed rotation for now - facing north (0 radians)
+                        // TODO: Calculate based on player facing when we have access to yaw
+                        let rotation = 0.0;
+                        self.chests.add_chest(chest_pos, rotation);
+                    }
                     // Mark only the affected block for voxel GI update (incremental)
                     self.renderer.mark_voxel_dirty_at(x, y, z);
                     if let Some(ref mut audio) = self.audio {
@@ -437,6 +484,16 @@ impl App {
                     }
                 }
                 BlockInteraction::None => {}
+            }
+
+            // Process item drop request (Q key)
+            if let Some((item, count)) = self.player.process_drop_request() {
+                self.item_entities.spawn_from_player(
+                    self.player.position(),
+                    self.player.forward(),
+                    item,
+                    count,
+                );
             }
 
             // Update footstep audio (only when not flying)
@@ -462,6 +519,25 @@ impl App {
         self.world.tick_water_simulation(dt.as_secs_f32());
         self.profiler.end_section("world_update");
 
+        // Update item entities (physics, pickup, merging)
+        self.profiler.begin_section("item_entities");
+        // Use a position between feet and eyes for pickup detection
+        let player_pos = self.player.position();
+        let pickup_pos = glam::Vec3::new(player_pos.x, player_pos.y - 0.8, player_pos.z);
+        let world_ref = &self.world;
+        let inventory = &self.player.inventory;
+        let collected = self.item_entities.update(
+            dt.as_secs_f32(),
+            pickup_pos,
+            |x, y, z| world_ref.get_block(x, y, z),
+            |item, count| inventory.has_space_for(*item, count),
+        );
+        // Add collected items to inventory
+        for (item, count) in collected {
+            self.player.inventory.add_item(item, count);
+        }
+        self.profiler.end_section("item_entities");
+
         // Upload meshes to GPU (per-chunk buffers - for fallback)
         self.profiler.begin_section("mesh_upload");
         self.world.upload_meshes(self.renderer.device());
@@ -474,6 +550,25 @@ impl App {
         } else {
             None
         };
+
+        // Update item entity renderer
+        use crate::renderer::ItemInstanceData;
+        self.renderer.update_item_entities(
+            self.item_entities.entities().map(ItemInstanceData::from_entity)
+        );
+
+        // Update prop renderer with chest positions from ChestManager
+        use crate::renderer::PropInstance;
+        let chest_instances: Vec<PropInstance> = self.chests.positions()
+            .map(|(pos, data)| {
+                PropInstance::new(
+                    glam::Vec3::new(pos.x as f32 + 0.5, pos.y as f32, pos.z as f32 + 0.5),
+                    data.rotation,
+                    1.0,
+                )
+            })
+            .collect();
+        self.renderer.update_props("chest", &chest_instances);
 
         // Build debug metrics
         let pos = self.player.position();

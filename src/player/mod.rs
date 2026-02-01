@@ -30,7 +30,7 @@ pub enum BlockInteraction {
     /// A block was broken at the given world position
     Break { x: i32, y: i32, z: i32, block: Block },
     /// A block was placed at the given world position
-    Place { x: i32, y: i32, z: i32 },
+    Place { x: i32, y: i32, z: i32, block: Block },
 }
 
 /// Axis-aligned bounding box
@@ -81,6 +81,7 @@ pub struct Player {
     // Block interaction
     break_requested: bool,
     place_requested: bool,
+    drop_requested: bool,
 
     /// Player inventory (holds items, manages selection)
     pub inventory: Inventory,
@@ -110,7 +111,13 @@ impl Player {
             sprint: false,
             break_requested: false,
             place_requested: false,
-            inventory: Inventory::new_empty(),
+            drop_requested: false,
+            inventory: {
+                let mut inv = Inventory::new_empty();
+                // Give player a chest for testing
+                inv.add_item(crate::inventory::Item::Block(Block::Chest), 5);
+                inv
+            },
             on_ground: false,
             in_water: false,
             fly_mode: false,
@@ -198,6 +205,8 @@ impl Player {
             KeyCode::Digit7 => if pressed { self.inventory.select_slot(6); }
             KeyCode::Digit8 => if pressed { self.inventory.select_slot(7); }
             KeyCode::Digit9 => if pressed { self.inventory.select_slot(8); }
+            // Drop selected item
+            KeyCode::KeyQ => if pressed { self.drop_requested = true; }
             _ => {}
         }
     }
@@ -261,12 +270,37 @@ impl Player {
 
         if self.place_requested {
             self.place_requested = false;
-            if let Some((x, y, z)) = self.try_place_block(world) {
-                return BlockInteraction::Place { x, y, z };
+            if let Some((x, y, z, block)) = self.try_place_block(world) {
+                return BlockInteraction::Place { x, y, z, block };
             }
         }
 
         BlockInteraction::None
+    }
+
+    /// Process drop request (Q key)
+    /// Returns (item, count) if an item was dropped from selected slot
+    pub fn process_drop_request(&mut self) -> Option<(Item, u8)> {
+        if !self.drop_requested {
+            return None;
+        }
+        self.drop_requested = false;
+
+        // Get selected slot
+        let slot_idx = self.inventory.selected_index();
+        if let Some(stack) = self.inventory.get_slot(slot_idx) {
+            let item = stack.item;
+            // Drop one item (or could drop whole stack with Ctrl+Q)
+            if self.inventory.consume_selected() {
+                return Some((item, 1));
+            }
+        }
+        None
+    }
+
+    /// Get forward direction for item throwing
+    pub fn forward(&self) -> Vec3 {
+        self.camera.forward()
     }
 
     fn try_break_block(&mut self, world: &mut WorldManager) -> Option<(i32, i32, i32, Block)> {
@@ -279,16 +313,7 @@ impl Player {
             if let Some(block) = world.get_block(x, y, z) {
                 if block != Block::Bedrock {
                     world.set_block(x, y, z, Block::Air);
-
-                    // Add the broken block to inventory
-                    if let Some(item) = Item::from_block(block) {
-                        let overflow = self.inventory.add_item(item, 1);
-                        if overflow > 0 {
-                            tracing::debug!("Inventory full, dropped {} items", overflow);
-                            // TODO: Spawn dropped item entity
-                        }
-                    }
-
+                    // Item spawning is handled by App via ItemEntityManager
                     tracing::debug!("Broke {:?} at ({}, {}, {})", block, x, y, z);
                     return Some((x, y, z, block));
                 }
@@ -297,7 +322,7 @@ impl Player {
         None
     }
 
-    fn try_place_block(&mut self, world: &mut WorldManager) -> Option<(i32, i32, i32)> {
+    fn try_place_block(&mut self, world: &mut WorldManager) -> Option<(i32, i32, i32, Block)> {
         // Check if we have a block to place
         let block_to_place = self.inventory.selected_block()?;
 
@@ -338,7 +363,7 @@ impl Player {
                         self.inventory.consume_selected();
 
                         tracing::debug!("Placed {:?} at ({}, {}, {})", block_to_place, x, y, z);
-                        return Some((x, y, z));
+                        return Some((x, y, z, block_to_place));
                     }
                 }
             }
@@ -870,7 +895,7 @@ mod tests {
     fn test_block_interaction_enum() {
         let none = BlockInteraction::None;
         let brk = BlockInteraction::Break { x: 1, y: 2, z: 3, block: Block::Stone };
-        let place = BlockInteraction::Place { x: 4, y: 5, z: 6 };
+        let place = BlockInteraction::Place { x: 4, y: 5, z: 6, block: Block::Dirt };
 
         assert_eq!(none, BlockInteraction::None);
         assert_ne!(brk, none);

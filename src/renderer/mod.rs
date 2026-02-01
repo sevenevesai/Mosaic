@@ -8,17 +8,23 @@ mod chunk_pool;
 mod debug_overlay;
 mod gpu_culling;
 mod inventory_ui;
+mod item_renderer;
 mod pipeline;
+mod prop_renderer;
 mod texture;
 pub mod voxel_gi;
 mod volumetrics;
+pub mod vox_loader;
 
 pub use bloom::Bloom;
 pub use camera::{Camera, Frustum};
 pub use chunk_pool::ChunkPool;
 pub use debug_overlay::{DebugOverlay, DebugMetrics};
+pub use item_renderer::{ItemRenderer, ItemInstanceData};
+pub use prop_renderer::{PropRenderer, PropInstance};
 pub use texture::TextureAtlas;
 pub use voxel_gi::VoxelGI;
+pub use vox_loader::{VoxModel, VoxMesh};
 pub use volumetrics::VolumetricLighting;
 
 /// Display mode for the window
@@ -189,6 +195,12 @@ pub struct Renderer {
 
     // Inventory UI
     inventory_ui: inventory_ui::InventoryUI,
+
+    // Item entity rendering (dropped items in world)
+    item_renderer: ItemRenderer,
+
+    // Prop rendering (voxel models like chests)
+    prop_renderer: PropRenderer,
 }
 
 impl Renderer {
@@ -626,6 +638,28 @@ impl Renderer {
         // Create inventory UI renderer
         let inventory_ui = inventory_ui::InventoryUI::new(&device, surface_format, &texture_bind_group_layout);
 
+        // Create item entity renderer
+        let item_renderer = ItemRenderer::new(
+            &device,
+            surface_format,
+            &camera_bind_group_layout,
+            &texture_bind_group_layout,
+        );
+
+        // Create prop renderer (for voxel models like chests)
+        let mut prop_renderer = PropRenderer::new(
+            &device,
+            surface_format,
+            &camera_bind_group_layout,
+        );
+
+        // Load chest prop (model is 19x8x9 voxels, scale to ~1 block wide)
+        // At 1/12 scale: 19/12 = 1.6 blocks wide, 8/12 = 0.67 blocks tall
+        let chest_path = std::path::Path::new("assets/props/furniture/chest/prop_chest_light_brown/prop_chest_light_brown.vox");
+        if let Err(e) = prop_renderer.load_prop(&device, "chest", chest_path, 1.0 / 12.0) {
+            tracing::warn!("Failed to load chest prop: {}", e);
+        }
+
         Self {
             surface,
             device,
@@ -681,6 +715,8 @@ impl Renderer {
             volumetric_uniform_buffer,
             dimmer_pipeline,
             inventory_ui,
+            item_renderer,
+            prop_renderer,
         }
     }
 
@@ -1519,6 +1555,21 @@ impl Renderer {
                 }
             }
 
+            // === ITEM ENTITY RENDER PASS ===
+            // Render dropped items as 3D cubes
+            self.item_renderer.render(
+                &mut render_pass,
+                &self.camera_bind_group,
+                &self.texture_bind_group,
+            );
+
+            // === PROP RENDER PASS ===
+            // Render voxel props (chests, etc.)
+            self.prop_renderer.render(
+                &mut render_pass,
+                &self.camera_bind_group,
+            );
+
             // === WATER RENDER PASS ===
             // Render water meshes with transparency (after opaque geometry)
             render_pass.set_pipeline(&self.water_pipeline);
@@ -1678,6 +1729,22 @@ impl Renderer {
 
     pub fn queue(&self) -> &Arc<wgpu::Queue> {
         &self.queue
+    }
+
+    /// Update item entity renderer with current items
+    pub fn update_item_entities(&mut self, items: impl Iterator<Item = ItemInstanceData>) {
+        let time = self.start_time.elapsed().as_secs_f32();
+        self.item_renderer.update(&self.queue, items, time);
+    }
+
+    /// Update prop instances for rendering
+    pub fn update_props(&mut self, name: &str, instances: &[PropInstance]) {
+        self.prop_renderer.update_instances(&self.queue, name, instances);
+    }
+
+    /// Check if a prop type is loaded
+    pub fn has_prop(&self, name: &str) -> bool {
+        self.prop_renderer.has_prop(name)
     }
 
     /// Upload a chunk mesh to the buffer pool

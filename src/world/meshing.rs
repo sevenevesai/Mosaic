@@ -435,7 +435,7 @@ fn build_chunk_mesh_simple(
         for y in 0..CHUNK_SIZE {
             for x in 0..CHUNK_SIZE {
                 let block = chunk.get_block(x, y, z);
-                if !block.is_solid() {
+                if !block.is_solid() || block.is_prop() {
                     continue;
                 }
 
@@ -1074,8 +1074,8 @@ fn binary_greedy_mesh_axis(
                     Axis::Z => (u, v, d),
                 };
                 let block = chunk.get_block(x, y, z);
-                // Skip cross-billboard and foliage blocks - they're rendered separately
-                if block.is_solid() && !block.is_cross_billboard() && !block.is_foliage() {
+                // Skip cross-billboard, foliage, and prop blocks - they're rendered separately
+                if block.is_solid() && !block.is_cross_billboard() && !block.is_foliage() && !block.is_prop() {
                     current_occupancy[v] |= 1 << u;
                     block_types[v][u] = block;
                 }
@@ -1106,8 +1106,8 @@ fn binary_greedy_mesh_axis(
                             Axis::Z => (u, v, d + 1),
                         };
                         let nb = chunk.get_block(x, y, z);
-                        // Foliage doesn't occlude - we want to see faces behind leaves
-                        if nb.is_solid() && !nb.is_foliage() {
+                        // Foliage and props don't occlude - we want to see faces behind them
+                        if nb.is_solid() && !nb.is_foliage() && !nb.is_prop() {
                             neighbor_occupancy[v] |= 1 << u;
                         }
                     }
@@ -1122,7 +1122,7 @@ fn binary_greedy_mesh_axis(
                             Axis::Z => (u, v, 0),
                         };
                         let nb = nc.get_block(x, y, z);
-                        if nb.is_solid() && !nb.is_foliage() {
+                        if nb.is_solid() && !nb.is_foliage() && !nb.is_prop() {
                             neighbor_occupancy[v] |= 1 << u;
                         }
                     }
@@ -1140,7 +1140,7 @@ fn binary_greedy_mesh_axis(
                             Axis::Z => (u, v, d - 1),
                         };
                         let nb = chunk.get_block(x, y, z);
-                        if nb.is_solid() && !nb.is_foliage() {
+                        if nb.is_solid() && !nb.is_foliage() && !nb.is_prop() {
                             neighbor_occupancy[v] |= 1 << u;
                         }
                     }
@@ -1155,7 +1155,7 @@ fn binary_greedy_mesh_axis(
                             Axis::Z => (u, v, CHUNK_SIZE - 1),
                         };
                         let nb = nc.get_block(x, y, z);
-                        if nb.is_solid() && !nb.is_foliage() {
+                        if nb.is_solid() && !nb.is_foliage() && !nb.is_prop() {
                             neighbor_occupancy[v] |= 1 << u;
                         }
                     }
@@ -1394,8 +1394,8 @@ fn greedy_mesh_axis_lod(
                             };
 
                             let block = chunk.get_block(x, y, z);
-                            // Skip non-solid, cross-billboard, and foliage blocks (rendered separately)
-                            if !block.is_solid() || block.is_cross_billboard() || block.is_foliage() {
+                            // Skip non-solid, cross-billboard, foliage, and prop blocks (rendered separately)
+                            if !block.is_solid() || block.is_cross_billboard() || block.is_foliage() || block.is_prop() {
                                 continue;
                             }
 
@@ -1544,7 +1544,7 @@ fn is_face_visible_lod(
     is_face_visible(chunk, neighbors, (nx, ny, nz))
 }
 
-/// Check if a face should be visible (neighbor is transparent)
+/// Check if a face should be visible (neighbor is transparent or prop)
 fn is_face_visible(
     chunk: &Chunk,
     neighbors: &[Option<Arc<Chunk>>; 6],
@@ -1553,7 +1553,8 @@ fn is_face_visible(
     // Check if neighbor is in current chunk
     if Chunk::in_bounds(nx, ny, nz) {
         let neighbor_block = chunk.get_block(nx as usize, ny as usize, nz as usize);
-        return neighbor_block.is_transparent();
+        // Props don't occlude faces (they're rendered separately and aren't full blocks)
+        return neighbor_block.is_transparent() || neighbor_block.is_prop();
     }
 
     // Check neighbor chunk
@@ -1573,7 +1574,7 @@ fn is_face_visible(
 
     if let Some(neighbor_chunk) = &neighbors[neighbor_idx] {
         let neighbor_block = neighbor_chunk.get_block(local_x, local_y, local_z);
-        neighbor_block.is_transparent()
+        neighbor_block.is_transparent() || neighbor_block.is_prop()
     } else {
         // No neighbor chunk loaded - render the face
         true

@@ -2,16 +2,22 @@
 //!
 //! Handles chunks, terrain generation, and mesh building.
 
+pub mod chest;
 mod chunk;
 pub mod generation;
+pub mod item_entity;
+pub mod item_persistence;
 pub mod lighting;
 mod meshing;
 pub mod storage;
 mod water_meshing;
 pub mod water_flow;
 
+pub use chest::{ChestManager, ChestData, Container, SavedChest, SavedChestItem, CHEST_SLOTS};
 pub use chunk::{Block, Chunk, ChunkPos, ChunkWaterData, WaterColumn};
 pub use generation::{generate_chunk, generate_chunk_with_seed};
+pub use item_entity::{ItemEntity, ItemEntityManager, SavedItemEntity};
+pub use item_persistence::{save_items, load_items};
 pub use lighting::{LightEngine, apply_light_updates, world_to_chunk_local};
 pub use meshing::{ChunkMesh, ChunkVertex, GpuMesh, LodLevel, build_chunk_mesh, build_chunk_mesh_lod, MESH_STATS};
 pub use storage::{WorldStorage, SharedStorage, StorageError, create_shared_storage};
