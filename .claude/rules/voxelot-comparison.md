@@ -12,7 +12,8 @@ Comprehensive technical comparison between Mosaic and [Voxelot](https://github.c
 |--------|--------|---------|
 | **Focus** | Playable game engine | Massive world viewer |
 | **Language** | Rust + wgpu | Rust + wgpu |
-| **LOC** | ~32K | ~26K |
+| **LOC** | ~72K | ~26K |
+| **Tests** | 175 | - |
 | **World Model** | Flat chunk grid (16³) | Hierarchical octree (16^n) |
 | **Sparse Storage** | Region files + zstd | Roaring Bitmaps |
 
@@ -138,11 +139,11 @@ World (root Chunk)
 
 | Effect | Mosaic | Voxelot |
 |--------|--------|---------|
-| Bloom | Simple (single pass) | Dual Kawase (5 passes) |
-| SSAO | No | Yes |
+| Bloom | **Yes** (Dual Kawase) | Dual Kawase (5 passes) |
+| SSAO | **Yes** (5 presets, 1.1K LOC) | Yes |
 | SSR | No | Yes (31KB shader) |
-| DOF | No | Yes (CoC + blur) |
-| God Rays | Yes (volumetric) | No |
+| DOF | **Yes** (CoC + Bokeh, 2K LOC) | Yes (CoC + blur) |
+| God Rays | **Yes** (volumetric) | No |
 | Deferred G-Buffer | No (forward) | Yes |
 
 ---
@@ -155,7 +156,7 @@ World (root Chunk)
 | Scalability | ⭐⭐ | ⭐⭐⭐⭐⭐ | Voxelot's hierarchical LOD + impostors |
 | Lighting Quality | ⭐⭐⭐⭐⭐ | ⭐⭐ | Mosaic's per-block GI + shadows |
 | Memory Efficiency | ⭐⭐⭐ | ⭐⭐⭐⭐ | Voxelot's sparse storage |
-| Visual Effects | ⭐⭐⭐ | ⭐⭐⭐⭐ | Voxelot's SSR/SSAO/DOF |
+| Visual Effects | ⭐⭐⭐⭐ | ⭐⭐⭐⭐ | **Tie** - Mosaic has SSAO/DOF/Bloom/GodRays, Voxelot has SSR |
 | Gameplay Responsiveness | ⭐⭐⭐⭐⭐ | N/A | Mosaic's priority channels |
 | Code Complexity | ⭐⭐⭐⭐ | ⭐⭐⭐ | Voxelot is simpler (viewer-only) |
 
@@ -356,19 +357,29 @@ World (root Chunk)
 
 ---
 
-#### DOF (Depth of Field)
-**From**: `voxelot/shaders/dof_*.wgsl`
+#### DOF (Depth of Field) ✅ IMPLEMENTED
 
-**What**: Camera focus blur effect.
+**Status**: Completed Feb 2026
 
-**Key Concepts**:
-- Generate Circle of Confusion (CoC) from depth
-- Blur based on CoC value
-- Combine sharp focus plane with blurred background
+**What**: Camera focus blur effect with Bokeh.
 
-**Impact**: Cinematic look
-**Effort**: Medium (3-4 days)
-**Files**: New post-process passes
+**Implementation** (`src/renderer/dof.rs`):
+- Circle of Confusion (CoC) calculation from depth
+- Separable Gaussian blur weighted by CoC
+- Bokeh shape rendering for bright spots
+- Quality presets: Off, Low, Medium, High, Ultra
+- Auto-focus on center of screen
+- Manual focus distance override
+
+**Results**:
+- Cinematic depth separation
+- Settings menu toggle (ESC → DOF)
+- ~2,087 LOC
+
+**Files Modified**:
+- `src/renderer/dof.rs` - New DOF module
+- `src/renderer/mod.rs` - Pipeline integration
+- `src/settings.rs` - Preset persistence
 
 ---
 
@@ -423,11 +434,12 @@ World (root Chunk)
 ### Phase 3: Visual Quality
 5. **SSR for Water** - Environment reflections
 6. ~~**SSAO**~~ ✅ DONE - Contact shadows, 5 quality presets
-7. **Dual Kawase Bloom** - Better glow
+7. ~~**Dual Kawase Bloom**~~ ✅ DONE - Already using pyramid blur
+8. ~~**DOF**~~ ✅ DONE - Cinematic focus, 5 quality presets
 
 ### Phase 4: Optional Polish
-8. **DOF** - Cinematic focus
 9. **Variable-Size Chunks** - Storage optimization
+10. **Water Refraction** - Scene distortion through water
 
 ---
 

@@ -1,6 +1,6 @@
 # Binary Greedy Meshing System
 
-Pure bitwise operations for face culling and quad merging. Most complex module (~1,793 LOC).
+Pure bitwise operations for face culling and quad merging. Most complex module (~2,619 LOC, 22 tests).
 
 ## Algorithm Overview
 

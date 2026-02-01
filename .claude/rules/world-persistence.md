@@ -1,6 +1,6 @@
 # World Persistence System
 
-Region-based chunk storage with zstd compression.
+Region-based chunk storage with zstd compression. 8 tests for serialization and region files.
 
 ## Directory Structure
 

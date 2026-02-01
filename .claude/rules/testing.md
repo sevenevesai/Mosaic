@@ -1,41 +1,34 @@
 # Testing & Benchmarking
 
+175 unit/integration tests across core systems.
+
 ## Running Tests
 
 ```bash
-cargo test                     # All 24 tests
-cargo test chunk::tests        # Chunk/block tests only
-cargo test lighting::tests     # Lighting tests only
-cargo test chunk_io::tests     # Serialization tests only
+cargo test                     # All 175 tests
+cargo test world::             # World module (108 tests)
+cargo test inventory::         # Inventory module (32 tests)
+cargo test player::            # Player module (18 tests)
+cargo test meshing             # Meshing tests (22 tests)
+cargo test lighting            # Lighting tests (12 tests)
 ```
 
 ## Test Coverage
 
-### chunk.rs (12 tests)
-- `test_block_is_solid` - Air/Water/Torch not solid, others solid
-- `test_block_is_transparent` - Air/Water/Leaves/Torch transparent
-- `test_block_light_emission` - Torch=14, others=0
-- `test_block_is_light_transparent` - Same as transparent
-- `test_block_texture_indices` - Face textures for Grass/Wood/Stone
-- `test_block_from_u8` - Deserialization, invalid→Air
-- `test_chunk_pos_from_world` - Coordinate conversion
-- `test_chunk_pos_world_origin` - Round-trip identity
-- `test_chunk_light_packing` - Block/sky light isolation
-- `test_chunk_in_bounds` - Boundary validation
-- `test_new_solid` - Fixture for benchmarks
-- `test_new_checkerboard` - Fixture for benchmarks
-
-### lighting.rs (4 tests)
-- `test_world_to_chunk_local` - Positive/negative/boundary coords
-- `test_propagate_single_source` - Torch level 14 decay
-- `test_propagate_stops_at_solid` - Light blocked by stone
-- `test_light_removal` - Cleanup after torch removed
-
-### chunk_io.rs (4 tests)
-- `test_header_roundtrip` - Header serialize/deserialize
-- `test_chunk_roundtrip` - Full chunk encode/decode
-- `test_chunk_preserves_light` - Light data survives serialization
-- `test_all_block_types_roundtrip` - All 16 block types
+| Module | Tests | Key Coverage |
+|--------|-------|--------------|
+| `world/meshing.rs` | 22 | Greedy merge, LOD, winding order, vertices |
+| `world/lighting.rs` | 12 | BFS propagation, cross-chunk, removal |
+| `world/chunk.rs` | 12 | Block properties, coordinates, fixtures |
+| `world/generation/` | 24 | Caves, caverns, biomes, trees, ruins |
+| `world/storage/` | 8 | Serialization, region files, dirty tracking |
+| `world/item_entity.rs` | 6 | Spawn, merge, despawn |
+| `world/water_flow.rs` | 4 | Flow simulation |
+| `inventory/inventory.rs` | 19 | Add, remove, sort, lock, swap |
+| `inventory/item.rs` | 13 | Stacks, tags, rarity, merge |
+| `player/mod.rs` | 16 | AABB, physics, input handling |
+| `player/persistence.rs` | 2 | Save/load roundtrip |
+| `tests/world_integration.rs` | 17 | WorldManager lifecycle |
 
 ## Benchmarks
 
@@ -46,7 +39,7 @@ cargo bench --bench generation_bench  # Generation only
 cargo bench --bench lighting_bench    # Lighting only
 ```
 
-### Benchmark Results (Reference)
+### Reference Times (RTX 2080 Ti)
 
 | Benchmark | Time |
 |-----------|------|
@@ -57,18 +50,17 @@ cargo bench --bench lighting_bench    # Lighting only
 | meshing/lod_sparse/Half | ~58µs |
 | meshing/lod_sparse/Quarter | ~6.5µs |
 
-### Adding Tests
+## Adding Tests
 
-**Unit test pattern:**
 ```rust
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_something() {
+    fn test_feature_behavior() {
         // Arrange
-        let input = ...;
+        let input = create_test_input();
 
         // Act
         let result = function_under_test(input);
@@ -79,23 +71,15 @@ mod tests {
 }
 ```
 
-**Benchmark pattern:**
-```rust
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
-
-fn my_benchmarks(c: &mut Criterion) {
-    c.bench_function("name", |b| {
-        b.iter(|| function_to_benchmark(black_box(input)));
-    });
-}
-
-criterion_group!(benches, my_benchmarks);
-criterion_main!(benches);
-```
-
 ## Test Fixtures
 
 Helper constructors in `Chunk`:
 - `Chunk::new_solid(block)` - All blocks same type
 - `Chunk::new_sparse(seed, occupancy)` - Random fill
-- `Chunk::new_checkerboard()` - Alternating pattern (worst case)
+- `Chunk::new_checkerboard()` - Alternating pattern (worst case for meshing)
+
+## What's Tested vs Not
+
+**Well tested**: Meshing, lighting, serialization, inventory, physics, generation
+**Not unit-testable**: GPU shaders, renderer (need visual regression tests)
+**Low priority**: Audio system

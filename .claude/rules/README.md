@@ -8,11 +8,13 @@ This directory contains detailed system documentation for the Mosaic engine. The
 |------|---------|--------------|
 | `_init-template.md` | **Template for creating/updating CLAUDE.md in any project** | Starting new projects, updating stale docs |
 | `voxelot-comparison.md` | **Voxelot comparison, upgrade roadmap, implementation status** | Performance optimization, future features |
+| `testing.md` | **175 tests: coverage map, running tests, benchmarks** | Adding tests, debugging failures |
 | `lighting-system.md` | BFS flood fill lighting, adding light sources | Modifying lighting, adding glowing blocks |
 | `water-rendering.md` | Heightfield water, shaders, effects | Water features, underwater effects |
 | `world-persistence.md` | Region files, chunk serialization | Save/load issues, storage optimization |
 | `day-night-cycle.md` | Time system, sun/moon, color palette | Modifying sky, lighting transitions |
 | `meshing-system.md` | Binary greedy meshing, vertex format, LOD | Mesh bugs, performance optimization |
+| `meta-prompt-generator.md` | Template for generating feature implementation prompts | Creating new feature specs |
 
 ## Usage
 

@@ -1,6 +1,6 @@
 # Lighting System
 
-Minecraft-style BFS flood fill light propagation.
+Minecraft-style BFS flood fill light propagation. 12 tests including cross-chunk propagation.
 
 ## Data Storage
 
