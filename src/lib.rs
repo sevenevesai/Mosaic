@@ -69,11 +69,11 @@ pub mod constants {
     pub const WATER_SEA_LEVEL: i32 = 32;
 
     /// Water surface height within a full water block (0.0-1.0)
-    /// Slightly below 1.0 to allow for wave animation headroom
-    pub const WATER_FULL_HEIGHT: f32 = 0.875;
+    /// Lower value gives more headroom for waves to prevent shore clipping
+    pub const WATER_FULL_HEIGHT: f32 = 0.75;
 
     /// Maximum wave amplitude (blocks)
-    pub const WATER_WAVE_AMPLITUDE: f32 = 0.15;
+    pub const WATER_WAVE_AMPLITUDE: f32 = 0.12;
 
     /// Base wave speed multiplier
     pub const WATER_WAVE_SPEED: f32 = 0.8;

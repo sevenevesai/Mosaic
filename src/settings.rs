@@ -27,6 +27,8 @@ pub struct Settings {
     pub torch_shadows: bool,
     /// SSAO quality preset: OFF, LOW, MEDIUM, HIGH, ULTRA
     pub ssao_quality: String,
+    /// DoF quality preset: OFF, LOW, MEDIUM, HIGH, ULTRA
+    pub dof_quality: String,
 }
 
 impl Default for Settings {
@@ -46,6 +48,7 @@ impl Default for Settings {
             shadow_update_step: 2.0, // Frequent small updates (options: 2, 4, 8, 16, 32, 48)
             torch_shadows: false,    // Default OFF for performance
             ssao_quality: "MEDIUM".to_string(), // Default SSAO quality
+            dof_quality: "LOW".to_string(),     // Default DoF quality
         }
     }
 }
@@ -143,6 +146,9 @@ impl Settings {
                     "ssao_quality" => {
                         settings.ssao_quality = value.to_string();
                     }
+                    "dof_quality" => {
+                        settings.dof_quality = value.to_string();
+                    }
                     _ => {}
                 }
             }
@@ -169,7 +175,8 @@ impl Settings {
              windowed_height={}\n\
              shadow_update_step={}\n\
              torch_shadows={}\n\
-             ssao_quality={}\n",
+             ssao_quality={}\n\
+             dof_quality={}\n",
             self.render_distance,
             self.shadow_mode,
             self.bloom_enabled,
@@ -184,6 +191,7 @@ impl Settings {
             self.shadow_update_step,
             self.torch_shadows,
             self.ssao_quality,
+            self.dof_quality,
         );
 
         if let Err(e) = fs::write(Self::FILE_PATH, content) {

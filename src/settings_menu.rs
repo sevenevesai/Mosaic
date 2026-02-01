@@ -85,6 +85,26 @@ impl SettingsMenu {
                 get_value: |r| r.ssao_quality().as_str().to_string(),
                 toggle: |r| { r.cycle_ssao_quality(); },
             },
+            MenuItem {
+                label: "DOF",
+                get_value: |r| r.dof_quality().as_str().to_string(),
+                toggle: |r| { r.cycle_dof_quality(); },
+            },
+            MenuItem {
+                label: "DOF FOCUS",
+                get_value: |r| format!("{} BLOCKS", r.dof_focus_distance() as i32),
+                toggle: |r| { r.cycle_dof_focus_distance(); },
+            },
+            MenuItem {
+                label: "DOF BLUR",
+                get_value: |r| format!("{:.0}%", r.dof_blur_strength() * 100.0),
+                toggle: |r| { r.cycle_dof_blur_strength(); },
+            },
+            MenuItem {
+                label: "DOF RANGE",
+                get_value: |r| format!("{} BLOCKS", r.dof_focus_range() as i32),
+                toggle: |r| { r.cycle_dof_focus_range(); },
+            },
             // === GPU SETTINGS ===
             MenuItem {
                 label: "GPU GI",

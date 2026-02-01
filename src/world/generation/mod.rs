@@ -280,7 +280,10 @@ impl TerrainGenerator {
 
         let is_rocky_outcrop = self.is_rocky_outcrop(x, z);
         let biome_id = self.biome_registry.get_biome_id(x, z);
-        let is_beach = height < WATER_SEA_LEVEL + 2 && height >= WATER_SEA_LEVEL - 3;
+        // Beaches only in non-frozen biomes (tundra doesn't have sandy beaches)
+        let is_beach = biome_id != biome::BiomeId::Tundra
+            && height < WATER_SEA_LEVEL + 2
+            && height >= WATER_SEA_LEVEL - 3;
 
         ColumnCache {
             height,
@@ -301,7 +304,8 @@ impl TerrainGenerator {
 
         // Above terrain surface
         if y > col.height {
-            if y < WATER_SEA_LEVEL {
+            // Water in non-frozen biomes only (tundra has no water until ice is added)
+            if y < WATER_SEA_LEVEL && col.biome_id != biome::BiomeId::Tundra {
                 return Block::Water;
             }
             return Block::Air;
@@ -314,8 +318,10 @@ impl TerrainGenerator {
         let is_cave = y > 5 && biome.is_cave(x, y, z, col.height, &self.cave_noise);
 
         if is_cave {
-            // Underwater caves fill with water
-            if y < WATER_SEA_LEVEL && col.height < WATER_SEA_LEVEL + 4 {
+            // Underwater caves fill with water (except in frozen biomes)
+            if y < WATER_SEA_LEVEL && col.height < WATER_SEA_LEVEL + 4
+                && col.biome_id != biome::BiomeId::Tundra
+            {
                 return Block::Water;
             }
             return Block::Air;
@@ -660,6 +666,12 @@ impl TerrainGenerator {
             for x in 0..CHUNK_SIZE {
                 let wx = world_x_base + x as i32;
                 let wz = world_z_base + z as i32;
+
+                // Skip water in frozen biomes (tundra) - will add ice later
+                let biome_id = self.biome_registry.get_biome_id(wx, wz);
+                if biome_id == biome::BiomeId::Tundra {
+                    continue;
+                }
 
                 let terrain_height = self.get_terrain_height(wx, wz);
 

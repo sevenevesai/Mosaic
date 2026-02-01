@@ -578,25 +578,8 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 
     var pos = in.position;
 
-    // Gentle breeze animation for foliage blocks (leaves)
-    if (is_foliage) {
-        // Use world position for consistent wind across vertices
-        let wind_time = current_time * 0.7;  // Slower, more peaceful
-        let world_pos = pos;
-
-        // Gentle overlapping sine waves for subtle swaying
-        let wind_x = sin(wind_time + world_pos.x * 0.3 + world_pos.z * 0.2) * 0.025
-                   + sin(wind_time * 0.6 + world_pos.z * 0.4) * 0.012;
-        let wind_z = sin(wind_time * 0.5 + world_pos.z * 0.3 + world_pos.x * 0.15) * 0.02
-                   + cos(wind_time * 0.8 + world_pos.x * 0.35) * 0.01;
-
-        // Very subtle vertical movement
-        let wind_y = sin(wind_time * 0.9 + world_pos.x * 0.25 + world_pos.z * 0.25) * 0.006;
-
-        pos.x += wind_x;
-        pos.y += wind_y;
-        pos.z += wind_z;
-    }
+    // Foliage animation disabled for now
+    // if (is_foliage) { ... }
 
     let chunk_pos = floor(pos / 16.0) * 16.0;
     let cam_pos = camera.view_pos.xyz;
@@ -1934,27 +1917,15 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     let flow_angle = f32(flow_u16) / 65535.0 * 6.28318;
     out.flow_angle = flow_angle;
 
-    // Subtle height displacement - very gentle surface movement
-    let ripple = ripple_height(world_xz, t);
-    pos.y += ripple * water.wave_strength * 0.3;
+    // Water waves disabled for now - flat surface
+    // pos.y += ripple * water.wave_strength * 0.3;
 
-    // Calculate normal from ripple derivatives for realistic reflections
-    let epsilon = 0.5;
-    let h_px = ripple_height(world_xz + vec2<f32>(epsilon, 0.0), t);
-    let h_nx = ripple_height(world_xz - vec2<f32>(epsilon, 0.0), t);
-    let h_pz = ripple_height(world_xz + vec2<f32>(0.0, epsilon), t);
-    let h_nz = ripple_height(world_xz - vec2<f32>(0.0, epsilon), t);
-
-    let dx = (h_px - h_nx) / (2.0 * epsilon);
-    let dz = (h_pz - h_nz) / (2.0 * epsilon);
-
-    // Subtle normal perturbation for gentle rippling reflections
-    let normal_strength = water.wave_strength * 0.5;
-    var ripple_normal = normalize(vec3<f32>(-dx * normal_strength, 1.0, -dz * normal_strength));
+    // Flat normal (no wave perturbation)
+    let flat_normal = vec3<f32>(0.0, 1.0, 0.0);
 
     out.clip_position = camera.view_proj * vec4<f32>(pos, 1.0);
     out.world_position = pos;
-    out.normal = ripple_normal;
+    out.normal = flat_normal;
 
     // Unpack light data
     let light_bytes = unpack4x8unorm(in.light_data);

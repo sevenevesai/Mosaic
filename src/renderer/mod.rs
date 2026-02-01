@@ -12,6 +12,7 @@ mod item_renderer;
 mod pipeline;
 mod prop_renderer;
 mod ssao;
+mod dof;
 mod texture;
 pub mod voxel_gi;
 mod volumetrics;
@@ -24,6 +25,7 @@ pub use debug_overlay::{DebugOverlay, DebugMetrics};
 pub use item_renderer::{ItemRenderer, ItemInstanceData};
 pub use prop_renderer::{PropRenderer, PropInstance};
 pub use ssao::{Ssao, SsaoQuality, SsaoParams};
+pub use dof::{Dof, DofQuality, DofParams, FocusMode, NearBlur, BokehShape};
 pub use texture::TextureAtlas;
 pub use voxel_gi::VoxelGI;
 pub use vox_loader::{VoxModel, VoxMesh};
@@ -194,6 +196,9 @@ pub struct Renderer {
 
     // SSAO (screen-space ambient occlusion)
     ssao: Ssao,
+
+    // Depth of Field post-processing
+    dof: Dof,
 
     // Settings menu dimmer overlay
     dimmer_pipeline: wgpu::RenderPipeline,
@@ -621,6 +626,11 @@ impl Renderer {
         // Upload noise texture data
         ssao.upload_noise_texture(&queue);
 
+        // Create DoF system
+        let dof = Dof::new(&device, size.width, size.height, surface_format);
+        // Upload noise texture data
+        dof.upload_noise_texture(&queue);
+
         // Create water uniform bind group layout and buffer
         let water_bind_group_layout = create_water_bind_group_layout(&device);
         let water_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -724,6 +734,7 @@ impl Renderer {
             volumetrics,
             volumetric_uniform_buffer,
             ssao,
+            dof,
             dimmer_pipeline,
             inventory_ui,
             item_renderer,
@@ -776,6 +787,9 @@ impl Renderer {
 
             // Resize SSAO textures
             self.ssao.resize(&self.device, new_size.width, new_size.height);
+
+            // Resize DoF textures
+            self.dof.resize(&self.device, new_size.width, new_size.height);
         }
     }
 
@@ -997,6 +1011,94 @@ impl Renderer {
         &mut self.ssao.params
     }
 
+    /// Check if DoF is enabled
+    pub fn is_dof_enabled(&self) -> bool {
+        self.dof.is_enabled()
+    }
+
+    /// Get current DoF quality
+    pub fn dof_quality(&self) -> DofQuality {
+        self.dof.quality
+    }
+
+    /// Cycle DoF quality: Off -> Low -> Medium -> High -> Ultra -> Off
+    pub fn cycle_dof_quality(&mut self) -> DofQuality {
+        let new_quality = self.dof.cycle_quality();
+        tracing::info!("DoF: {}", new_quality.as_str());
+        new_quality
+    }
+
+    /// Set DoF quality directly
+    pub fn set_dof_quality(&mut self, quality: DofQuality) {
+        self.dof.set_quality(quality);
+    }
+
+    /// Get mutable access to DoF params for advanced settings
+    pub fn dof_params_mut(&mut self) -> &mut DofParams {
+        &mut self.dof.params
+    }
+
+    /// Toggle DoF focus lock
+    pub fn toggle_dof_focus_lock(&mut self) {
+        self.dof.toggle_focus_lock();
+    }
+
+    /// Cycle DoF debug visualization mode
+    pub fn cycle_dof_debug_mode(&mut self) {
+        self.dof.cycle_debug_mode();
+    }
+
+    /// Get DoF focus distance
+    pub fn dof_focus_distance(&self) -> f32 {
+        self.dof.params.manual_focus_distance
+    }
+
+    /// Cycle DoF focus distance: 5 -> 10 -> 15 -> 20 -> 30 -> 50 -> 75 -> 100 -> 5
+    pub fn cycle_dof_focus_distance(&mut self) -> f32 {
+        let distances = [5.0, 10.0, 15.0, 20.0, 30.0, 50.0, 75.0, 100.0];
+        let current = self.dof.params.manual_focus_distance;
+        let next = distances.iter()
+            .find(|&&d| d > current + 0.1)
+            .copied()
+            .unwrap_or(distances[0]);
+        self.dof.params.manual_focus_distance = next;
+        next
+    }
+
+    /// Get DoF blur strength (aperture)
+    pub fn dof_blur_strength(&self) -> f32 {
+        self.dof.params.aperture
+    }
+
+    /// Cycle DoF blur strength: 10% intervals from 10% to 100%
+    pub fn cycle_dof_blur_strength(&mut self) -> f32 {
+        let strengths = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
+        let current = self.dof.params.aperture;
+        let next = strengths.iter()
+            .find(|&&s| s > current + 0.01)
+            .copied()
+            .unwrap_or(strengths[0]);
+        self.dof.params.aperture = next;
+        next
+    }
+
+    /// Get DoF focus range (transition width)
+    pub fn dof_focus_range(&self) -> f32 {
+        self.dof.params.focus_transition
+    }
+
+    /// Cycle DoF focus range: matches focus distance values
+    pub fn cycle_dof_focus_range(&mut self) -> f32 {
+        let ranges = [5.0, 10.0, 15.0, 20.0, 30.0, 50.0, 75.0, 100.0];
+        let current = self.dof.params.focus_transition;
+        let next = ranges.iter()
+            .find(|&&r| r > current + 0.1)
+            .copied()
+            .unwrap_or(ranges[0]);
+        self.dof.params.focus_transition = next;
+        next
+    }
+
     /// Get current render distance
     pub fn render_distance(&self) -> i32 {
         self.render_distance
@@ -1082,6 +1184,17 @@ impl Renderer {
             _ => SsaoQuality::Medium,
         };
         self.ssao.set_quality(&self.device, self.size.width, self.size.height, ssao_quality);
+
+        // Apply DoF quality setting
+        let dof_quality = match settings.dof_quality.to_uppercase().as_str() {
+            "OFF" => DofQuality::Off,
+            "LOW" => DofQuality::Low,
+            "MEDIUM" => DofQuality::Medium,
+            "HIGH" => DofQuality::High,
+            "ULTRA" => DofQuality::Ultra,
+            _ => DofQuality::Low,
+        };
+        self.dof.set_quality(dof_quality);
     }
 
     /// Collect current settings into a Settings struct
@@ -1101,6 +1214,7 @@ impl Renderer {
             shadow_update_step: self.voxel_gi.get_update_threshold(),
             torch_shadows: self.torch_shadows,
             ssao_quality: self.ssao.quality.as_str().to_string(),
+            dof_quality: self.dof.quality.as_str().to_string(),
         }
     }
 
@@ -1345,6 +1459,14 @@ impl Renderer {
             1000.0, // far plane
             self.size.width,
             self.size.height,
+        );
+
+        // Update DoF uniforms
+        self.dof.update_uniforms(
+            &self.queue,
+            camera.projection_matrix().inverse(),
+            0.1,   // near plane
+            1000.0, // far plane
         );
 
         let uniforms_elapsed = uniforms_start.elapsed();
@@ -1704,24 +1826,7 @@ impl Renderer {
                 render_pass.draw(0..24, 0..1);
             }
 
-            // Render crosshair (UI, no depth) - hide when inventory is open
-            if !inventory.is_open {
-                render_pass.set_pipeline(&self.ui_pipeline);
-                render_pass.set_vertex_buffer(0, self.crosshair_vertex_buffer.slice(..));
-                render_pass.draw(0..12, 0..1);
-            }
-
-            // Render inventory UI (hotbar always, full inventory when open)
-            self.inventory_ui.render(&mut render_pass, &self.texture_bind_group);
-
-            // Render debug overlay and optionally settings menu
-            self.debug_overlay.render(
-                &mut render_pass,
-                &self.queue,
-                debug_metrics,
-                menu_lines.as_deref(),
-                if menu_lines.is_some() { Some(&self.dimmer_pipeline) } else { None },
-            );
+            // NOTE: UI rendering moved after DoF to prevent blur affecting text
         }
 
         // === SSAO (Screen-Space Ambient Occlusion) ===
@@ -1743,6 +1848,57 @@ impl Renderer {
             &self.scene_texture_view,  // Composite onto scene (before bloom)
             self.voxel_gi.bind_group(),
         );
+
+        // === DEPTH OF FIELD ===
+        // Apply DoF effect: separate near/far blur layers to prevent color bleeding
+        // This runs after volumetrics (needs lit scene) and before UI/bloom
+        self.dof.create_bind_groups(&self.device, &self.depth_texture, &self.scene_texture_view);
+        self.dof.render(&mut encoder, &self.scene_texture_view);
+
+        // === UI RENDER PASS (after DoF to prevent blur on text) ===
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("UI Render Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.scene_texture_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load, // Keep the post-processed scene
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                // UI pipelines were created with depth format, so we need to provide it
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_texture,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load, // Keep existing depth
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            // Render crosshair (UI, no depth) - hide when inventory is open
+            if !inventory.is_open {
+                render_pass.set_pipeline(&self.ui_pipeline);
+                render_pass.set_vertex_buffer(0, self.crosshair_vertex_buffer.slice(..));
+                render_pass.draw(0..12, 0..1);
+            }
+
+            // Render inventory UI (hotbar always, full inventory when open)
+            self.inventory_ui.render(&mut render_pass, &self.texture_bind_group);
+
+            // Render debug overlay and optionally settings menu
+            self.debug_overlay.render(
+                &mut render_pass,
+                &self.queue,
+                debug_metrics,
+                menu_lines.as_deref(),
+                if menu_lines.is_some() { Some(&self.dimmer_pipeline) } else { None },
+            );
+        }
 
         // === BLOOM POST-PROCESSING ===
         // Apply bloom effect: extract bright pixels, blur, composite to output

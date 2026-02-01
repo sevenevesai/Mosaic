@@ -83,8 +83,8 @@ impl TreeType {
             TreeType::BushyShrub => 2,
             TreeType::TallPine => 5,
             TreeType::Spruce => 4,
-            TreeType::JungleTree => 6,
-            TreeType::GiantJungle => 12,
+            TreeType::JungleTree => 8,      // Increased from 6 for better walkability
+            TreeType::GiantJungle => 14,    // Increased from 12 for better walkability
             TreeType::DeadTree => 8,
             TreeType::Cactus => 6,
             TreeType::Mangrove => 4,
@@ -590,22 +590,22 @@ impl<'a> TreeGenerator<'a> {
         let world_y = pos.y * CHUNK_SIZE_I32;
         let world_z = pos.z * CHUNK_SIZE_I32;
 
-        let trunk_top = height - 2;
-        for dy in 0..trunk_top {
+        // Trunk extends to height-1 (supports canopy top)
+        for dy in 0..height {
             let wy = tree_base_y + dy;
             Self::try_set_block(
                 chunk,
                 tree_x - world_x,
                 wy - world_y,
                 tree_z - world_z,
-                Block::Wood,
+                Block::PineLog,
                 false,
             );
         }
 
-        // Conical canopy
+        // Conical canopy - ends 1 below trunk top (no floating leaves)
         let canopy_start = tree_base_y + (height / 3);
-        let canopy_end = tree_base_y + height;
+        let canopy_end = tree_base_y + height - 1;
 
         for dy in canopy_start..=canopy_end {
             let progress = (dy - canopy_start) as f32 / (canopy_end - canopy_start) as f32;
@@ -636,6 +636,10 @@ impl<'a> TreeGenerator<'a> {
                 }
             }
         }
+
+        // Top spike leaf - 1 shorter for cleaner look
+        let top_y = tree_base_y + height - 1;
+        Self::try_set_block(chunk, tree_x - world_x, top_y - world_y, tree_z - world_z, Block::Leaves, true);
     }
 
     /// Generate a short bushy shrub
@@ -783,8 +787,8 @@ impl<'a> TreeGenerator<'a> {
             }
         }
 
-        // Top spike
-        let top_y = tree_base_y + height;
+        // Top spike - 1 shorter for cleaner look
+        let top_y = tree_base_y + height - 1;
         Self::try_set_block(chunk, tree_x - world_x, top_y - world_y, tree_z - world_z, Block::SpruceLeaves, true);
     }
 
