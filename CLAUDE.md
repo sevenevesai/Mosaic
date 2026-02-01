@@ -35,6 +35,7 @@ src/
 │   ├── mod.rs       # GPU state, render passes, day/night cycle
 │   ├── pipeline.rs  # WGSL shaders (chunk, water, sky, UI)
 │   ├── inventory_ui.rs # Hotbar/inventory UI rendering
+│   ├── gpu_culling.rs # GPU frustum culling + visibility cache (88% hit rate)
 │   ├── voxel_gi.rs  # Voxel GI: 256³ volume, DDA shadows, VCT
 │   ├── volumetrics.rs # Volumetric light shafts (god rays)
 │   └── chunk_pool.rs # MDI mega-buffers

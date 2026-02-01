@@ -7,6 +7,7 @@ This directory contains detailed system documentation for the Mosaic engine. The
 | File | Purpose | When to Read |
 |------|---------|--------------|
 | `_init-template.md` | **Template for creating/updating CLAUDE.md in any project** | Starting new projects, updating stale docs |
+| `voxelot-comparison.md` | **Voxelot comparison, upgrade roadmap, implementation status** | Performance optimization, future features |
 | `lighting-system.md` | BFS flood fill lighting, adding light sources | Modifying lighting, adding glowing blocks |
 | `water-rendering.md` | Heightfield water, shaders, effects | Water features, underwater effects |
 | `world-persistence.md` | Region files, chunk serialization | Save/load issues, storage optimization |
@@ -21,6 +22,7 @@ For specific tasks, Claude will consult the relevant file. For example:
 - "Add a lantern block" → `lighting-system.md`
 - "Fix water rendering bug" → `water-rendering.md`
 - "Chunk not saving" → `world-persistence.md`
+- "Performance upgrade ideas" → `voxelot-comparison.md`
 
 ## For Other Projects
 
