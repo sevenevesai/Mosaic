@@ -31,6 +31,8 @@ pub struct Settings {
     pub dof_quality: String,
     /// Water refraction quality preset: OFF, LOW, MEDIUM, HIGH, ULTRA
     pub refraction_quality: String,
+    /// Impostor quality preset: OFF, LOW, MEDIUM, HIGH, ULTRA
+    pub impostor_quality: String,
 }
 
 impl Default for Settings {
@@ -52,6 +54,7 @@ impl Default for Settings {
             ssao_quality: "MEDIUM".to_string(), // Default SSAO quality
             dof_quality: "LOW".to_string(),     // Default DoF quality
             refraction_quality: "MEDIUM".to_string(), // Default water refraction quality
+            impostor_quality: "MEDIUM".to_string(), // Default impostor quality
         }
     }
 }
@@ -155,6 +158,9 @@ impl Settings {
                     "refraction_quality" => {
                         settings.refraction_quality = value.to_string();
                     }
+                    "impostor_quality" => {
+                        settings.impostor_quality = value.to_string();
+                    }
                     _ => {}
                 }
             }
@@ -183,7 +189,8 @@ impl Settings {
              torch_shadows={}\n\
              ssao_quality={}\n\
              dof_quality={}\n\
-             refraction_quality={}\n",
+             refraction_quality={}\n\
+             impostor_quality={}\n",
             self.render_distance,
             self.shadow_mode,
             self.bloom_enabled,
@@ -200,6 +207,7 @@ impl Settings {
             self.ssao_quality,
             self.dof_quality,
             self.refraction_quality,
+            self.impostor_quality,
         );
 
         if let Err(e) = fs::write(Self::FILE_PATH, content) {

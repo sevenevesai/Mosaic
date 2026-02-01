@@ -224,8 +224,12 @@ pub struct WorldManager {
     /// (neighbors of player-modified chunks)
     pending_urgent: ahash::AHashSet<ChunkPos>,
 
-    /// Runtime render distance (can be changed via settings)
+    /// Mesh render distance - chunks within this get full meshes (in chunks)
     render_distance: i32,
+
+    /// Total load distance - includes render + impostor range (in chunks)
+    /// Chunks beyond render_distance but within load_distance only compute average_color
+    load_distance: i32,
 }
 
 impl WorldManager {
@@ -300,17 +304,33 @@ impl WorldManager {
             urgent_mesh_uploads: Vec::new(),
             pending_urgent: ahash::AHashSet::new(),
             render_distance: RENDER_DISTANCE,
+            load_distance: RENDER_DISTANCE, // Initially same, updated when impostor range is set
         }
     }
 
-    /// Set the render distance (in chunks)
+    /// Set the render distance (in chunks) - affects full mesh rendering
     pub fn set_render_distance(&mut self, distance: i32) {
-        self.render_distance = distance.clamp(8, 32);
+        self.render_distance = distance.clamp(8, 64);
+        // Keep load_distance at least as large as render_distance
+        if self.load_distance < self.render_distance {
+            self.load_distance = self.render_distance;
+        }
     }
 
-    /// Get the current render distance
+    /// Set the total load distance (render_distance + impostor_range)
+    /// Chunks beyond render_distance but within load_distance are loaded for impostor rendering
+    pub fn set_load_distance(&mut self, total_distance: i32) {
+        self.load_distance = total_distance.clamp(self.render_distance, 96);
+    }
+
+    /// Get the current render distance (full mesh)
     pub fn render_distance(&self) -> i32 {
         self.render_distance
+    }
+
+    /// Get the current total load distance
+    pub fn load_distance(&self) -> i32 {
+        self.load_distance
     }
 
     fn worker_loop(
@@ -556,8 +576,8 @@ impl WorldManager {
         let mut chunks_to_queue: Vec<(ChunkPos, i32)> = Vec::new();
 
         for dy in 0..=9 {
-            for dz in -self.render_distance..=self.render_distance {
-                for dx in -self.render_distance..=self.render_distance {
+            for dz in -self.load_distance..=self.load_distance {
+                for dx in -self.load_distance..=self.load_distance {
                     let pos = ChunkPos {
                         x: player_chunk.x + dx,
                         y: dy,
@@ -611,7 +631,7 @@ impl WorldManager {
         for pos in self.chunks.read().keys() {
             let dx = (pos.x - player_chunk.x).abs();
             let dz = (pos.z - player_chunk.z).abs();
-            if dx > self.render_distance + 2 || dz > self.render_distance + 2 {
+            if dx > self.load_distance + 2 || dz > self.load_distance + 2 {
                 to_remove.push(*pos);
             }
         }

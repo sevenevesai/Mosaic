@@ -1468,7 +1468,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // === RENDER DISTANCE FADE ===
         // Fade chunks out at render distance - use alpha fade, not bright fog
         // Render distance: 24 chunks = 384 blocks
-        let render_dist = 384.0;
+        let render_dist = voxel_volume.volume_center.w;
         let fade_start = render_dist - 64.0;  // Start fading 4 chunks before edge
         let edge_fade = smoothstep(fade_start, render_dist, dist);
 

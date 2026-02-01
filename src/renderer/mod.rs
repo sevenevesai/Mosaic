@@ -7,6 +7,7 @@ mod camera;
 mod chunk_pool;
 mod debug_overlay;
 mod gpu_culling;
+mod impostor;
 mod inventory_ui;
 mod item_renderer;
 mod pipeline;
@@ -23,6 +24,7 @@ pub use bloom::Bloom;
 pub use camera::{Camera, Frustum};
 pub use chunk_pool::ChunkPool;
 pub use debug_overlay::{DebugOverlay, DebugMetrics};
+pub use impostor::{ImpostorRenderer, ImpostorInstance, ImpostorRange};
 pub use item_renderer::{ItemRenderer, ItemInstanceData};
 pub use prop_renderer::{PropRenderer, PropInstance};
 pub use refraction::{RefractionQuality, RefractionParams};
@@ -65,6 +67,7 @@ use std::sync::Arc;
 use wgpu::util::DeviceExt;
 use winit::{dpi::PhysicalSize, window::Window};
 
+use crate::constants::CHUNK_SIZE_I32;
 use crate::utils::gpu_profiler::GpuProfiler;
 use crate::utils::profiler::FrameProfiler;
 use crate::world::WorldManager;
@@ -77,6 +80,7 @@ use glam::{Vec3, Mat4};
 pub struct RenderStats {
     pub chunks_rendered: u32,
     pub chunks_culled: u32,
+    pub impostors_rendered: u32,
     pub triangles: u32,
     pub gpu_time_ms: f64,
     // Shadow pass stats (legacy, now unused)
@@ -220,6 +224,9 @@ pub struct Renderer {
 
     // Prop rendering (voxel models like chests)
     prop_renderer: PropRenderer,
+
+    // Impostor rendering for distant chunks
+    impostor_renderer: ImpostorRenderer,
 }
 
 impl Renderer {
@@ -733,6 +740,9 @@ impl Renderer {
             tracing::warn!("Failed to load chest prop: {}", e);
         }
 
+        // Create impostor renderer for distant chunks
+        let impostor_renderer = ImpostorRenderer::new(&device, surface_format);
+
         Self {
             surface,
             device,
@@ -797,6 +807,7 @@ impl Renderer {
             inventory_ui,
             item_renderer,
             prop_renderer,
+            impostor_renderer,
         }
     }
 
@@ -1214,6 +1225,30 @@ impl Renderer {
         self.refraction_quality = quality;
     }
 
+    // === Extended View (Impostor) Settings ===
+
+    /// Get current extended view range
+    pub fn impostor_range(&self) -> ImpostorRange {
+        self.impostor_renderer.range
+    }
+
+    /// Cycle extended view range: Off -> +16 -> +24 -> +32 -> +40 -> Off
+    pub fn cycle_impostor_range(&mut self) -> ImpostorRange {
+        self.impostor_renderer.range = self.impostor_renderer.range.next();
+        tracing::info!("Extended View: {}", self.impostor_renderer.range.as_str());
+        self.impostor_renderer.range
+    }
+
+    /// Set extended view range directly
+    pub fn set_impostor_range(&mut self, range: ImpostorRange) {
+        self.impostor_renderer.range = range;
+    }
+
+    /// Get total view distance (render_distance + impostor extra)
+    pub fn total_view_distance(&self) -> i32 {
+        self.render_distance + self.impostor_renderer.range.extra_chunks()
+    }
+
     /// Check if water refraction is enabled
     pub fn is_refraction_enabled(&self) -> bool {
         self.refraction_quality != RefractionQuality::Off
@@ -1326,6 +1361,10 @@ impl Renderer {
             _ => RefractionQuality::Medium,
         };
         self.refraction_quality = refraction_quality;
+
+        // Apply extended view (impostor) range setting
+        let impostor_range = ImpostorRange::from_str(&settings.impostor_quality);
+        self.impostor_renderer.range = impostor_range;
     }
 
     /// Collect current settings into a Settings struct
@@ -1347,6 +1386,7 @@ impl Renderer {
             ssao_quality: self.ssao.quality.as_str().to_string(),
             dof_quality: self.dof.quality.as_str().to_string(),
             refraction_quality: self.refraction_quality.as_str().to_string(),
+            impostor_quality: self.impostor_renderer.range.as_str().to_string(),
         }
     }
 
@@ -1525,9 +1565,10 @@ impl Renderer {
         let render_start = std::time::Instant::now();
 
         // Sync meshes to chunk pool for MDI rendering
+        // Only uploads meshes within render_distance; impostor chunks skip upload
         let sync_start = std::time::Instant::now();
         if self.chunk_pool.mdi_available {
-            self.sync_meshes_to_pool(world);
+            self.sync_meshes_to_pool(world, camera.position);
         }
         let sync_elapsed = sync_start.elapsed();
 
@@ -1661,6 +1702,7 @@ impl Renderer {
             self.shadow_debug,
             held_light_emission,
             self.torch_shadows,
+            (self.total_view_distance() * CHUNK_SIZE_I32) as f32,
         );
         let voxel_gi_elapsed = voxel_gi_start.elapsed();
 
@@ -1723,6 +1765,53 @@ impl Renderer {
 
         // Build inventory UI vertices (before render pass borrow)
         self.inventory_ui.build_vertices(&self.queue, inventory);
+
+        // === COLLECT AND UPLOAD IMPOSTOR DATA ===
+        // Gather distant chunks that should render as impostors
+        // === COLLECT IMPOSTOR DATA ===
+        // Impostors render chunks BEYOND render_distance (extended view)
+        // Chunks within render_distance use full mesh, beyond use impostors
+        if self.impostor_renderer.range.enabled() {
+            let chunk_size = crate::constants::CHUNK_SIZE_F32;
+            let render_dist_blocks = self.render_distance as f32 * chunk_size;
+            let total_dist_blocks = self.total_view_distance() as f32 * chunk_size;
+            let mut impostor_instances = Vec::with_capacity(512);
+
+            for chunk_mesh in world.visible_meshes() {
+                // Skip empty chunks (no color data)
+                if chunk_mesh.average_color[3] == 0 {
+                    continue;
+                }
+
+                // Calculate distance in blocks
+                let chunk_center = chunk_mesh.pos.center();
+                let dist_blocks = (chunk_center - camera.position).length();
+
+                // Chunks beyond render_distance but within total view distance = impostors
+                if dist_blocks > render_dist_blocks && dist_blocks <= total_dist_blocks {
+                    // Quick frustum check
+                    let chunk_min = chunk_mesh.pos.world_origin();
+                    let chunk_max = chunk_min + glam::Vec3::splat(chunk_size);
+                    if frustum.test_aabb(chunk_min, chunk_max) {
+                        impostor_instances.push(ImpostorInstance::new(
+                            chunk_mesh.pos,
+                            chunk_mesh.average_color,
+                        ));
+                    }
+                }
+            }
+
+            // Update impostor uniforms and upload instances
+            self.impostor_renderer.update_uniforms(
+                &self.queue,
+                camera.view_projection_matrix(),
+                camera.position,
+                self.size.width as f32,
+                self.size.height as f32,
+                cycle.sun_intensity,  // Use sun intensity as sky brightness
+            );
+            self.impostor_renderer.upload_instances(&self.queue, &impostor_instances);
+        }
 
         // === MAIN RENDER PASS (render to scene texture for bloom) ===
         {
@@ -1878,6 +1967,12 @@ impl Renderer {
                     triangles += gpu_mesh.index_count / 3;
                     chunks_rendered += 1;
                 }
+            }
+
+            // === IMPOSTOR RENDER PASS ===
+            // Render distant chunks as single colored quads
+            if self.impostor_renderer.range.enabled() {
+                self.impostor_renderer.render(&mut render_pass);
             }
 
             // === ITEM ENTITY RENDER PASS ===
@@ -2128,6 +2223,7 @@ impl Renderer {
         self.stats = RenderStats {
             chunks_rendered,
             chunks_culled,
+            impostors_rendered: self.impostor_renderer.instance_count(),
             triangles,
             gpu_time_ms: self.gpu_profiler.avg_gpu_time_ms(),
             shadow_chunks_rendered,
@@ -2185,14 +2281,22 @@ impl Renderer {
     }
 
     /// Sync all visible meshes to the chunk pool for MDI rendering
-    /// Only uploads meshes that aren't already in the pool (or have changed size)
-    pub fn sync_meshes_to_pool(&mut self, world: &mut crate::world::WorldManager) {
+    /// Only uploads meshes within render_distance (not impostor range)
+    /// Chunks beyond render_distance are rendered as impostors, not uploaded to GPU
+    pub fn sync_meshes_to_pool(&mut self, world: &mut crate::world::WorldManager, camera_pos: glam::Vec3) {
+        let chunk_size = crate::constants::CHUNK_SIZE_F32;
+        let render_dist_blocks = self.render_distance as f32 * chunk_size;
+
         // FIRST: Upload urgent meshes (player block changes) WITHOUT throttling
         // These need to appear immediately for responsive gameplay
         let urgent = world.take_urgent_uploads();
         for pos in &urgent {
             if let Some(mesh) = world.visible_meshes().find(|m| &m.pos == pos) {
-                self.chunk_pool.upload_chunk(&self.queue, mesh);
+                // Only upload if within render distance
+                let dist = (mesh.pos.center() - camera_pos).length();
+                if dist <= render_dist_blocks {
+                    self.chunk_pool.upload_chunk(&self.queue, mesh);
+                }
             }
         }
 
@@ -2201,9 +2305,15 @@ impl Renderer {
         const MAX_UPLOADS_PER_FRAME: usize = 16;
         let mut uploads_this_frame = 0;
 
-        // Only upload meshes not already in pool (or with different size indicating regeneration)
+        // Only upload meshes within render_distance (impostor chunks skip mesh upload)
         for mesh in world.visible_meshes() {
             if mesh.vertices.is_empty() {
+                continue;
+            }
+
+            // Skip chunks beyond render_distance - they render as impostors
+            let dist = (mesh.pos.center() - camera_pos).length();
+            if dist > render_dist_blocks {
                 continue;
             }
 
@@ -2229,12 +2339,14 @@ impl Renderer {
             }
         }
 
-        // Evict non-visible chunks if pool is getting full (only when not busy uploading)
-        if uploads_this_frame == 0 && self.chunk_pool.is_nearly_full() {
-            let visible: Vec<_> = world.visible_meshes()
+        // Evict chunks beyond render_distance from pool (they'll be impostors)
+        // Also evict non-visible chunks if pool is getting full
+        if uploads_this_frame == 0 {
+            let within_render: Vec<_> = world.visible_meshes()
+                .filter(|m| (m.pos.center() - camera_pos).length() <= render_dist_blocks)
                 .map(|m| m.pos)
                 .collect();
-            self.chunk_pool.evict_non_visible(&visible);
+            self.chunk_pool.evict_non_visible(&within_render);
         }
     }
 

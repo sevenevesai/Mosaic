@@ -287,6 +287,17 @@ impl ChunkPos {
         )
     }
 
+    /// Get the center position of this chunk in world space
+    pub fn center(&self) -> Vec3 {
+        let chunk_world_size = CHUNK_SIZE_F32 * BLOCK_SCALE;
+        let half_size = chunk_world_size * 0.5;
+        Vec3::new(
+            self.x as f32 * chunk_world_size + half_size,
+            self.y as f32 * chunk_world_size + half_size,
+            self.z as f32 * chunk_world_size + half_size,
+        )
+    }
+
     pub fn offset(&self, dx: i32, dy: i32, dz: i32) -> Self {
         Self {
             x: self.x + dx,
@@ -571,6 +582,70 @@ impl Block {
     #[inline]
     pub fn face_texture(&self, face_idx: usize) -> u32 {
         self.texture_indices()[face_idx]
+    }
+
+    /// Get the dominant color for this block type (used for impostor rendering)
+    /// Returns [R, G, B] as approximate color matching the block's appearance
+    #[inline]
+    pub fn dominant_color(&self) -> [u8; 3] {
+        match self {
+            Block::Air => [0, 0, 0],
+            Block::Dirt => [139, 90, 43],           // Brown dirt
+            Block::Grass => [86, 125, 70],          // Green grass (weighted toward top)
+            Block::Stone => [128, 128, 128],        // Gray stone
+            Block::StoneDirt => [115, 100, 85],     // Brownish stone
+            Block::Brick => [156, 91, 74],          // Brick red
+            Block::Water => [64, 120, 180],         // Blue water
+            Block::Wood => [143, 104, 58],          // Wood brown
+            Block::Leaves => [56, 118, 29],         // Leaf green
+            Block::StoneRubble2 => [120, 120, 115], // Gray rubble
+            Block::IronOre => [140, 125, 115],      // Ore gray with iron tint
+            Block::GoldOre => [170, 155, 100],      // Ore with gold tint
+            Block::DiamondOre => [130, 180, 190],   // Ore with cyan tint
+            Block::RedstoneOre => [160, 90, 90],    // Ore with red tint
+            Block::Bedrock => [50, 50, 50],         // Dark gray
+            Block::Torch => [255, 200, 100],        // Warm light color
+            Block::Sand => [220, 200, 140],         // Sandy tan
+            Block::CoalOre => [60, 60, 60],         // Dark coal
+            Block::CopperOre => [170, 120, 80],     // Copper brown
+            Block::EmeraldOre => [80, 180, 100],    // Emerald green
+            Block::SapphireOre => [80, 100, 200],   // Sapphire blue
+            Block::QuartzOre => [230, 225, 220],    // Near-white quartz
+            Block::AmethystOre => [150, 100, 180],  // Purple amethyst
+            Block::SilverOre => [190, 195, 200],    // Silver gray
+            Block::TinOre => [160, 160, 150],       // Tin gray
+            Block::NickelOre => [150, 165, 140],    // Greenish nickel
+            Block::LeadOre => [100, 100, 115],      // Dark lead
+            Block::TitaniumOre => [180, 180, 195],  // Light titanium
+            Block::UraniumOre => [100, 200, 100],   // Glowing green
+            Block::OakLog => [130, 95, 50],         // Oak brown
+            Block::BirchLog => [210, 200, 180],     // Birch white-tan
+            Block::Sandstone => [210, 190, 140],    // Sandy beige
+            Block::RedSandstone => [180, 100, 60],  // Terracotta red
+            Block::SnowGrass => [200, 230, 200],    // Snow-tinted green
+            Block::Snow => [250, 250, 255],         // White snow
+            Block::Ice => [180, 220, 255],          // Light blue ice
+            Block::PackedIce => [150, 200, 240],    // Deeper blue ice
+            Block::MudBlock => [80, 60, 40],        // Dark brown mud
+            Block::Peat => [50, 40, 30],            // Very dark brown
+            Block::JungleGrass => [50, 90, 35],     // Dark jungle green
+            Block::JungleLeaves => [40, 100, 30],   // Dark jungle green
+            Block::Vines => [50, 90, 30],           // Vine green
+            Block::Gravel => [130, 130, 130],       // Gray gravel
+            Block::MossyStone => [90, 115, 85],     // Mossy gray-green
+            Block::CrackedStone => [110, 105, 100], // Weathered gray
+            Block::ClayStone => [180, 160, 140],    // Tan clay
+            Block::Stalactite => [150, 145, 140],   // Limestone color
+            Block::Stalagmite => [145, 140, 135],   // Limestone color
+            Block::CrystalAmethyst => [180, 120, 200], // Glowing purple
+            Block::CrystalQuartz => [255, 250, 240],   // Bright white
+            Block::Cactus => [60, 120, 50],         // Cactus green
+            Block::DeadBush => [130, 100, 60],      // Brown dead plant
+            Block::PineLog => [100, 80, 45],        // Dark pine brown
+            Block::JungleLog => [110, 85, 50],      // Tropical wood
+            Block::SpruceLeaves => [45, 75, 40],    // Dark spruce green
+            Block::Chest => [140, 100, 55],         // Chest wood color
+        }
     }
 }
 

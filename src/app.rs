@@ -512,8 +512,9 @@ impl App {
 
         // Update world (chunk loading/generation, meshing, lighting)
         self.profiler.begin_section("world_update");
-        // Sync render distance from settings to world manager
+        // Sync render distance and total load distance (including impostor range) to world manager
         self.world.set_render_distance(self.renderer.render_distance());
+        self.world.set_load_distance(self.renderer.total_view_distance());
         self.world.update(&self.player.position());
         // Run water flow simulation
         self.world.tick_water_simulation(dt.as_secs_f32());
@@ -592,6 +593,7 @@ impl App {
             draw_calls: render_stats.chunks_rendered,
             chunks_rendered: render_stats.chunks_rendered,
             chunks_culled: render_stats.chunks_culled,
+            impostors_rendered: render_stats.impostors_rendered,
             gpu_time_ms: render_stats.gpu_time_ms,
             shadow_chunks_rendered: render_stats.shadow_chunks_rendered,
             shadow_chunks_culled: render_stats.shadow_chunks_culled,

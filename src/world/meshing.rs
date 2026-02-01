@@ -279,6 +279,9 @@ pub struct ChunkMesh {
     pub lod: LodLevel,
     /// When this mesh was created (for drop animation)
     pub created_at: std::time::Instant,
+    /// Average color of visible surface blocks for impostor rendering [R, G, B, A]
+    /// Alpha represents occupancy (0 = empty, 255 = fully dense)
+    pub average_color: [u8; 4],
 }
 
 impl ChunkMesh {
@@ -473,6 +476,9 @@ fn build_chunk_mesh_simple(
         }
     }
 
+    // Compute average color for impostor rendering
+    let average_color = compute_chunk_average_color(chunk);
+
     ChunkMesh {
         pos,
         vertices,
@@ -480,6 +486,7 @@ fn build_chunk_mesh_simple(
         gpu_mesh: None,
         lod: LodLevel::Full,
         created_at: Instant::now(),
+        average_color,
     }
 }
 
@@ -1004,6 +1011,9 @@ pub fn build_chunk_mesh_lod(
     // Added at ALL LOD levels so light sources are visible from far away
     add_emissive_blocks(chunk, neighbors, world_origin, &mut vertices, &mut indices);
 
+    // Compute average color for impostor rendering
+    let average_color = compute_chunk_average_color(chunk);
+
     // Record timing and statistics
     let elapsed_ns = start_time.elapsed().as_nanos() as u64;
     let num_quads = (indices.len() / 6) as u64; // 6 indices per quad (2 triangles)
@@ -1021,7 +1031,70 @@ pub fn build_chunk_mesh_lod(
         gpu_mesh: None,
         lod,
         created_at: Instant::now(),
+        average_color,
     }
+}
+
+/// Compute average color for a chunk by sampling surface blocks
+/// Returns [R, G, B, A] where A represents occupancy (solid block density)
+fn compute_chunk_average_color(chunk: &Chunk) -> [u8; 4] {
+    let mut color_sum: [u32; 3] = [0, 0, 0];
+    let mut solid_count: u32 = 0;
+    let mut surface_count: u32 = 0;
+
+    // Sample blocks, weighting surface blocks more heavily
+    for z in 0..CHUNK_SIZE {
+        for y in 0..CHUNK_SIZE {
+            for x in 0..CHUNK_SIZE {
+                let block = chunk.get_block(x, y, z);
+                if block.is_solid() && !matches!(block, Block::Air | Block::Water) {
+                    solid_count += 1;
+
+                    // Check if this is a surface block (has at least one air/transparent neighbor)
+                    let is_surface =
+                        (x == 0 || !chunk.get_block(x - 1, y, z).is_solid()) ||
+                        (x == CHUNK_SIZE - 1 || !chunk.get_block(x + 1, y, z).is_solid()) ||
+                        (y == 0 || !chunk.get_block(x, y - 1, z).is_solid()) ||
+                        (y == CHUNK_SIZE - 1 || !chunk.get_block(x, y + 1, z).is_solid()) ||
+                        (z == 0 || !chunk.get_block(x, y, z - 1).is_solid()) ||
+                        (z == CHUNK_SIZE - 1 || !chunk.get_block(x, y, z + 1).is_solid());
+
+                    if is_surface {
+                        let color = block.dominant_color();
+                        // Weight surface blocks 3x for more accurate visual representation
+                        color_sum[0] += color[0] as u32 * 3;
+                        color_sum[1] += color[1] as u32 * 3;
+                        color_sum[2] += color[2] as u32 * 3;
+                        surface_count += 3;
+                    } else {
+                        // Include interior blocks with lower weight for underground chunks
+                        let color = block.dominant_color();
+                        color_sum[0] += color[0] as u32;
+                        color_sum[1] += color[1] as u32;
+                        color_sum[2] += color[2] as u32;
+                        surface_count += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    if surface_count == 0 {
+        // Empty chunk - return transparent
+        return [0, 0, 0, 0];
+    }
+
+    // Calculate average color
+    let avg_r = (color_sum[0] / surface_count).min(255) as u8;
+    let avg_g = (color_sum[1] / surface_count).min(255) as u8;
+    let avg_b = (color_sum[2] / surface_count).min(255) as u8;
+
+    // Alpha represents occupancy: ratio of solid blocks to total volume
+    // Scale to 0-255 range, with minimum of 32 for any non-empty chunk
+    let total_blocks = (CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE) as u32;
+    let occupancy = ((solid_count * 255) / total_blocks).max(32).min(255) as u8;
+
+    [avg_r, avg_g, avg_b, occupancy]
 }
 
 /// Pure Binary Greedy Meshing for Full Detail

@@ -110,6 +110,11 @@ impl SettingsMenu {
                 get_value: |r| r.refraction_quality().as_str().to_string(),
                 toggle: |r| { r.cycle_refraction_quality(); },
             },
+            MenuItem {
+                label: "EXTENDED VIEW",
+                get_value: |r| r.impostor_range().as_str().to_string(),
+                toggle: |r| { r.cycle_impostor_range(); },
+            },
             // === GPU SETTINGS ===
             MenuItem {
                 label: "GPU GI",

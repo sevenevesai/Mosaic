@@ -60,6 +60,7 @@ pub struct DebugMetrics {
     pub draw_calls: u32,
     pub chunks_rendered: u32,
     pub chunks_culled: u32,
+    pub impostors_rendered: u32,
     pub gpu_time_ms: f64,
 
     // Shadow pass stats
@@ -593,7 +594,7 @@ Mesh: {:>6.0}us/chunk ({} chunks, {:.1}ms total, {}K quads)\n",
                 String::new(),
                 format!("Triangles: {}K", metrics.triangles / 1000),
                 format!("Draw calls: {}", metrics.draw_calls),
-                format!("Chunks: {} rendered, {} culled", metrics.chunks_rendered, metrics.chunks_culled),
+                format!("Chunks: {} rendered, {} culled, {} impostors", metrics.chunks_rendered, metrics.chunks_culled, metrics.impostors_rendered),
                 format!("Shadow: {} rendered, {} culled", metrics.shadow_chunks_rendered, metrics.shadow_chunks_culled),
                 format!("Loaded: {} chunks", metrics.loaded_chunks),
                 String::new(),

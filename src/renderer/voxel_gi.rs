@@ -968,6 +968,7 @@ impl VoxelGI {
         shadow_debug: f32,
         held_light_emission: u8,
         torch_shadows: bool,
+        fog_distance: f32,
     ) {
         // Use smoothed_center for gradual transitions (already tracks camera smoothly)
         let snapped_center = Vec3::new(
@@ -986,7 +987,7 @@ impl VoxelGI {
 
         // If no updates needed, just update uniforms
         if !needs_full_refresh && !has_dirty_blocks {
-            self.update_uniform(queue, self.last_update_center, sun_direction, sun_color, ambient_color, time_of_day, shadow_mode, shadow_debug, camera_pos, held_light_emission, torch_shadows);
+            self.update_uniform(queue, self.last_update_center, sun_direction, sun_color, ambient_color, time_of_day, shadow_mode, shadow_debug, camera_pos, held_light_emission, torch_shadows, fog_distance);
             return;
         }
 
@@ -1008,7 +1009,7 @@ impl VoxelGI {
             }
 
             // Update uniforms with current volume center
-            self.update_uniform(queue, self.last_update_center, sun_direction, sun_color, ambient_color, time_of_day, shadow_mode, shadow_debug, camera_pos, held_light_emission, torch_shadows);
+            self.update_uniform(queue, self.last_update_center, sun_direction, sun_color, ambient_color, time_of_day, shadow_mode, shadow_debug, camera_pos, held_light_emission, torch_shadows, fog_distance);
             return;
         }
 
@@ -1023,7 +1024,7 @@ impl VoxelGI {
             // We just need to update the uniform with the values gpu_fill_volume set.
 
             // Always use the actual volume center for uniforms (where the voxel data is)
-            self.update_uniform(queue, self.last_update_center, sun_direction, sun_color, ambient_color, time_of_day, shadow_mode, shadow_debug, camera_pos, held_light_emission, torch_shadows);
+            self.update_uniform(queue, self.last_update_center, sun_direction, sun_color, ambient_color, time_of_day, shadow_mode, shadow_debug, camera_pos, held_light_emission, torch_shadows, fog_distance);
             return;
         }
 
@@ -1041,7 +1042,7 @@ impl VoxelGI {
         self.last_update_center = snapped_center;
 
         // Update uniform buffer
-        self.update_uniform(queue, snapped_center, sun_direction, sun_color, ambient_color, time_of_day, shadow_mode, shadow_debug, camera_pos, held_light_emission, torch_shadows);
+        self.update_uniform(queue, snapped_center, sun_direction, sun_color, ambient_color, time_of_day, shadow_mode, shadow_debug, camera_pos, held_light_emission, torch_shadows, fog_distance);
 
         // Time the voxel cache fill
         let fill_start = std::time::Instant::now();
@@ -1094,6 +1095,7 @@ impl VoxelGI {
         player_pos: Vec3,
         held_light_emission: u8,
         torch_shadows: bool,
+        fog_distance: f32,
     ) {
         // Volume origin is the world position of voxel [0,0,0]
         // For toroidal wrapping: origin = center - half_size
@@ -1105,7 +1107,7 @@ impl VoxelGI {
         );
 
         let uniform = VoxelVolumeUniform {
-            volume_center: [center.x, center.y, center.z, 0.0],
+            volume_center: [center.x, center.y, center.z, fog_distance],
             volume_size: [VOXEL_VOLUME_SIZE as f32; 4],
             inv_volume_size: [1.0 / VOXEL_VOLUME_SIZE as f32; 4],
             // W component is sun intensity (0-1), calculated from sun height
