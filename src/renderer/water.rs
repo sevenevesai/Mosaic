@@ -787,24 +787,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 continue;
             }
 
-            // === DEPTH TEST 2: NDC depth comparison (most reliable) ===
-            // Calculate where water WOULD be in NDC depth space
-            let water_clip = water.view_proj * vec4<f32>(hit_pos, 1.0);
-            let water_ndc_depth = water_clip.z / water_clip.w;
-
-            // If scene is in front of water in depth buffer, don't render water
-            // Use small bias to handle precision issues
-            if (scene_depth < water_ndc_depth - 0.0001) {
-                depth_test_failed = true;
-                continue;
-            }
-
-            // === DEPTH TEST 3: Distance comparison (backup) ===
+            // === DEPTH TEST 2: Distance comparison (world-space, avoids NDC precision banding) ===
             let water_dist = length(hit_pos - cam_pos);
             let scene_dist = length(scene_world_pos - cam_pos);
 
             // Water is visible if it's closer than scene geometry
-            let dist_bias = max(water_dist, scene_dist) * 0.005;
+            // Use larger bias (1%) to avoid precision artifacts
+            let dist_bias = max(water_dist, scene_dist) * 0.01 + 0.5;
             if (water_dist < scene_dist + dist_bias) {
                 hit_t = t;
                 hit_level = i32(i);
@@ -872,10 +861,18 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Reflection direction
     let reflect_dir = reflect(-view_dir, final_normal);
 
-    // SSR
-    let ssr_result = trace_ssr(water_pos + final_normal * 0.1, reflect_dir);
+    // SSR - DISABLED for now to debug banding issue
+    // TODO: Re-enable with proper anti-banding solution
     var reflection_color = compute_sky_color(reflect_dir);
-    reflection_color = mix(reflection_color, ssr_result.rgb, ssr_result.a);
+
+    // Only use SSR when looking at shallow angles (not down/up)
+    // and add distance-based fade to reduce artifacts
+    let view_vertical = abs(view_dir.y);
+    if (view_vertical < 0.5 && water.ssr_steps > 0u) {
+        let ssr_angle_fade = 1.0 - smoothstep(0.3, 0.5, view_vertical);
+        let ssr_result = trace_ssr(water_pos + final_normal * 0.1, reflect_dir);
+        reflection_color = mix(reflection_color, ssr_result.rgb, ssr_result.a * ssr_angle_fade * 0.7);
+    }
 
     // Refraction (sample scene with distortion)
     var refracted_color = vec3<f32>(0.0);
