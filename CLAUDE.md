@@ -33,7 +33,8 @@ src/
 │   └── inventory.rs # Slots, hotbar, sorting, Quick Stack
 ├── renderer/
 │   ├── mod.rs       # GPU state, render passes, day/night cycle
-│   ├── pipeline.rs  # WGSL shaders (chunk, water, sky, UI)
+│   ├── pipeline.rs  # WGSL shaders (chunk, sky, UI)
+│   ├── water.rs     # Ray-marched water system (~900 LOC)
 │   ├── inventory_ui.rs # Hotbar/inventory UI rendering
 │   ├── gpu_culling.rs # GPU frustum culling + visibility cache (88% hit rate)
 │   ├── voxel_gi.rs  # Voxel GI: 256³ volume, DDA shadows, VCT
@@ -43,8 +44,8 @@ src/
 ├── world/
 │   ├── mod.rs       # WorldManager, 8 worker threads, chunk lifecycle
 │   ├── meshing.rs   # Binary greedy meshing (~1,800 LOC)
-│   ├── water_meshing.rs # Water heightfield mesh with skirts
-│   ├── water_flow.rs # Pipe-model water flow simulation
+│   ├── water_meshing.rs # (Legacy) Mesh-based water, replaced by renderer/water.rs
+│   ├── water_flow.rs # Pipe-model water flow simulation (parked)
 │   ├── generation.rs # Biomes, caves, terrain, trees
 │   ├── lighting.rs  # BFS flood fill propagation
 │   └── storage/     # Region files, zstd compression
@@ -166,25 +167,25 @@ Post-process effect for soft contact shadows (`renderer/ssao.rs`):
 
 ## Water Rendering
 
-Heightfield-based water with realistic reflections and refraction (`world/water_meshing.rs`, `renderer/pipeline.rs`, `renderer/refraction.rs`):
-- **Surface**: Smooth sine-wave ripples (not Gerstner waves) for calm, reflective look
-- **Skirt geometry**: Vertical walls at water boundaries prevent gaps during wave animation
-- **Fresnel reflections**: Strong sky reflections at grazing angles, transparent when looking down
-- **Depth coloring**: Shallow=clear, deep=blue-gray with light absorption
-- **Refraction**: Scene texture sampling with wave-based UV distortion for underwater view
-- **Chromatic aberration**: RGB separation at High/Ultra quality for prismatic effect
-- **Flow system**: `water_flow.rs` exists for simulation (uniform visual flow for seamless rendering)
+Ray-marched infinite water plane with SSR reflections (`renderer/water.rs`):
+- **Architecture**: Fullscreen post-process pass, ray-plane intersection per pixel
+- **No mesh generation**: Eliminates chunk boundary seams, camera jitter, mesh overhead
+- **SSR reflections**: Screen-space ray march with binary search refinement
+- **Fresnel blending**: Physically-based reflection/refraction mix (F0=0.04)
+- **Procedural waves**: Multi-octave sine waves (2-4 octaves based on quality)
+- **Depth testing**: World-space distance comparison + terrain height check
+- **Multiple levels**: Supports up to 16 water heights (currently only sea level y=32)
 
-**Refraction Quality Presets** (ESC menu → WATER REFRACTION):
-| Preset | Distortion | Chromatic | Depth Fade |
-|--------|------------|-----------|------------|
-| Off | 0% | None | - |
-| Low | 2% | None | 12 blocks |
-| Medium | 4% | None | 12 blocks |
-| High | 6% | Subtle | 12 blocks |
-| Ultra | 8% | Full | 12 blocks |
+**Quality Presets** (ESC menu → WATER REFRACTION):
+| Preset | SSR Steps | Waves | Refraction | Chromatic |
+|--------|-----------|-------|------------|-----------|
+| Off | 0 | - | 0% | None |
+| Low | 8 | 2 oct | 2% | None |
+| Medium | 16 | 3 oct | 4% | None |
+| High | 24 | 3 oct | 6% | 0.3% |
+| Ultra | 32 | 4 oct | 8% | 0.6% |
 
-**Gotcha**: Per-vertex flow angles cause interference patterns - use uniform flow (0.0) for visuals.
+**Gotcha**: `water_flow.rs` exists but is parked - visual flow not currently used.
 
 ## Sun/Moon Rendering
 

@@ -1743,477 +1743,42 @@ pub fn create_line_pipeline(
     })
 }
 
+// Note: Water shader moved to src/renderer/water.rs (ray-marched water system)
+
 // ═══════════════════════════════════════════════════════════════════════════
-// WATER SHADER
+// LEGACY WATER CODE REMOVED
+// The old mesh-based water shader and pipeline have been replaced by:
+// - src/renderer/water.rs: Ray-marched infinite water plane
+// - All water rendering now uses fullscreen ray-plane intersection
+// This eliminates chunk boundary seams and camera jitter
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Water shader with refraction, fresnel reflection, and foam
-/// Supports scene texture sampling for real underwater distortion
-const WATER_SHADER: &str = r#"
-// Camera uniform (same as chunk shader)
-struct CameraUniform {
-    view_proj: mat4x4<f32>,
-    view_pos: vec4<f32>,
-    anim_data: vec4<f32>,  // x = current time
-};
-
-// Light/shadow uniform (same as chunk shader)
-struct LightUniform {
-    view_proj: mat4x4<f32>,
-    sun_direction: vec4<f32>,
-    sun_color: vec4<f32>,
-    moon_direction: vec4<f32>,
-    moon_color: vec4<f32>,
-    ambient_color: vec4<f32>,
-};
-
-// Water-specific uniform with refraction parameters
-struct WaterUniform {
-    // Wave parameters
-    time: f32,
-    wave_speed: f32,
-    wave_scale: f32,
-    wave_strength: f32,
-    // Colors
-    shallow_color: vec4<f32>,
-    deep_color: vec4<f32>,
-    // Visual parameters
-    fresnel_power: f32,
-    foam_threshold: f32,
-    refraction_strength: f32,
-    transparency: f32,
-    // Refraction quality parameters
-    refraction_distortion: f32,    // UV distortion scale
-    chromatic_aberration: f32,     // RGB separation strength
-    refraction_depth_fade: f32,    // Depth fade distance
-    _padding: f32,
-};
-
-@group(0) @binding(0)
-var<uniform> camera: CameraUniform;
-
-@group(1) @binding(0)
-var<uniform> light: LightUniform;
-
-@group(2) @binding(0)
-var<uniform> water: WaterUniform;
-
-@group(2) @binding(1)
-var scene_texture: texture_2d<f32>;
-
-@group(2) @binding(2)
-var scene_sampler: sampler;
-
-// Note: depth_texture removed - using water_depth from vertex data instead
-// This avoids resource conflict (can't read depth while writing to it)
-
-struct VertexInput {
-    @location(0) position: vec3<f32>,
-    @location(1) normal_packed: u32,
-    @location(2) uv_data: u32,       // [foam, depth, flow_lo, flow_hi]
-    @location(3) light_data: u32,    // [block_light, sky_light, 0, 0]
-};
-
-struct VertexOutput {
-    @builtin(position) clip_position: vec4<f32>,
-    @location(0) world_position: vec3<f32>,
-    @location(1) normal: vec3<f32>,
-    @location(2) foam_factor: f32,
-    @location(3) water_depth: f32,
-    @location(4) block_light: f32,
-    @location(5) sky_light: f32,
-    @location(6) view_dir: vec3<f32>,
-    @location(7) flow_angle: f32,
-    @location(8) screen_uv: vec2<f32>,  // Screen-space UV for refraction sampling
-};
-
-// Rotate a 2D vector by an angle (in radians)
-fn rotate_2d(v: vec2<f32>, angle: f32) -> vec2<f32> {
-    let c = cos(angle);
-    let s = sin(angle);
-    return vec2<f32>(
-        v.x * c - v.y * s,
-        v.x * s + v.y * c
-    );
-}
-
-// Smooth noise for water surface variation
-fn water_noise(p: vec2<f32>) -> f32 {
-    return fract(sin(dot(p, vec2<f32>(12.9898, 78.233))) * 43758.5453);
-}
-
-// Multi-octave wave normal calculation for refraction distortion
-fn calculate_wave_normal(pos: vec2<f32>, time: f32, flow_angle: f32) -> vec3<f32> {
-    let flow_dir = vec2<f32>(cos(flow_angle), sin(flow_angle));
-
-    var dx = 0.0;
-    var dz = 0.0;
-
-    // Wave layer 1 - large swells
-    let p1 = pos * 0.04 + flow_dir * time * 0.5;
-    dx += cos(p1.x * 2.0 + p1.y * 1.5 + time * 0.3) * 0.4;
-    dz += cos(p1.y * 2.0 - p1.x * 1.2 + time * 0.25) * 0.4;
-
-    // Wave layer 2 - medium ripples
-    let p2 = pos * 0.12 + rotate_2d(flow_dir, 0.5) * time * 0.7;
-    dx += cos(p2.x * 3.0 + p2.y * 2.5 + time * 0.5) * 0.25;
-    dz += cos(p2.y * 2.8 - p2.x * 2.2 + time * 0.4) * 0.25;
-
-    // Wave layer 3 - small detail (High/Ultra quality)
-    let p3 = pos * 0.25 + rotate_2d(flow_dir, -0.3) * time * 0.9;
-    dx += cos(p3.x * 4.0 + p3.y * 3.5 + time * 0.7) * 0.15;
-    dz += cos(p3.y * 3.8 - p3.x * 4.2 + time * 0.6) * 0.15;
-
-    // Scale by wave strength
-    dx *= water.wave_strength;
-    dz *= water.wave_strength;
-
-    return normalize(vec3<f32>(-dx, 1.0, -dz));
-}
-
-@vertex
-fn vs_main(in: VertexInput) -> VertexOutput {
-    var out: VertexOutput;
-
-    var pos = in.position;
-    let t = camera.anim_data.x * water.wave_speed;
-
-    // Unpack foam factor, depth, and flow_angle from uv_data
-    let uv_bytes = unpack4x8unorm(in.uv_data);
-    out.foam_factor = uv_bytes.x;
-    out.water_depth = uv_bytes.y * 255.0;
-
-    // Unpack flow angle
-    let flow_lo = u32(uv_bytes.z * 255.0);
-    let flow_hi = u32(uv_bytes.w * 255.0);
-    let flow_u16 = flow_lo | (flow_hi << 8u);
-    let flow_angle = f32(flow_u16) / 65535.0 * 6.28318;
-    out.flow_angle = flow_angle;
-
-    // Calculate wave normal for this vertex
-    let wave_normal = calculate_wave_normal(pos.xz, t, flow_angle);
-    out.normal = wave_normal;
-
-    let clip_pos = camera.view_proj * vec4<f32>(pos, 1.0);
-    out.clip_position = clip_pos;
-    out.world_position = pos;
-
-    // Calculate screen UV for refraction sampling
-    let ndc = clip_pos.xyz / clip_pos.w;
-    out.screen_uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
-
-    // Unpack light data
-    let light_bytes = unpack4x8unorm(in.light_data);
-    out.block_light = light_bytes.x;
-    out.sky_light = light_bytes.y;
-
-    // View direction
-    out.view_dir = normalize(camera.view_pos.xyz - pos);
-
-    return out;
-}
-
-// Schlick's fresnel approximation
-fn schlick_fresnel(cos_theta: f32, f0: f32) -> f32 {
-    return f0 + (1.0 - f0) * pow(1.0 - cos_theta, 5.0);
-}
-
-// Sample scene with refraction distortion
-fn sample_refracted_scene(base_uv: vec2<f32>, wave_normal: vec3<f32>, depth: f32) -> vec3<f32> {
-    // Skip refraction if strength is zero
-    if (water.refraction_strength <= 0.001) {
-        return textureSample(scene_texture, scene_sampler, base_uv).rgb;
-    }
-
-    // Calculate UV offset based on wave normal (XZ components create distortion)
-    let distortion = wave_normal.xz * water.refraction_distortion * water.refraction_strength;
-
-    // Fade distortion with depth (less distortion for deep water)
-    let depth_fade = 1.0 - smoothstep(0.0, water.refraction_depth_fade, depth);
-    let scaled_distortion = distortion * depth_fade;
-
-    // Apply chromatic aberration if enabled
-    if (water.chromatic_aberration > 0.001) {
-        // Sample RGB at slightly different offsets for prismatic effect
-        let r_offset = scaled_distortion * (1.0 + water.chromatic_aberration * 30.0);
-        let g_offset = scaled_distortion;
-        let b_offset = scaled_distortion * (1.0 - water.chromatic_aberration * 30.0);
-
-        let r_uv = clamp(base_uv + r_offset, vec2<f32>(0.001), vec2<f32>(0.999));
-        let g_uv = clamp(base_uv + g_offset, vec2<f32>(0.001), vec2<f32>(0.999));
-        let b_uv = clamp(base_uv + b_offset, vec2<f32>(0.001), vec2<f32>(0.999));
-
-        let r = textureSample(scene_texture, scene_sampler, r_uv).r;
-        let g = textureSample(scene_texture, scene_sampler, g_uv).g;
-        let b = textureSample(scene_texture, scene_sampler, b_uv).b;
-
-        return vec3<f32>(r, g, b);
-    } else {
-        // Simple refraction without chromatic aberration
-        let refracted_uv = clamp(base_uv + scaled_distortion, vec2<f32>(0.001), vec2<f32>(0.999));
-        return textureSample(scene_texture, scene_sampler, refracted_uv).rgb;
-    }
-}
-
-@fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let normal = normalize(in.normal);
-    let view_dir = normalize(in.view_dir);
-    let time = camera.anim_data.x;
-
-    // === VIEW-ANGLE DEPTH ===
-    let view_dot = max(dot(view_dir, vec3<f32>(0.0, 1.0, 0.0)), 0.1);
-    let optical_depth = in.water_depth / view_dot;
-
-    // === FRESNEL (Schlick approximation) ===
-    let n_dot_v = max(dot(normal, view_dir), 0.0);
-    let fresnel = schlick_fresnel(n_dot_v, 0.02);
-
-    // === REFRACTION - Sample underwater scene with distortion ===
-    let refracted_color = sample_refracted_scene(in.screen_uv, normal, optical_depth);
-
-    // === SKY/ENVIRONMENT REFLECTION ===
-    let reflect_dir = reflect(-view_dir, normal);
-
-    // Rich sky gradient for reflections
-    let sky_brightness = max(light.sun_direction.w, 0.15);
-    let sky_up = mix(
-        vec3<f32>(0.12, 0.18, 0.35),   // Night sky
-        vec3<f32>(0.45, 0.68, 0.98),   // Day sky zenith
-        sky_brightness
-    );
-    let sky_horizon = mix(
-        vec3<f32>(0.08, 0.12, 0.22),   // Night horizon
-        vec3<f32>(0.65, 0.78, 0.92),   // Day horizon
-        sky_brightness
-    );
-
-    let sky_blend = pow(max(reflect_dir.y, 0.0), 0.6);
-    var sky_reflection = mix(sky_horizon, sky_up, sky_blend);
-
-    // Sun specular highlight
-    let sun_dir = normalize(light.sun_direction.xyz);
-    let sun_intensity = light.sun_direction.w;
-    let sun_reflect = max(dot(reflect_dir, sun_dir), 0.0);
-
-    let spec_core = smoothstep(0.997, 1.0, sun_reflect) * 2.5;
-    let spec_inner = smoothstep(0.98, 0.997, sun_reflect) * 0.8;
-    let spec_outer = smoothstep(0.92, 0.98, sun_reflect) * 0.25;
-    let sun_specular = (spec_core + spec_inner + spec_outer) * sun_intensity;
-    sky_reflection += vec3<f32>(1.0, 0.98, 0.92) * sun_specular;
-
-    // === WATER COLOR WITH DEPTH ===
-    let absorption_depth = clamp(optical_depth / 10.0, 0.0, 1.0);
-
-    let surface_color = vec3<f32>(0.06, 0.10, 0.12);
-    let mid_color = vec3<f32>(0.10, 0.18, 0.26);
-    let deep_color_tint = vec3<f32>(0.05, 0.10, 0.18);
-
-    let shallow_blend = smoothstep(0.0, 0.4, absorption_depth);
-    let deep_blend = smoothstep(0.25, 1.0, absorption_depth);
-    var water_tint = mix(surface_color, mid_color, shallow_blend);
-    water_tint = mix(water_tint, deep_color_tint, deep_blend);
-
-    // Blend refracted scene with water tint based on depth
-    let underwater_visibility = exp(-optical_depth * 0.15);
-    var water_color = mix(water_tint, refracted_color * 0.85 + water_tint * 0.15, underwater_visibility);
-
-    // === SUBSURFACE SCATTERING ===
-    let sun_through = max(dot(-view_dir, sun_dir), 0.0);
-    let scatter_amount = pow(sun_through, 3.0) * (1.0 - absorption_depth) * 0.2;
-    let scatter_color = vec3<f32>(0.20, 0.30, 0.28);
-    water_color += scatter_color * scatter_amount * sun_intensity;
-
-    // === COMBINE REFLECTION AND REFRACTION ===
-    let fresnel_boost = pow(fresnel, 0.7);
-    let depth_boost = smoothstep(0.0, 0.5, absorption_depth) * 0.15;
-    let reflection_strength = fresnel_boost * 0.85 + depth_boost + 0.08;
-    var final_color = mix(water_color, sky_reflection, clamp(reflection_strength, 0.0, 0.95));
-
-    // === FOAM (shorelines only) ===
-    let base_foam = in.foam_factor;
-    if (base_foam > water.foam_threshold) {
-        let foam_intensity = (base_foam - water.foam_threshold) / (1.0 - water.foam_threshold);
-        let noise_pos = in.world_position.xz * 0.4 + vec2<f32>(time * 0.03, time * 0.025);
-        let foam_noise = water_noise(noise_pos);
-
-        let foam_color = vec3<f32>(0.95, 0.96, 0.94);
-        let foam_blend = foam_intensity * foam_intensity * (0.4 + foam_noise * 0.15);
-        final_color = mix(final_color, foam_color, foam_blend * 0.5);
-    }
-
-    // === LIGHTING ===
-    let ambient = light.ambient_color.rgb * 0.6;
-    let sun_diffuse = max(dot(vec3<f32>(0.0, 1.0, 0.0), sun_dir), 0.0) * 0.25;
-    let sun_contrib = light.sun_color.rgb * sun_diffuse * sun_intensity;
-
-    let torch_color = vec3<f32>(1.0, 0.80, 0.55);
-    let block_contrib = torch_color * in.block_light * 0.6;
-    let sky_contrib = vec3<f32>(0.5, 0.6, 0.8) * in.sky_light * 0.2;
-
-    let total_light = ambient + sun_contrib + block_contrib + sky_contrib;
-    final_color *= total_light;
-
-    // === ATMOSPHERIC FOG ===
-    let dist = length(camera.view_pos.xyz - in.world_position);
-    let fog_factor = 1.0 - exp(-dist * 0.00010);
-    let fog_color = mix(sky_horizon, sky_up, 0.35);
-    final_color = mix(final_color, fog_color, clamp(fog_factor, 0.0, 0.15));
-
-    // === TRANSPARENCY ===
-    let depth_opacity = 1.0 - exp(-optical_depth * 0.06);
-    let base_alpha = mix(0.25, 0.75, depth_opacity);
-    let alpha = mix(base_alpha, 0.90, fresnel * 0.4);
-
-    return vec4<f32>(final_color, alpha);
-}
-"#;
-
-/// Water uniform buffer structure (must match shader)
-#[repr(C)]
-#[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct WaterUniform {
-    pub time: f32,
-    pub wave_speed: f32,
-    pub wave_scale: f32,
-    pub wave_strength: f32,
-    pub shallow_color: [f32; 4],
-    pub deep_color: [f32; 4],
-    pub fresnel_power: f32,
-    pub foam_threshold: f32,
-    pub refraction_strength: f32,
-    pub transparency: f32,
-    // Refraction quality parameters
-    pub refraction_distortion: f32,    // UV distortion scale (0.0 - 0.1)
-    pub chromatic_aberration: f32,     // RGB separation strength (0.0 - 0.01)
-    pub refraction_depth_fade: f32,    // Depth at which refraction fades (blocks)
-    pub _padding: f32,                 // Alignment padding
-}
-
-impl Default for WaterUniform {
-    fn default() -> Self {
-        Self {
-            time: 0.0,
-            wave_speed: 0.45,           // Gentle wave speed
-            wave_scale: 8.0,
-            wave_strength: 0.09,        // Subtle - visible but won't clip terrain
-            // Natural water palette - desaturated blue-gray
-            shallow_color: [0.38, 0.42, 0.44, 0.30],  // Near-neutral gray
-            deep_color: [0.08, 0.14, 0.22, 0.70],     // Deep muted blue-gray
-            fresnel_power: 4.0,  // Balanced reflection curve
-            foam_threshold: 0.55, // Slightly lower - foam a bit more visible
-            refraction_strength: 0.5,   // Medium refraction by default
-            transparency: 0.80,
-            refraction_distortion: 0.04,  // Medium distortion
-            chromatic_aberration: 0.0,    // No chromatic by default
-            refraction_depth_fade: 12.0,  // Fade out at 12 blocks depth
-            _padding: 0.0,
-        }
-    }
-}
-
-/// Create water bind group layout for water-specific uniforms
-pub fn create_water_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
-    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("Water Bind Group Layout"),
-        entries: &[
-            // binding 0: Water uniform buffer
-            wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            },
-            // binding 1: Scene texture for refraction
-            wgpu::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            },
-            // binding 2: Scene sampler for refraction
-            wgpu::BindGroupLayoutEntry {
-                binding: 2,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                count: None,
-            },
-            // Note: Depth texture removed - water_depth from vertex data is used instead
-            // This avoids the resource conflict of reading depth while writing to it
-        ],
-    })
-}
-
-/// Create water render pipeline
-pub fn create_water_pipeline(
-    device: &wgpu::Device,
-    format: wgpu::TextureFormat,
-    camera_bind_group_layout: &wgpu::BindGroupLayout,
-    light_bind_group_layout: &wgpu::BindGroupLayout,
-    water_bind_group_layout: &wgpu::BindGroupLayout,
-) -> wgpu::RenderPipeline {
-    use crate::world::WaterVertex;
-
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("Water Shader"),
-        source: wgpu::ShaderSource::Wgsl(WATER_SHADER.into()),
-    });
-
-    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("Water Pipeline Layout"),
-        bind_group_layouts: &[camera_bind_group_layout, light_bind_group_layout, water_bind_group_layout],
-        push_constant_ranges: &[],
-    });
-
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("Water Pipeline"),
-        layout: Some(&pipeline_layout),
-        vertex: wgpu::VertexState {
-            module: &shader,
-            entry_point: "vs_main",
-            buffers: &[WaterVertex::desc()],
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: &shader,
-            entry_point: "fs_main",
-            targets: &[Some(wgpu::ColorTargetState {
-                format,
-                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-        }),
-        primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::TriangleList,
-            strip_index_format: None,
-            front_face: wgpu::FrontFace::Ccw,
-            cull_mode: None,  // No culling for water (need to see from both sides)
-            unclipped_depth: false,
-            polygon_mode: wgpu::PolygonMode::Fill,
-            conservative: false,
-        },
-        depth_stencil: Some(wgpu::DepthStencilState {
-            format: wgpu::TextureFormat::Depth32Float,
-            depth_write_enabled: false,  // Don't write depth (transparent)
-            depth_compare: wgpu::CompareFunction::Less,
-            stencil: wgpu::StencilState::default(),
-            bias: wgpu::DepthBiasState::default(),
-        }),
-        multisample: wgpu::MultisampleState {
-            count: 1,
-            mask: !0,
-            alpha_to_coverage_enabled: false,
-        },
-        multiview: None,
-    })
-}
+// Note: Old water mesh code was here - replaced by ray-marched water in water.rs
+
+// Old water code removed from here - see water.rs for the new ray-marched implementation
+
+// The following structs/functions were in the old water system and are now removed:
+// - WATER_SHADER (old mesh-based water shader)
+// - WaterUniform (uniform buffer for old water system)
+// - create_water_bind_group_layout
+// - create_water_pipeline
+
+// ═══════════════════════════════════════════════════════════════════════════
+// LEGACY WATER SHADER CONTENT REMOVED
+// All water rendering now uses src/renderer/water.rs
+// ═══════════════════════════════════════════════════════════════════════════
+
+// The content that was here (old WATER_SHADER and related code) has been
+// replaced by the ray-marched water system in water.rs
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DIMMER SHADER - Fullscreen overlay for settings menu
+// ═══════════════════════════════════════════════════════════════════════════
+
+// [LEGACY WATER CODE REMOVED]
+// The mesh-based water shader, WaterUniform struct, create_water_bind_group_layout,
+// and create_water_pipeline functions have been replaced by the ray-marched water
+// system in src/renderer/water.rs
 
 // ═══════════════════════════════════════════════════════════════════════════
 // DIMMER SHADER - Fullscreen overlay for settings menu
@@ -2231,11 +1796,11 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
 
 @fragment
 fn fs_main() -> @location(0) vec4<f32> {
-    return vec4<f32>(0.0, 0.0, 0.0, 0.6); // 60% black overlay
+    return vec4<f32>(0.0, 0.0, 0.0, 0.4);
 }
 "#;
 
-/// Create dimmer pipeline for settings menu overlay
+/// Create a pipeline for dimmer overlay (settings menu background)
 pub fn create_dimmer_pipeline(
     device: &wgpu::Device,
     format: wgpu::TextureFormat,
@@ -2245,19 +1810,13 @@ pub fn create_dimmer_pipeline(
         source: wgpu::ShaderSource::Wgsl(DIMMER_SHADER.into()),
     });
 
-    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("Dimmer Pipeline Layout"),
-        bind_group_layouts: &[],
-        push_constant_ranges: &[],
-    });
-
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("Dimmer Pipeline"),
-        layout: Some(&pipeline_layout),
+        layout: None,
         vertex: wgpu::VertexState {
             module: &shader,
             entry_point: "vs_main",
-            buffers: &[],  // No vertex buffer - fullscreen triangle from vertex_index
+            buffers: &[],
         },
         fragment: Some(wgpu::FragmentState {
             module: &shader,
@@ -2268,19 +1827,12 @@ pub fn create_dimmer_pipeline(
                 write_mask: wgpu::ColorWrites::ALL,
             })],
         }),
-        primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::TriangleList,
-            strip_index_format: None,
-            front_face: wgpu::FrontFace::Ccw,
-            cull_mode: None,
-            unclipped_depth: false,
-            polygon_mode: wgpu::PolygonMode::Fill,
-            conservative: false,
-        },
+        primitive: wgpu::PrimitiveState::default(),
+        // Must match the render pass depth format (UI pass has depth attachment)
         depth_stencil: Some(wgpu::DepthStencilState {
             format: wgpu::TextureFormat::Depth32Float,
             depth_write_enabled: false,
-            depth_compare: wgpu::CompareFunction::Always, // Always pass, ignore depth
+            depth_compare: wgpu::CompareFunction::Always,
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
         }),
@@ -2288,3 +1840,5 @@ pub fn create_dimmer_pipeline(
         multiview: None,
     })
 }
+
+// End of pipeline.rs - Legacy water code has been removed and replaced by water.rs

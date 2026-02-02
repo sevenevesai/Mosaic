@@ -19,6 +19,7 @@ mod texture;
 pub mod voxel_gi;
 mod volumetrics;
 pub mod vox_loader;
+mod water;
 
 pub use bloom::Bloom;
 pub use camera::{Camera, Frustum};
@@ -34,6 +35,7 @@ pub use texture::TextureAtlas;
 pub use voxel_gi::VoxelGI;
 pub use vox_loader::{VoxModel, VoxMesh};
 pub use volumetrics::VolumetricLighting;
+pub use water::{Water, WaterQuality};
 
 /// Display mode for the window
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,7 +74,7 @@ use crate::utils::gpu_profiler::GpuProfiler;
 use crate::utils::profiler::FrameProfiler;
 use crate::world::WorldManager;
 
-use pipeline::{UiVertex, LineVertex, WaterUniform, create_water_bind_group_layout, create_water_pipeline, create_voxel_lit_chunk_pipeline, create_dimmer_pipeline};
+use pipeline::{UiVertex, LineVertex, create_voxel_lit_chunk_pipeline, create_dimmer_pipeline};
 use glam::{Vec3, Mat4};
 
 /// Render statistics for the current frame
@@ -155,18 +157,12 @@ pub struct Renderer {
     /// Whether multi_draw_indexed_indirect_count is available
     mdi_count_available: bool,
 
-    // Water rendering
-    water_pipeline: wgpu::RenderPipeline,
-    water_buffer: wgpu::Buffer,
-    water_bind_group: wgpu::BindGroup,
-    water_light_bind_group: wgpu::BindGroup,
-    water_bind_group_layout: wgpu::BindGroupLayout,
+    // Ray-marched water rendering system
+    water_system: Water,
 
-    // Water refraction
+    // Scene copy for water refraction (copied before water renders)
     refraction_source_texture: wgpu::Texture,
     refraction_source_view: wgpu::TextureView,
-    refraction_sampler: wgpu::Sampler,
-    refraction_quality: RefractionQuality,
 
     // Stats from last frame
     pub stats: RenderStats,
@@ -569,30 +565,6 @@ impl Renderer {
             tracing::info!("Using CPU frustum culling");
         }
 
-        // === WATER RENDERING SETUP ===
-        // Water needs light uniform visible in both vertex and fragment shaders
-        let water_light_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Water Light Bind Group Layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        });
-        let water_light_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Water Light Bind Group"),
-            layout: &water_light_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: light_buffer.as_entire_binding(),
-            }],
-        });
-
         // === BLOOM POST-PROCESSING ===
         // Scene texture for off-screen rendering (needed for bloom and water refraction)
         // Uses surface format for compatibility with existing pipelines
@@ -648,13 +620,8 @@ impl Renderer {
         // Upload noise texture data
         dof.upload_noise_texture(&queue);
 
-        // Create water uniform bind group layout and buffer
-        let water_bind_group_layout = create_water_bind_group_layout(&device);
-        let water_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Water Uniform Buffer"),
-            contents: bytemuck::cast_slice(&[WaterUniform::default()]),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
+        // Create ray-marched water system
+        let water_system = Water::new(&device, surface_format, &camera_bind_group_layout);
 
         // Create refraction source texture (copy of scene before water renders)
         let refraction_source_texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -672,48 +639,6 @@ impl Renderer {
             view_formats: &[],
         });
         let refraction_source_view = refraction_source_texture.create_view(&wgpu::TextureViewDescriptor::default());
-
-        // Create refraction sampler (linear filtering for smooth distortion)
-        let refraction_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("Refraction Sampler"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
-
-        // Create water bind group with refraction textures
-        // Note: depth texture not included - uses water_depth from vertex data instead
-        let water_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Water Bind Group"),
-            layout: &water_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: water_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&refraction_source_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&refraction_sampler),
-                },
-            ],
-        });
-
-        // Create water pipeline (uses water_light_bind_group_layout for lighting)
-        let water_pipeline = create_water_pipeline(
-            &device,
-            surface_format,
-            &camera_bind_group_layout,
-            &water_light_bind_group_layout,
-            &water_bind_group_layout,
-        );
 
         // Create inventory UI renderer
         let inventory_ui = inventory_ui::InventoryUI::new(&device, surface_format, &texture_bind_group_layout);
@@ -773,15 +698,9 @@ impl Renderer {
             gpu_culler,
             use_gpu_culling,
             mdi_count_available,
-            water_pipeline,
-            water_buffer,
-            water_bind_group,
-            water_light_bind_group,
-            water_bind_group_layout,
+            water_system,
             refraction_source_texture,
             refraction_source_view,
-            refraction_sampler,
-            refraction_quality: RefractionQuality::default(),
             stats: RenderStats::default(),
             start_time: std::time::Instant::now(),
             time_of_day: 0.35,   // Start at mid-morning
@@ -861,7 +780,7 @@ impl Renderer {
             // Resize DoF textures
             self.dof.resize(&self.device, new_size.width, new_size.height);
 
-            // Resize refraction source texture and recreate water bind group
+            // Resize refraction source texture
             self.refraction_source_texture = self.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("refraction_source_texture"),
                 size: wgpu::Extent3d {
@@ -878,25 +797,12 @@ impl Renderer {
             });
             self.refraction_source_view = self.refraction_source_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-            // Recreate water bind group with new texture views
-            self.water_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Water Bind Group"),
-                layout: &self.water_bind_group_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: self.water_buffer.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&self.refraction_source_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::Sampler(&self.refraction_sampler),
-                    },
-                ],
-            });
+            // Update water system bind group with new textures
+            self.water_system.update_bind_group(
+                &self.device,
+                &self.depth_texture,
+                &self.refraction_source_view,
+            );
         }
     }
 
@@ -1206,23 +1112,56 @@ impl Renderer {
         next
     }
 
-    // === Water Refraction Settings ===
+    // === Water Quality Settings ===
 
-    /// Get current water refraction quality
+    /// Get current water quality
+    pub fn water_quality(&self) -> WaterQuality {
+        self.water_system.quality()
+    }
+
+    /// Cycle water quality: Off -> Low -> Medium -> High -> Ultra -> Off
+    pub fn cycle_water_quality(&mut self) -> WaterQuality {
+        self.water_system.cycle_quality();
+        let quality = self.water_system.quality();
+        tracing::info!("Water Quality: {}", quality.as_str());
+        quality
+    }
+
+    /// Set water quality directly
+    pub fn set_water_quality(&mut self, quality: WaterQuality) {
+        self.water_system.set_quality(quality);
+    }
+
+    // Legacy refraction quality methods (now delegate to water quality)
+
+    /// Get current water refraction quality (legacy - returns water quality)
     pub fn refraction_quality(&self) -> RefractionQuality {
-        self.refraction_quality
+        // Map water quality to refraction quality for backwards compatibility
+        match self.water_system.quality() {
+            WaterQuality::Off => RefractionQuality::Off,
+            WaterQuality::Low => RefractionQuality::Low,
+            WaterQuality::Medium => RefractionQuality::Medium,
+            WaterQuality::High => RefractionQuality::High,
+            WaterQuality::Ultra => RefractionQuality::Ultra,
+        }
     }
 
-    /// Cycle water refraction quality: Off -> Low -> Medium -> High -> Ultra -> Off
+    /// Cycle water refraction quality (legacy - cycles water quality)
     pub fn cycle_refraction_quality(&mut self) -> RefractionQuality {
-        self.refraction_quality = self.refraction_quality.next();
-        tracing::info!("Water Refraction: {}", self.refraction_quality.as_str());
-        self.refraction_quality
+        self.cycle_water_quality();
+        self.refraction_quality()
     }
 
-    /// Set water refraction quality directly
+    /// Set water refraction quality (legacy - sets water quality)
     pub fn set_refraction_quality(&mut self, quality: RefractionQuality) {
-        self.refraction_quality = quality;
+        let water_quality = match quality {
+            RefractionQuality::Off => WaterQuality::Off,
+            RefractionQuality::Low => WaterQuality::Low,
+            RefractionQuality::Medium => WaterQuality::Medium,
+            RefractionQuality::High => WaterQuality::High,
+            RefractionQuality::Ultra => WaterQuality::Ultra,
+        };
+        self.water_system.set_quality(water_quality);
     }
 
     // === Extended View (Impostor) Settings ===
@@ -1251,7 +1190,7 @@ impl Renderer {
 
     /// Check if water refraction is enabled
     pub fn is_refraction_enabled(&self) -> bool {
-        self.refraction_quality != RefractionQuality::Off
+        self.water_system.quality() != WaterQuality::Off
     }
 
     /// Get current render distance
@@ -1360,7 +1299,7 @@ impl Renderer {
             "ULTRA" => RefractionQuality::Ultra,
             _ => RefractionQuality::Medium,
         };
-        self.refraction_quality = refraction_quality;
+        self.set_refraction_quality(refraction_quality);
 
         // Apply extended view (impostor) range setting
         let impostor_range = ImpostorRange::from_str(&settings.impostor_quality);
@@ -1385,7 +1324,7 @@ impl Renderer {
             torch_shadows: self.torch_shadows,
             ssao_quality: self.ssao.quality.as_str().to_string(),
             dof_quality: self.dof.quality.as_str().to_string(),
-            refraction_quality: self.refraction_quality.as_str().to_string(),
+            refraction_quality: self.refraction_quality().as_str().to_string(),
             impostor_quality: self.impostor_renderer.range.as_str().to_string(),
         }
     }
@@ -1591,19 +1530,6 @@ impl Renderer {
         let camera_uniform = CameraUniform::from_camera_with_anim(camera, current_time, spawn_time, is_underwater);
         self.queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[camera_uniform]));
-
-        // Update water uniform with current time and refraction parameters
-        let refraction_params = RefractionParams::from_quality(self.refraction_quality);
-        let water_uniform = WaterUniform {
-            time: current_time,
-            refraction_strength: refraction_params.strength,
-            refraction_distortion: refraction_params.distortion_scale,
-            chromatic_aberration: refraction_params.chromatic,
-            refraction_depth_fade: refraction_params.depth_fade_end,
-            ..WaterUniform::default()
-        };
-        self.queue
-            .write_buffer(&self.water_buffer, 0, bytemuck::cast_slice(&[water_uniform]));
 
         // Update light uniform with day/night cycle (center shadow map on camera)
         let light_uniform = LightUniform::from_camera_position_and_time(camera.position, self.time_of_day);
@@ -1995,7 +1921,7 @@ impl Renderer {
 
         // === COPY SCENE FOR WATER REFRACTION ===
         // Copy the current scene (before water) so water shader can sample it for refraction
-        if self.refraction_quality != RefractionQuality::Off {
+        if self.water_system.quality() != WaterQuality::Off {
             encoder.copy_texture_to_texture(
                 wgpu::ImageCopyTexture {
                     texture: &self.scene_texture,
@@ -2015,11 +1941,40 @@ impl Renderer {
                     depth_or_array_layers: 1,
                 },
             );
+
+            // Update water system bind group with current textures
+            self.water_system.update_bind_group(
+                &self.device,
+                &self.depth_texture,
+                &self.refraction_source_view,
+            );
+
+            // Update water uniforms using day/night cycle values
+            let inv_view = camera.view_matrix().inverse();
+            let inv_proj = camera.projection_matrix().inverse();
+            self.water_system.update_uniforms(
+                &self.queue,
+                camera.view_projection_matrix(),
+                inv_view,
+                inv_proj,
+                camera.position,
+                current_time,
+                cycle.sun_direction,
+                cycle.sun_intensity,
+                cycle.sun_color,
+                cycle.ambient,
+                cycle.sun_intensity.clamp(0.0, 1.0),  // Use sun intensity as brightness
+                self.size.width as f32,
+                self.size.height as f32,
+            );
+
+            // Set water levels (just sea level for now)
+            self.water_system.set_water_levels(&[(crate::constants::WATER_SEA_LEVEL as f32, 0.0)]);
         }
 
-        // === WATER AND TRANSPARENT PASS ===
-        // Continue rendering with water and block outline
-        {
+        // === WATER RENDER PASS (Ray-marched fullscreen) ===
+        // Renders water as fullscreen ray-plane intersection
+        if self.water_system.quality() != WaterQuality::Off {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Water Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -2030,10 +1985,31 @@ impl Renderer {
                         store: wgpu::StoreOp::Store,
                     },
                 })],
+                depth_stencil_attachment: None, // No depth write - water samples depth texture
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            self.water_system.render(&mut render_pass, &self.camera_bind_group);
+        }
+
+        // === BLOCK OUTLINE PASS ===
+        // Render block outline if targeting a block (needs depth testing)
+        if let Some([bx, by, bz]) = target_block {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Block Outline Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.scene_texture_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &self.depth_texture,
                     depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Load, // Keep existing depth
+                        load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
                     }),
                     stencil_ops: None,
@@ -2042,75 +2018,43 @@ impl Renderer {
                 occlusion_query_set: None,
             });
 
-            // === WATER RENDER PASS ===
-            // Render water meshes with transparency (after opaque geometry)
-            render_pass.set_pipeline(&self.water_pipeline);
+            // Update outline vertices for this block position
+            let x = bx as f32;
+            let y = by as f32;
+            let z = bz as f32;
+            // Slight expansion to prevent z-fighting
+            let e = 0.002;
+            let x0 = x - e;
+            let y0 = y - e;
+            let z0 = z - e;
+            let x1 = x + 1.0 + e;
+            let y1 = y + 1.0 + e;
+            let z1 = z + 1.0 + e;
+
+            // 12 edges of a cube
+            let outline_vertices = [
+                // Bottom face edges
+                LineVertex { position: [x0, y0, z0] }, LineVertex { position: [x1, y0, z0] },
+                LineVertex { position: [x1, y0, z0] }, LineVertex { position: [x1, y0, z1] },
+                LineVertex { position: [x1, y0, z1] }, LineVertex { position: [x0, y0, z1] },
+                LineVertex { position: [x0, y0, z1] }, LineVertex { position: [x0, y0, z0] },
+                // Top face edges
+                LineVertex { position: [x0, y1, z0] }, LineVertex { position: [x1, y1, z0] },
+                LineVertex { position: [x1, y1, z0] }, LineVertex { position: [x1, y1, z1] },
+                LineVertex { position: [x1, y1, z1] }, LineVertex { position: [x0, y1, z1] },
+                LineVertex { position: [x0, y1, z1] }, LineVertex { position: [x0, y1, z0] },
+                // Vertical edges
+                LineVertex { position: [x0, y0, z0] }, LineVertex { position: [x0, y1, z0] },
+                LineVertex { position: [x1, y0, z0] }, LineVertex { position: [x1, y1, z0] },
+                LineVertex { position: [x1, y0, z1] }, LineVertex { position: [x1, y1, z1] },
+                LineVertex { position: [x0, y0, z1] }, LineVertex { position: [x0, y1, z1] },
+            ];
+            self.queue.write_buffer(&self.outline_vertex_buffer, 0, bytemuck::cast_slice(&outline_vertices));
+
+            render_pass.set_pipeline(&self.line_pipeline);
             render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
-            render_pass.set_bind_group(1, &self.water_light_bind_group, &[]);
-            render_pass.set_bind_group(2, &self.water_bind_group, &[]);
-
-            for water_mesh in world.visible_water_meshes() {
-                let chunk_min = water_mesh.pos.world_origin();
-                let chunk_max = chunk_min + glam::Vec3::splat(crate::constants::CHUNK_SIZE_F32);
-
-                // Frustum cull water chunks
-                if !frustum.test_aabb(chunk_min, chunk_max) {
-                    continue;
-                }
-
-                if let Some(gpu_mesh) = &water_mesh.gpu_mesh {
-                    render_pass.set_vertex_buffer(0, gpu_mesh.vertex_buffer.slice(..));
-                    render_pass.set_index_buffer(
-                        gpu_mesh.index_buffer.slice(..),
-                        wgpu::IndexFormat::Uint32,
-                    );
-                    render_pass.draw_indexed(0..gpu_mesh.index_count, 0, 0..1);
-                    triangles += gpu_mesh.index_count / 3;
-                }
-            }
-
-            // Render block outline if targeting a block
-            if let Some([bx, by, bz]) = target_block {
-                // Update outline vertices for this block position
-                let x = bx as f32;
-                let y = by as f32;
-                let z = bz as f32;
-                // Slight expansion to prevent z-fighting
-                let e = 0.002;
-                let x0 = x - e;
-                let y0 = y - e;
-                let z0 = z - e;
-                let x1 = x + 1.0 + e;
-                let y1 = y + 1.0 + e;
-                let z1 = z + 1.0 + e;
-
-                // 12 edges of a cube
-                let outline_vertices = [
-                    // Bottom face edges
-                    LineVertex { position: [x0, y0, z0] }, LineVertex { position: [x1, y0, z0] },
-                    LineVertex { position: [x1, y0, z0] }, LineVertex { position: [x1, y0, z1] },
-                    LineVertex { position: [x1, y0, z1] }, LineVertex { position: [x0, y0, z1] },
-                    LineVertex { position: [x0, y0, z1] }, LineVertex { position: [x0, y0, z0] },
-                    // Top face edges
-                    LineVertex { position: [x0, y1, z0] }, LineVertex { position: [x1, y1, z0] },
-                    LineVertex { position: [x1, y1, z0] }, LineVertex { position: [x1, y1, z1] },
-                    LineVertex { position: [x1, y1, z1] }, LineVertex { position: [x0, y1, z1] },
-                    LineVertex { position: [x0, y1, z1] }, LineVertex { position: [x0, y1, z0] },
-                    // Vertical edges
-                    LineVertex { position: [x0, y0, z0] }, LineVertex { position: [x0, y1, z0] },
-                    LineVertex { position: [x1, y0, z0] }, LineVertex { position: [x1, y1, z0] },
-                    LineVertex { position: [x1, y0, z1] }, LineVertex { position: [x1, y1, z1] },
-                    LineVertex { position: [x0, y0, z1] }, LineVertex { position: [x0, y1, z1] },
-                ];
-                self.queue.write_buffer(&self.outline_vertex_buffer, 0, bytemuck::cast_slice(&outline_vertices));
-
-                render_pass.set_pipeline(&self.line_pipeline);
-                render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
-                render_pass.set_vertex_buffer(0, self.outline_vertex_buffer.slice(..));
-                render_pass.draw(0..24, 0..1);
-            }
-
-            // NOTE: UI rendering moved after DoF to prevent blur affecting text
+            render_pass.set_vertex_buffer(0, self.outline_vertex_buffer.slice(..));
+            render_pass.draw(0..24, 0..1);
         }
 
         // === SSAO (Screen-Space Ambient Occlusion) ===

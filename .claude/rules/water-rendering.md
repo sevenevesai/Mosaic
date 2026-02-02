@@ -1,161 +1,161 @@
 # Water Rendering System
 
-Novel heightfield-based water with smooth animated surface.
+Ray-marched infinite water plane with SSR reflections and Fresnel effects.
 
 ## Architecture Overview
 
-Water is NOT stored as blocks. Instead:
-- 2D heightfield per chunk (`ChunkWaterData`)
-- Each column stores: surface_y, foam factor, flow angle
-- Separate mesh generation (`water_meshing.rs`)
-- Dedicated render pass after opaque geometry
-
-## Data Structures
-
-```rust
-// Per-chunk water heightfield (only allocated if chunk has water)
-pub struct ChunkWaterData {
-    columns: Box<[[WaterColumn; 16]; 16]>,  // 16x16 grid
-    has_any_water: bool,
-    min_water_y: f32,
-    max_water_y: f32,
-}
-
-pub struct WaterColumn {
-    surface_y: f32,      // Height of water surface
-    foam: f32,           // Foam intensity at this column
-    flow_angle: f32,     // Direction of flow
-}
-
-// WaterVertex format (24 bytes, matches ChunkVertex for alignment)
-pub struct WaterVertex {
-    position: [f32; 3],     // 12 bytes
-    normal_packed: u32,     // 4 bytes
-    uv_data: u32,           // [foam, depth, flow_lo, flow_hi]
-    light_data: u32,        // [block_light, sky_light, 0, 0]
-}
-```
-
-## Key Constants (lib.rs)
-
-```rust
-WATER_SEA_LEVEL: 32          // Y level where water generates
-WATER_FULL_HEIGHT: 0.875     // Surface height within block (leaves wave headroom)
-WATER_WAVE_STRENGTH: 0.12    // Wave displacement amplitude
-WATER_FRESNEL_POWER: 4.0     // Fresnel reflection exponent
-```
-
-## Mesh Generation
-
-**Skirt Geometry** (prevents gaps during wave animation):
-- Vertical walls extend 1.5 blocks below water surface at boundaries
-- Only added where no adjacent water exists (edges of water bodies)
-- Uses upward normals to render identically to surface
-- Constant `WATER_SKIRT_DEPTH: f32 = 1.5` in `water_meshing.rs`
-
-**Vertex Interpolation**:
-- Heights and foam averaged at grid corners for seamless adjacent cells
-- Flow angles use uniform value (0.0) to prevent interference patterns
-- Per-vertex flow angles cause visible banding - avoid!
-
-## Shader Effects
-
-**Smooth Ripples** (replaces Gerstner waves):
-- Multi-octave sine waves for calm surface
-- Large gentle swells + medium ripples + small detail
-- Subtle height displacement (~30% of wave_strength)
-- Normal perturbation for reflection variation
-
-**Fresnel Reflection** (Schlick approximation):
-```wgsl
-let fresnel = schlick_fresnel(n_dot_v, 0.02);  // Water F0 = 0.02
-let reflection_strength = fresnel * 0.85 + depth_boost + 0.08;
-```
-Strong reflections at grazing angles, transparent looking down.
-
-**Depth-Based Coloring**:
-- Shallow: nearly clear (0.06, 0.10, 0.12)
-- Medium: subtle teal (0.10, 0.18, 0.26)
-- Deep: blue-gray (0.05, 0.10, 0.18)
-
-**Foam**:
-- Shoreline foam only (base_foam from mesh)
-- No wave-peak foam (removed for calm look)
-
-## Rendering Pipeline
-
-1. Opaque chunks render first (write depth buffer) → scene_texture
-2. **Scene copy** for refraction (if refraction enabled)
-3. Water pass:
-   - Alpha blending enabled
-   - Depth test: enabled
-   - Depth write: disabled (prevents sorting issues)
-   - Samples refraction_source_texture for underwater distortion
-4. Separate bind groups for camera, light, water uniforms + refraction textures
-
-## Water Refraction System
-
-**Architecture** (`renderer/refraction.rs`, `renderer/pipeline.rs`):
-- Scene texture copied before water renders → `refraction_source_texture`
-- Water shader samples scene at UV offset based on wave normals
-- Depth-aware: distortion fades with water depth
-- Optional chromatic aberration (High/Ultra only)
-
-**Quality Presets** (ESC menu → WATER REFRACTION):
-| Preset | Strength | Distortion | Chromatic |
-|--------|----------|------------|-----------|
-| Off | 0.0 | 0% | None |
-| Low | 0.3 | 2% | None |
-| Medium | 0.5 | 4% | None |
-| High | 0.7 | 6% | 0.3% |
-| Ultra | 1.0 | 8% | 0.6% |
-
-**Shader Implementation**:
-```wgsl
-// Sample scene with wave-based distortion
-let distortion = wave_normal.xz * refraction_distortion * refraction_strength;
-let depth_fade = 1.0 - smoothstep(0.0, refraction_depth_fade, depth);
-let refracted_uv = base_uv + distortion * depth_fade;
-// Chromatic aberration (High/Ultra): sample RGB at different offsets
-```
-
-**Key Files**:
-| File | Purpose |
-|------|---------|
-| `renderer/refraction.rs` | `RefractionQuality` enum, `RefractionParams` |
-| `renderer/pipeline.rs` | Water shader with scene sampling |
-| `renderer/mod.rs` | Render pass split, texture copy |
-
-## Underwater Effect
-
-When camera Y < water surface Y:
-- Blue-green fog applied
-- Reduced visibility distance
-- Detected per-frame in renderer
+Water renders as a **fullscreen post-process pass** using ray-plane intersection:
+- No per-chunk mesh generation (eliminates seams, jitter, mesh overhead)
+- Single water level at y=32 (supports up to 16 levels for future use)
+- Depth buffer sampling for occlusion testing
+- Scene texture sampling for refraction
 
 ## Key Files
 
 | File | Purpose |
 |------|---------|
-| `world/chunk.rs` | `ChunkWaterData`, `WaterColumn` structs |
-| `world/water_meshing.rs` | Mesh generation, `WaterVertex`, skirt geometry |
-| `world/water_flow.rs` | Pipe-model flow simulation engine |
-| `world/generation.rs` | Water heightfield generation |
-| `renderer/pipeline.rs` | Water shader (ripples, Fresnel, refraction, depth color) |
-| `renderer/refraction.rs` | `RefractionQuality`, `RefractionParams` structs |
-| `renderer/mod.rs` | Water render pass, scene copy for refraction |
+| `renderer/water.rs` | Ray-marched water system (~900 LOC) |
+| `renderer/mod.rs` | Water pass integration, texture copy for refraction |
+| `world/water_flow.rs` | Pipe-model flow simulation (parked, not used visually) |
 
-## Adding Water Features
+## Data Structures
 
-**Variable Water Levels:**
-Currently water is full-height. For partial levels:
-1. Add `level: u8` (0-8) to `WaterColumn`
-2. Modify `water_meshing.rs` to use level for surface_y
-3. Update shader for stepped appearance
+```rust
+// Water quality preset
+pub enum WaterQuality { Off, Low, Medium, High, Ultra }
 
-**Water Flow Simulation** (`world/water_flow.rs`):
-Pipe-model simulation exists but visual flow uses uniform direction:
-- `WaterFlowEngine` manages active cells, flux calculations
-- Per-cell flow angles cause visual artifacts when interpolated
-- Flow data could be used for: foam intensity, particle effects, gameplay
-- To enable visual flow: would need shared vertex grid or screen-space solution
+// Uniform buffer for water rendering
+pub struct WaterUniforms {
+    view_proj, inv_view_proj, inv_view, inv_proj: mat4x4,
+    camera_pos: vec4,           // xyz = position, w = time
+    sun_direction: vec4,        // xyz = direction, w = intensity
+    shallow_color, deep_color: vec4,
+    wave_speed, wave_strength, fresnel_power: f32,
+    ssr_steps, wave_octaves: u32,
+    water_levels: [WaterLevel; 16],  // Multiple water heights
+}
+
+// Per-level water data
+pub struct WaterLevel {
+    height: f32,      // Y coordinate of water surface
+    water_type: f32,  // 0=water, 1=lava (future)
+}
+```
+
+## Rendering Pipeline
+
+1. Opaque chunks render → depth buffer + scene_texture
+2. **Copy scene_texture** → refraction_source_texture (if water enabled)
+3. **Water pass** (fullscreen triangle):
+   - Ray-plane intersection for each pixel
+   - Distance-based depth test against scene geometry
+   - Terrain height check (skip if terrain above water level)
+   - Apply waves, Fresnel, SSR, refraction, foam
+4. Alpha blend onto scene
+
+## Shader Algorithm
+
+```wgsl
+// For each pixel:
+1. Reconstruct view ray from UV + inverse matrices
+2. Sample depth buffer → reconstruct scene world position
+3. Ray-plane intersection: t = (water_height - cam.y) / ray.y
+4. Depth test: skip if terrain above water OR water behind terrain
+5. Calculate wave normal (multi-octave sine)
+6. Fresnel: blend reflection vs refraction based on view angle
+7. SSR: ray march in screen space for nearby reflections
+8. Fallback: procedural sky color for distant reflections
+9. Refraction: sample scene with wave-based UV distortion
+10. Output: blended color with depth-based alpha
+```
+
+## Quality Presets
+
+| Preset | SSR Steps | Wave Octaves | Refraction | Chromatic |
+|--------|-----------|--------------|------------|-----------|
+| Off | 0 | - | 0% | None |
+| Low | 8 | 2 | 2% | None |
+| Medium | 16 | 3 | 4% | None |
+| High | 24 | 3 | 6% | 0.3% |
+| Ultra | 32 | 4 | 8% | 0.6% |
+
+Access: ESC menu → WATER REFRACTION
+
+## Key Parameters (in shader)
+
+```wgsl
+wave_speed: 0.4        // Animation speed
+wave_strength: 0.08    // Normal perturbation intensity
+fresnel_power: 5.0     // Fresnel falloff exponent
+F0: 0.04               // Water reflectivity at normal incidence
+ssr_max_distance: 50.0 // Max SSR ray travel (blocks)
+ssr_thickness: 0.5     // Depth threshold for SSR hit
+```
+
+## Depth Testing
+
+Two-stage depth test for robustness:
+
+1. **Terrain height check**: `if scene_world_pos.y > water_height + 0.5` → skip
+   - Prevents water overlay on blocks above water level
+
+2. **Distance comparison**: `if water_dist < scene_dist + bias` → render water
+   - Uses world-space distance (more robust than NDC depth at distance)
+   - Proportional bias (0.5% of max distance) prevents z-fighting
+
+## Shore Handling
+
+- **Vertical faces**: Skip water on steep viewing angles at water level
+  ```wgsl
+  if (scene_at_water_level && looking_horizontal) { discard; }
+  ```
+- **Shore fade**: Alpha smoothstep based on water depth (0-2 blocks)
+- **Minimum alpha**: 0.7 ensures water always visible
+
+## Fresnel & Reflections
+
+- Fresnel uses mostly-flat normal (70% flat / 30% wave) for stability
+- n_dot_v clamped to 0.85 max to prevent extreme transparency looking down
+- Reflection strength: 35% minimum, 90% maximum
+- Wave normals affect reflection direction but not intensity
+
+## SSR (Screen-Space Reflections)
+
+- Ray march from water surface along reflection direction
+- Binary search refinement (4 iterations) when hit detected
+- Edge fade: smooth falloff at screen boundaries
+- Distance fade: SSR contribution reduces with ray travel distance
+- Fallback: procedural sky gradient when SSR misses
+
+## Common Issues & Fixes
+
+| Issue | Cause | Fix |
+|-------|-------|-----|
+| Water on terrain above sea level | Depth test failing | Terrain height check added |
+| Circular transparent area around player | Fresnel too strong looking down | Clamped n_dot_v, higher min alpha |
+| Bouncy reflections on camera move | Wave normal affecting Fresnel | Separate normals for Fresnel vs reflection |
+| Water level changes with camera Y | NDC depth precision issues | Switched to world-space distance test |
+| Water on vertical shore faces | Ray hits water plane at shore edge | Skip when looking_horizontal at water level |
+
+## Performance Notes
+
+- Single fullscreen pass (3 vertices, no mesh upload)
+- SSR is main cost (ray marching per pixel)
+- OFF preset skips entire water pass (zero GPU cost)
+- Scene texture copy only when water enabled
+
+## Future: Multiple Water Levels
+
+System supports 16 water levels for:
+- Underground lakes at different depths
+- Waterfalls (multiple connected levels)
+- Lava pools (water_type = 1.0)
+
+Currently only sea level (y=32) is used. To add levels:
+```rust
+water_system.set_water_levels(&[
+    (32.0, 0.0),   // Sea level, water
+    (20.0, 0.0),   // Underground lake
+    (10.0, 1.0),   // Lava pool
+]);
+```
