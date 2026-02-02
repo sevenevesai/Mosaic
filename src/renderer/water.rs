@@ -840,10 +840,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let view_dir = -ray_dir;
 
     // Skip drawing water on vertical shore block faces
-    // If scene geometry is at water level (within 1 block) and we're looking at it
-    // from a steep horizontal angle, don't draw water overlay on the vertical face
-    let scene_at_water_level = abs(scene_world_pos.y - hit_height) < 1.2;
-    let looking_horizontal = abs(ray_dir.y) < 0.4; // Steep viewing angle
+    // Only discard if scene geometry is VERY close to water level (within 0.3 blocks)
+    // This catches vertical shore faces but not floors 1 block below water
+    let scene_at_water_level = abs(scene_world_pos.y - hit_height) < 0.3;
+    let looking_horizontal = abs(ray_dir.y) < 0.3; // Very steep horizontal angle
     if (scene_at_water_level && looking_horizontal) {
         discard;
     }
@@ -943,15 +943,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var alpha = mix(0.75, 0.95, depth_factor); // Higher base opacity
     alpha = mix(alpha, 1.0, foam);
 
-    // Shore fade - based on water depth
-    let shore_fade = smoothstep(0.0, 2.0, depth_diff);
+    // Shore fade - only fade at very shallow edges (< 0.5 blocks)
+    // 1-block-deep water should be fully visible
+    let shore_fade = smoothstep(0.0, 0.5, depth_diff);
 
     // High minimum alpha - water should never be transparent/invisible
-    let min_alpha = 0.7;
+    let min_alpha = 0.75;
     let final_alpha = max(min_alpha, alpha) * shore_fade;
 
     // Ensure water is always at least somewhat visible (except at very edge)
-    let final_alpha_clamped = max(final_alpha, shore_fade * 0.6);
+    let final_alpha_clamped = max(final_alpha, shore_fade * 0.7);
 
     return vec4<f32>(final_color, final_alpha_clamped);
 }

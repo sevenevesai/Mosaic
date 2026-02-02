@@ -257,6 +257,9 @@ impl App {
                             if self.settings_menu.is_open {
                                 // Close menu and resume gameplay
                                 self.settings_menu.is_open = false;
+                                // Save settings when closing menu
+                                let settings = self.renderer.collect_settings((self.windowed_size.width, self.windowed_size.height));
+                                settings.save();
                                 if !self.cursor_grabbed {
                                     self.toggle_cursor_grab();
                                 }
@@ -349,6 +352,9 @@ impl App {
                     // Handle menu clicks
                     if state == ElementState::Pressed && button == MouseButton::Left {
                         self.settings_menu.click(&mut self.renderer);
+                        // Save settings immediately after each toggle
+                        let settings = self.renderer.collect_settings((self.windowed_size.width, self.windowed_size.height));
+                        settings.save();
                         // Note: display mode changes are applied at start of next frame
                         // to avoid race conditions with the render pipeline
                     }
