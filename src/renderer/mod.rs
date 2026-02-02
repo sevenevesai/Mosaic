@@ -1290,6 +1290,11 @@ impl Renderer {
         };
         self.dof.set_quality(dof_quality);
 
+        // Apply DoF sub-settings
+        self.dof.params.manual_focus_distance = settings.dof_focus_distance;
+        self.dof.params.aperture = settings.dof_blur_strength;
+        self.dof.params.focus_transition = settings.dof_focus_range;
+
         // Apply water refraction quality setting
         let refraction_quality = match settings.refraction_quality.to_uppercase().as_str() {
             "OFF" => RefractionQuality::Off,
@@ -1324,6 +1329,9 @@ impl Renderer {
             torch_shadows: self.torch_shadows,
             ssao_quality: self.ssao.quality.as_str().to_string(),
             dof_quality: self.dof.quality.as_str().to_string(),
+            dof_focus_distance: self.dof.params.manual_focus_distance,
+            dof_blur_strength: self.dof.params.aperture,
+            dof_focus_range: self.dof.params.focus_transition,
             refraction_quality: self.refraction_quality().as_str().to_string(),
             impostor_quality: self.impostor_renderer.range.as_str().to_string(),
         }

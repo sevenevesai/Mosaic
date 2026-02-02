@@ -29,6 +29,12 @@ pub struct Settings {
     pub ssao_quality: String,
     /// DoF quality preset: OFF, LOW, MEDIUM, HIGH, ULTRA
     pub dof_quality: String,
+    /// DoF focus distance in blocks
+    pub dof_focus_distance: f32,
+    /// DoF blur strength (0.0-1.0)
+    pub dof_blur_strength: f32,
+    /// DoF focus range in blocks
+    pub dof_focus_range: f32,
     /// Water refraction quality preset: OFF, LOW, MEDIUM, HIGH, ULTRA
     pub refraction_quality: String,
     /// Impostor quality preset: OFF, LOW, MEDIUM, HIGH, ULTRA
@@ -53,6 +59,9 @@ impl Default for Settings {
             torch_shadows: false,    // Default OFF for performance
             ssao_quality: "MEDIUM".to_string(), // Default SSAO quality
             dof_quality: "LOW".to_string(),     // Default DoF quality
+            dof_focus_distance: 20.0,           // Default focus distance in blocks
+            dof_blur_strength: 0.5,             // Default aperture (0.0-1.0)
+            dof_focus_range: 10.0,              // Default focus range in blocks
             refraction_quality: "MEDIUM".to_string(), // Default water refraction quality
             impostor_quality: "MEDIUM".to_string(), // Default impostor quality
         }
@@ -155,6 +164,21 @@ impl Settings {
                     "dof_quality" => {
                         settings.dof_quality = value.to_string();
                     }
+                    "dof_focus_distance" => {
+                        if let Ok(v) = value.parse() {
+                            settings.dof_focus_distance = v;
+                        }
+                    }
+                    "dof_blur_strength" => {
+                        if let Ok(v) = value.parse() {
+                            settings.dof_blur_strength = v;
+                        }
+                    }
+                    "dof_focus_range" => {
+                        if let Ok(v) = value.parse() {
+                            settings.dof_focus_range = v;
+                        }
+                    }
                     "refraction_quality" => {
                         settings.refraction_quality = value.to_string();
                     }
@@ -189,6 +213,9 @@ impl Settings {
              torch_shadows={}\n\
              ssao_quality={}\n\
              dof_quality={}\n\
+             dof_focus_distance={}\n\
+             dof_blur_strength={}\n\
+             dof_focus_range={}\n\
              refraction_quality={}\n\
              impostor_quality={}\n",
             self.render_distance,
@@ -206,6 +233,9 @@ impl Settings {
             self.torch_shadows,
             self.ssao_quality,
             self.dof_quality,
+            self.dof_focus_distance,
+            self.dof_blur_strength,
+            self.dof_focus_range,
             self.refraction_quality,
             self.impostor_quality,
         );
