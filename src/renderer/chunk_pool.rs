@@ -278,20 +278,21 @@ impl ChunkPool {
         (vertex_used, index_used)
     }
 
-    /// Evict chunks that are not in the visible set to make room for new ones
+    /// Evict chunks that are not in the visible set
+    /// This MUST remove all non-visible chunks to prevent ghost meshes from accumulating
     pub fn evict_non_visible(&mut self, visible: &[ChunkPos]) {
         use std::collections::HashSet;
         let visible_set: HashSet<_> = visible.iter().collect();
 
-        // Find chunks to evict (not in visible set)
+        // Find ALL chunks to evict (not in visible set)
         let to_evict: Vec<ChunkPos> = self.chunk_slots.keys()
             .filter(|pos| !visible_set.contains(pos))
             .copied()
             .collect();
 
-        // Evict up to half the non-visible chunks to make room
-        let evict_count = to_evict.len().min(MAX_CHUNK_SLOTS as usize / 4);
-        for pos in to_evict.into_iter().take(evict_count) {
+        // Evict ALL non-visible chunks immediately
+        // Throttling this was causing ghost meshes to accumulate forever
+        for pos in to_evict {
             self.remove_chunk(pos);
         }
     }

@@ -2291,15 +2291,14 @@ impl Renderer {
             }
         }
 
-        // Evict chunks beyond render_distance from pool (they'll be impostors)
-        // Also evict non-visible chunks if pool is getting full
-        if uploads_this_frame == 0 {
-            let within_render: Vec<_> = world.visible_meshes()
-                .filter(|m| (m.pos.center() - camera_pos).length() <= render_dist_blocks)
-                .map(|m| m.pos)
-                .collect();
-            self.chunk_pool.evict_non_visible(&within_render);
-        }
+        // ALWAYS evict chunks that are no longer in the world or beyond render_distance
+        // This is critical - when the world unloads chunks, the GPU pool must remove them too
+        // Otherwise ghost meshes accumulate and keep rendering forever
+        let within_render: Vec<_> = world.visible_meshes()
+            .filter(|m| (m.pos.center() - camera_pos).length() <= render_dist_blocks)
+            .map(|m| m.pos)
+            .collect();
+        self.chunk_pool.evict_non_visible(&within_render);
     }
 
     /// Get chunk pool stats for debug display
