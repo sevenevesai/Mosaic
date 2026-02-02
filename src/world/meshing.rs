@@ -494,10 +494,14 @@ fn build_chunk_mesh_simple(
 fn get_tile_uvs(tex_idx: u32) -> ([f32; 2], [f32; 2], [f32; 2], [f32; 2]) {
     let tiles_per_row = 8u32; // 8x8 grid of 256x256 tiles
     let tile_size = 1.0 / tiles_per_row as f32;
-    let u0 = (tex_idx % tiles_per_row) as f32 * tile_size;
-    let v0 = (tex_idx / tiles_per_row) as f32 * tile_size;
-    let u1 = u0 + tile_size;
-    let v1 = v0 + tile_size;
+    // Half-texel inset to prevent bilinear filtering from sampling neighboring tiles
+    // Atlas is 2048x2048, so half texel = 0.5/2048 ≈ 0.000244
+    // Use slightly larger inset to also help with mipmapping
+    let inset = 0.001; // ~2 texels of padding
+    let u0 = (tex_idx % tiles_per_row) as f32 * tile_size + inset;
+    let v0 = (tex_idx / tiles_per_row) as f32 * tile_size + inset;
+    let u1 = u0 + tile_size - inset * 2.0;
+    let v1 = v0 + tile_size - inset * 2.0;
     // Return: bottom-left, bottom-right, top-right, top-left
     ([u0, v1], [u1, v1], [u1, v0], [u0, v0])
 }
@@ -693,14 +697,15 @@ fn add_foliage_blocks(
                 let by = world_origin.y + y as f32 * s;
                 let bz = world_origin.z + z as f32 * s;
 
-                // Get texture UVs (same pattern as get_tile_uvs)
+                // Get texture UVs with half-texel inset (same pattern as get_tile_uvs)
                 let tex_idx = block.texture_indices()[0];
                 let tiles_per_row = 8u32;
                 let tile_size = 1.0 / tiles_per_row as f32;
-                let u0 = (tex_idx % tiles_per_row) as f32 * tile_size;
-                let v0 = (tex_idx / tiles_per_row) as f32 * tile_size;
-                let u1 = u0 + tile_size;
-                let v1 = v0 + tile_size;
+                let inset = 0.001; // ~2 texels of padding to prevent bleeding
+                let u0 = (tex_idx % tiles_per_row) as f32 * tile_size + inset;
+                let v0 = (tex_idx / tiles_per_row) as f32 * tile_size + inset;
+                let u1 = u0 + tile_size - inset * 2.0;
+                let v1 = v0 + tile_size - inset * 2.0;
                 let uv0 = [u0, v1]; // bottom-left
                 let uv1 = [u1, v1]; // bottom-right
                 let uv2 = [u1, v0]; // top-right
@@ -829,14 +834,15 @@ fn add_emissive_blocks(
                 let by = world_origin.y + y as f32 * s;
                 let bz = world_origin.z + z as f32 * s;
 
-                // Get texture UVs
+                // Get texture UVs with half-texel inset
                 let tex_idx = block.texture_indices()[0];
                 let tiles_per_row = 8u32;
                 let tile_size = 1.0 / tiles_per_row as f32;
-                let u0 = (tex_idx % tiles_per_row) as f32 * tile_size;
-                let v0 = (tex_idx / tiles_per_row) as f32 * tile_size;
-                let u1 = u0 + tile_size;
-                let v1 = v0 + tile_size;
+                let inset = 0.001; // ~2 texels of padding to prevent bleeding
+                let u0 = (tex_idx % tiles_per_row) as f32 * tile_size + inset;
+                let v0 = (tex_idx / tiles_per_row) as f32 * tile_size + inset;
+                let u1 = u0 + tile_size - inset * 2.0;
+                let v1 = v0 + tile_size - inset * 2.0;
                 let uv0 = [u0, v1]; // bottom-left
                 let uv1 = [u1, v1]; // bottom-right
                 let uv2 = [u1, v0]; // top-right
@@ -2139,13 +2145,14 @@ fn emit_greedy_quad(
 ) {
     let base_index = vertices.len() as u32;
 
-    // Get UVs from texture atlas
+    // Get UVs from texture atlas with half-texel inset to prevent bleeding
     let tiles_per_row = 8u32; // 8x8 grid of 256x256 tiles
     let tile_size = 1.0 / tiles_per_row as f32;
-    let uv_u0 = (texture_idx % tiles_per_row) as f32 * tile_size;
-    let uv_v0 = (texture_idx / tiles_per_row) as f32 * tile_size;
-    let uv_u1 = uv_u0 + tile_size;
-    let uv_v1 = uv_v0 + tile_size;
+    let inset = 0.001; // ~2 texels of padding to prevent bleeding
+    let uv_u0 = (texture_idx % tiles_per_row) as f32 * tile_size + inset;
+    let uv_v0 = (texture_idx / tiles_per_row) as f32 * tile_size + inset;
+    let uv_u1 = uv_u0 + tile_size - inset * 2.0;
+    let uv_v1 = uv_v0 + tile_size - inset * 2.0;
     // UV corners: bottom-left, bottom-right, top-right, top-left
     let uvs = [[uv_u0, uv_v1], [uv_u1, uv_v1], [uv_u1, uv_v0], [uv_u0, uv_v0]];
 

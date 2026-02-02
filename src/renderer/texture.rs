@@ -252,9 +252,10 @@ impl TextureAtlas {
         let mut atlas: ImageBuffer<Rgba<u8>, Vec<u8>> =
             ImageBuffer::new(atlas_size, atlas_size);
 
-        // Fill with magenta (missing texture indicator)
+        // Fill with dark color that blends better if UV bleeding occurs
+        // (was magenta [255,0,255] which was very visible through mesh cracks)
         for pixel in atlas.pixels_mut() {
-            *pixel = Rgba([255, 0, 255, 255]);
+            *pixel = Rgba([20, 25, 20, 255]); // Dark greenish-grey to blend with grass
         }
 
         // Get the executable's directory for asset resolution
