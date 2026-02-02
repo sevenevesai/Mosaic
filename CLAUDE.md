@@ -27,6 +27,8 @@ cargo build --release
 src/
 ├── app.rs           # Main loop, input handling
 ├── lib.rs           # Constants: RENDER_DISTANCE, LOD thresholds, physics
+├── audio/
+│   └── mod.rs       # 3D spatial audio, material sounds, ambient system (~900 LOC)
 ├── inventory/
 │   ├── mod.rs       # Module exports
 │   ├── item.rs      # Item types, tags, rarity, stacking

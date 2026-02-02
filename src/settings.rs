@@ -39,6 +39,14 @@ pub struct Settings {
     pub refraction_quality: String,
     /// Impostor quality preset: OFF, LOW, MEDIUM, HIGH, ULTRA
     pub impostor_quality: String,
+
+    // === AUDIO SETTINGS ===
+    /// Master volume (0.0 - 1.0)
+    pub audio_master: f32,
+    /// Sound effects volume (0.0 - 1.0)
+    pub audio_sfx: f32,
+    /// Ambient sounds volume (0.0 - 1.0)
+    pub audio_ambient: f32,
 }
 
 impl Default for Settings {
@@ -64,6 +72,10 @@ impl Default for Settings {
             dof_focus_range: 10.0,              // Default focus range in blocks
             refraction_quality: "MEDIUM".to_string(), // Default water refraction quality
             impostor_quality: "MEDIUM".to_string(), // Default impostor quality
+            // Audio defaults
+            audio_master: 0.8,   // 80% master volume
+            audio_sfx: 1.0,      // 100% SFX
+            audio_ambient: 0.6,  // 60% ambient
         }
     }
 }
@@ -185,6 +197,22 @@ impl Settings {
                     "impostor_quality" => {
                         settings.impostor_quality = value.to_string();
                     }
+                    // Audio settings
+                    "audio_master" => {
+                        if let Ok(v) = value.parse() {
+                            settings.audio_master = v;
+                        }
+                    }
+                    "audio_sfx" => {
+                        if let Ok(v) = value.parse() {
+                            settings.audio_sfx = v;
+                        }
+                    }
+                    "audio_ambient" => {
+                        if let Ok(v) = value.parse() {
+                            settings.audio_ambient = v;
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -217,7 +245,11 @@ impl Settings {
              dof_blur_strength={}\n\
              dof_focus_range={}\n\
              refraction_quality={}\n\
-             impostor_quality={}\n",
+             impostor_quality={}\n\
+             # Audio Settings\n\
+             audio_master={}\n\
+             audio_sfx={}\n\
+             audio_ambient={}\n",
             self.render_distance,
             self.shadow_mode,
             self.bloom_enabled,
@@ -238,6 +270,9 @@ impl Settings {
             self.dof_focus_range,
             self.refraction_quality,
             self.impostor_quality,
+            self.audio_master,
+            self.audio_sfx,
+            self.audio_ambient,
         );
 
         if let Err(e) = fs::write(Self::FILE_PATH, content) {

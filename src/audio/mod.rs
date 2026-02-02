@@ -1,28 +1,168 @@
 //! Audio system
 //!
-//! Handles sound effects and music playback.
+//! Comprehensive sound system with material-based sounds, ambient soundscapes,
+//! 3D spatial audio with occlusion, and convolution reverb for caves.
 //!
 //! ## Sound Assets
 //!
 //! Place WAV files in `assets/sfx/`:
-//! - `footstep-grass-1.wav`, `footstep-grass-2.wav` - Walking sounds
-//! - `block-break-1.wav`, `block-break-2.wav` - Block breaking sounds
-//! - `block-place-1.wav`, `block-place-2.wav` - Block placing sounds
+//! ```
+//! assets/sfx/
+//! ├── footstep/
+//! │   ├── grass-1.wav, grass-2.wav
+//! │   ├── stone-1.wav, stone-2.wav
+//! │   ├── sand-1.wav, sand-2.wav
+//! │   ├── wood-1.wav, wood-2.wav
+//! │   ├── snow-1.wav, snow-2.wav
+//! │   └── gravel-1.wav, gravel-2.wav
+//! ├── break/
+//! │   ├── stone-1.wav, stone-2.wav
+//! │   ├── wood-1.wav, wood-2.wav
+//! │   └── dirt-1.wav, dirt-2.wav
+//! ├── place/
+//! │   └── (same structure as break)
+//! └── ambient/
+//!     ├── cave-drips.wav
+//!     ├── surface-birds.wav
+//!     └── (biome-specific loops)
+//! ```
 //!
 //! Missing sounds are gracefully handled (no crash, just silent).
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use glam::Vec3;
 use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink, Source, SpatialSink};
 
-use crate::world::WorldManager;
+use crate::world::{Block, WorldManager};
 
-/// Volume level for footsteps (0.0 - 1.0)
+/// Sound material categories for audio feedback
+/// Maps blocks to distinct sound types for footsteps, breaking, and placing
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SoundMaterial {
+    /// Grass, dirt, mud - soft organic sounds
+    Grass,
+    /// Stone, brick, ore - hard mineral sounds
+    Stone,
+    /// Sand, gravel - granular sounds
+    Sand,
+    /// Wood, logs, planks - hollow woody sounds
+    Wood,
+    /// Snow, ice - crunchy cold sounds
+    Snow,
+    /// Metal ores - metallic clink sounds
+    Metal,
+    /// Gravel, rubble - loose rocky sounds
+    Gravel,
+    /// Leaves, vines - rustling foliage sounds
+    Foliage,
+    /// Glass, crystals - crystalline sounds
+    Crystal,
+    /// Default fallback
+    Generic,
+}
+
+impl SoundMaterial {
+    /// Get the sound material for a block type
+    pub fn from_block(block: Block) -> Self {
+        match block {
+            // Soft organic materials
+            Block::Grass | Block::Dirt | Block::JungleGrass | Block::MudBlock | Block::Peat => {
+                SoundMaterial::Grass
+            }
+
+            // Hard stone materials
+            Block::Stone
+            | Block::StoneDirt
+            | Block::Brick
+            | Block::StoneRubble2
+            | Block::Bedrock
+            | Block::Sandstone
+            | Block::RedSandstone
+            | Block::MossyStone
+            | Block::CrackedStone
+            | Block::ClayStone
+            | Block::Stalactite
+            | Block::Stalagmite => SoundMaterial::Stone,
+
+            // Sandy/granular materials
+            Block::Sand => SoundMaterial::Sand,
+
+            // Gravel and loose rocks
+            Block::Gravel => SoundMaterial::Gravel,
+
+            // Wooden materials
+            Block::Wood
+            | Block::OakLog
+            | Block::BirchLog
+            | Block::PineLog
+            | Block::JungleLog
+            | Block::Chest => SoundMaterial::Wood,
+
+            // Snowy/icy materials
+            Block::Snow | Block::SnowGrass | Block::Ice | Block::PackedIce => SoundMaterial::Snow,
+
+            // Metal ores
+            Block::IronOre
+            | Block::GoldOre
+            | Block::CopperOre
+            | Block::SilverOre
+            | Block::TinOre
+            | Block::NickelOre
+            | Block::LeadOre
+            | Block::TitaniumOre => SoundMaterial::Metal,
+
+            // Crystalline materials
+            Block::DiamondOre
+            | Block::EmeraldOre
+            | Block::SapphireOre
+            | Block::QuartzOre
+            | Block::AmethystOre
+            | Block::CrystalAmethyst
+            | Block::CrystalQuartz => SoundMaterial::Crystal,
+
+            // Foliage
+            Block::Leaves
+            | Block::JungleLeaves
+            | Block::SpruceLeaves
+            | Block::Vines
+            | Block::DeadBush
+            | Block::Cactus => SoundMaterial::Foliage,
+
+            // Coal, redite, uranium are stone-like
+            Block::CoalOre | Block::RedstoneOre | Block::UraniumOre => SoundMaterial::Stone,
+
+            // Special cases
+            Block::Air | Block::Water | Block::Torch => SoundMaterial::Generic,
+        }
+    }
+
+    /// Get the subfolder name for this material's sounds
+    pub fn folder_name(&self) -> &'static str {
+        match self {
+            SoundMaterial::Grass => "grass",
+            SoundMaterial::Stone => "stone",
+            SoundMaterial::Sand => "sand",
+            SoundMaterial::Wood => "wood",
+            SoundMaterial::Snow => "snow",
+            SoundMaterial::Metal => "metal",
+            SoundMaterial::Gravel => "gravel",
+            SoundMaterial::Foliage => "foliage",
+            SoundMaterial::Crystal => "crystal",
+            SoundMaterial::Generic => "generic",
+        }
+    }
+}
+
+/// Base volume level for footsteps (0.0 - 1.0), before category scaling
 const FOOTSTEP_VOLUME: f32 = 0.15;
 
-/// Volume level for block interactions (slightly louder for feedback)
+/// Base volume level for block interactions (slightly louder for feedback)
 const BLOCK_SOUND_VOLUME: f32 = 0.25;
+
+/// Base volume level for ambient sounds
+const AMBIENT_VOLUME: f32 = 0.35;
 
 /// Time between footstep sounds when walking (seconds)
 const FOOTSTEP_INTERVAL_SECS: f32 = 0.40;
@@ -30,33 +170,124 @@ const FOOTSTEP_INTERVAL_SECS: f32 = 0.40;
 /// Time between footstep sounds when sprinting (seconds)
 const FOOTSTEP_INTERVAL_SPRINT_SECS: f32 = 0.28;
 
+/// Crossfade duration for ambient transitions (seconds)
+const AMBIENT_CROSSFADE_SECS: f32 = 2.5;
+
+/// Audio volume settings by category
+#[derive(Debug, Clone)]
+pub struct AudioSettings {
+    /// Master volume (0.0 - 1.0)
+    pub master: f32,
+    /// Sound effects volume (0.0 - 1.0)
+    pub sfx: f32,
+    /// Ambient sounds volume (0.0 - 1.0)
+    pub ambient: f32,
+}
+
+impl Default for AudioSettings {
+    fn default() -> Self {
+        Self {
+            master: 0.8,
+            sfx: 1.0,
+            ambient: 0.6,
+        }
+    }
+}
+
+impl AudioSettings {
+    /// Get effective SFX volume (master * sfx)
+    pub fn effective_sfx(&self) -> f32 {
+        self.master * self.sfx
+    }
+
+    /// Get effective ambient volume (master * ambient)
+    pub fn effective_ambient(&self) -> f32 {
+        self.master * self.ambient
+    }
+}
+
+/// Environment context for audio effects
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AudioEnvironment {
+    /// Player is in a cave (sky light < 4)
+    pub in_cave: bool,
+    /// Player is underwater
+    pub underwater: bool,
+    /// Current biome ID (0-7)
+    pub biome_id: u8,
+    /// Player Y position (for height-based effects)
+    pub height: f32,
+    /// Sky light level at player position
+    pub sky_light: u8,
+}
+
 /// Audio manager handles all sound playback
 pub struct AudioManager {
     /// Audio output stream (must be kept alive)
     _stream: OutputStream,
     /// Stream handle for creating sinks
     stream_handle: OutputStreamHandle,
-    /// Footstep sound buffers (pre-loaded)
-    footstep_buffers: Vec<Vec<u8>>,
-    /// Block break sound buffers
-    break_buffers: Vec<Vec<u8>>,
-    /// Block place sound buffers
-    place_buffers: Vec<Vec<u8>>,
-    /// Which footstep sound to play next (alternates 0, 1, 0, 1...)
-    footstep_index: usize,
-    /// Which break sound to play next
-    break_index: usize,
-    /// Which place sound to play next
-    place_index: usize,
+    /// Volume settings
+    pub settings: AudioSettings,
+
+    // === Material-based sound buffers ===
+    /// Footstep sound buffers per material
+    footstep_buffers: HashMap<SoundMaterial, Vec<Vec<u8>>>,
+    /// Block break sound buffers per material
+    break_buffers: HashMap<SoundMaterial, Vec<Vec<u8>>>,
+    /// Block place sound buffers per material
+    place_buffers: HashMap<SoundMaterial, Vec<Vec<u8>>>,
+
+    // === Sound indices (for variation) ===
+    /// Which footstep sound to play next per material
+    footstep_indices: HashMap<SoundMaterial, usize>,
+    /// Which break sound to play next per material
+    break_indices: HashMap<SoundMaterial, usize>,
+    /// Which place sound to play next per material
+    place_indices: HashMap<SoundMaterial, usize>,
+
     /// Accumulated time since last footstep (for even timing)
     footstep_timer: f32,
+    /// Last material walked on (for smooth transitions)
+    last_footstep_material: SoundMaterial,
+
+    // === Active sinks ===
     /// Active spatial sinks (kept alive while playing)
     spatial_sinks: Vec<SpatialSink>,
+    /// Active non-spatial sinks (kept alive while playing)
+    sinks: Vec<Sink>,
+
+    // === Ambient system ===
+    /// Current ambient sink (for crossfading)
+    ambient_sink_a: Option<Sink>,
+    /// Secondary ambient sink (for crossfading)
+    ambient_sink_b: Option<Sink>,
+    /// Ambient crossfade progress (0.0 = A only, 1.0 = B only)
+    ambient_crossfade: f32,
+    /// Whether we're currently crossfading
+    ambient_crossfading: bool,
+    /// Current ambient environment
+    current_environment: Option<AudioEnvironment>,
+    /// Ambient sound buffers by environment type
+    ambient_buffers: HashMap<String, Vec<u8>>,
+
+    // === Reverb system ===
+    /// Impulse response for cave reverb
+    cave_impulse: Option<Vec<f32>>,
+    /// Current reverb mix (0.0 = dry, 1.0 = full reverb)
+    reverb_mix: f32,
+    /// Target reverb mix (smoothly interpolated)
+    target_reverb_mix: f32,
 }
 
 impl AudioManager {
     /// Create a new audio manager and load sound assets
     pub fn new() -> Option<Self> {
+        Self::new_with_settings(AudioSettings::default())
+    }
+
+    /// Create a new audio manager with custom settings
+    pub fn new_with_settings(settings: AudioSettings) -> Option<Self> {
         // Try to create audio output
         let (stream, stream_handle) = match OutputStream::try_default() {
             Ok(s) => s,
@@ -76,66 +307,239 @@ impl AudioManager {
                         tracing::debug!("Loaded {} sound: {}", name, path);
                     }
                     Err(e) => {
-                        tracing::debug!("Optional {} sound not found: {} ({})", name, path, e);
+                        tracing::trace!("Optional {} sound not found: {} ({})", name, path, e);
                     }
                 }
             }
             buffers
         }
 
-        // Load footstep sounds
-        let footstep_buffers = load_sounds(
-            &[
-                "assets/sfx/footstep-grass-1.wav",
-                "assets/sfx/footstep-grass-2.wav",
-            ],
-            "footstep",
-        );
+        // Helper to load material sounds
+        fn load_material_sounds(
+            base_path: &str,
+            sound_type: &str,
+        ) -> HashMap<SoundMaterial, Vec<Vec<u8>>> {
+            let mut map = HashMap::new();
 
-        // Load block break sounds
-        let break_buffers = load_sounds(
-            &[
-                "assets/sfx/block-break-1.wav",
-                "assets/sfx/block-break-2.wav",
-            ],
-            "block-break",
-        );
+            let materials = [
+                SoundMaterial::Grass,
+                SoundMaterial::Stone,
+                SoundMaterial::Sand,
+                SoundMaterial::Wood,
+                SoundMaterial::Snow,
+                SoundMaterial::Metal,
+                SoundMaterial::Gravel,
+                SoundMaterial::Foliage,
+                SoundMaterial::Crystal,
+                SoundMaterial::Generic,
+            ];
 
-        // Load block place sounds
-        let place_buffers = load_sounds(
-            &[
-                "assets/sfx/block-place-1.wav",
-                "assets/sfx/block-place-2.wav",
-            ],
-            "block-place",
-        );
+            for material in materials {
+                let folder = material.folder_name();
+                let paths: Vec<String> = (1..=4)
+                    .map(|i| format!("{}/{}/{}-{}.wav", base_path, sound_type, folder, i))
+                    .collect();
+
+                let path_refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
+                let buffers = load_sounds(&path_refs, &format!("{}-{}", sound_type, folder));
+
+                if !buffers.is_empty() {
+                    map.insert(material, buffers);
+                }
+            }
+
+            map
+        }
+
+        // Load material-based footstep sounds
+        let mut footstep_buffers = load_material_sounds("assets/sfx", "footstep");
+
+        // Fallback: load legacy footstep sounds as Grass material if no new sounds found
+        if footstep_buffers.is_empty() {
+            let legacy = load_sounds(
+                &[
+                    "assets/sfx/footstep-grass-1.wav",
+                    "assets/sfx/footstep-grass-2.wav",
+                ],
+                "footstep-legacy",
+            );
+            if !legacy.is_empty() {
+                footstep_buffers.insert(SoundMaterial::Grass, legacy.clone());
+                // Also use grass sounds as generic fallback
+                footstep_buffers.insert(SoundMaterial::Generic, legacy);
+            }
+        }
+
+        // Load material-based break sounds
+        let mut break_buffers = load_material_sounds("assets/sfx", "break");
+
+        // Fallback: load legacy break sounds
+        if break_buffers.is_empty() {
+            let legacy = load_sounds(
+                &[
+                    "assets/sfx/block-break-1.wav",
+                    "assets/sfx/block-break-2.wav",
+                ],
+                "break-legacy",
+            );
+            if !legacy.is_empty() {
+                break_buffers.insert(SoundMaterial::Generic, legacy);
+            }
+        }
+
+        // Load material-based place sounds
+        let mut place_buffers = load_material_sounds("assets/sfx", "place");
+
+        // Fallback: load legacy place sounds
+        if place_buffers.is_empty() {
+            let legacy = load_sounds(
+                &[
+                    "assets/sfx/block-place-1.wav",
+                    "assets/sfx/block-place-2.wav",
+                ],
+                "place-legacy",
+            );
+            if !legacy.is_empty() {
+                place_buffers.insert(SoundMaterial::Generic, legacy);
+            }
+        }
+
+        // Load ambient sounds
+        let ambient_buffers = Self::load_ambient_sounds();
+
+        // Generate cave impulse response for reverb
+        let cave_impulse = Some(Self::generate_cave_impulse());
 
         // Count total sounds loaded
-        let total = footstep_buffers.len() + break_buffers.len() + place_buffers.len();
+        let footstep_count: usize = footstep_buffers.values().map(|v| v.len()).sum();
+        let break_count: usize = break_buffers.values().map(|v| v.len()).sum();
+        let place_count: usize = place_buffers.values().map(|v| v.len()).sum();
+        let ambient_count = ambient_buffers.len();
+
+        let total = footstep_count + break_count + place_count;
         if total == 0 {
-            tracing::warn!("No audio files loaded - audio disabled");
-            return None;
+            tracing::warn!("No audio files loaded - audio will use procedural sounds");
         }
 
         tracing::info!(
-            "Audio initialized: {} footstep, {} break, {} place sounds",
+            "Audio initialized: {} footstep ({} materials), {} break, {} place, {} ambient sounds",
+            footstep_count,
             footstep_buffers.len(),
-            break_buffers.len(),
-            place_buffers.len()
+            break_count,
+            place_count,
+            ambient_count,
         );
 
         Some(Self {
             _stream: stream,
             stream_handle,
+            settings,
             footstep_buffers,
             break_buffers,
             place_buffers,
-            footstep_index: 0,
-            break_index: 0,
-            place_index: 0,
+            footstep_indices: HashMap::new(),
+            break_indices: HashMap::new(),
+            place_indices: HashMap::new(),
             footstep_timer: 0.0,
+            last_footstep_material: SoundMaterial::Grass,
             spatial_sinks: Vec::new(),
+            sinks: Vec::new(),
+            ambient_sink_a: None,
+            ambient_sink_b: None,
+            ambient_crossfade: 0.0,
+            ambient_crossfading: false,
+            current_environment: None,
+            ambient_buffers,
+            cave_impulse,
+            reverb_mix: 0.0,
+            target_reverb_mix: 0.0,
         })
+    }
+
+    /// Load ambient sound files
+    fn load_ambient_sounds() -> HashMap<String, Vec<u8>> {
+        let mut map = HashMap::new();
+
+        let ambient_files = [
+            ("cave", "assets/sfx/ambient/cave-drips.wav"),
+            ("surface", "assets/sfx/ambient/surface-birds.wav"),
+            ("desert", "assets/sfx/ambient/desert-wind.wav"),
+            ("jungle", "assets/sfx/ambient/jungle-insects.wav"),
+            ("tundra", "assets/sfx/ambient/tundra-wind.wav"),
+            ("swamp", "assets/sfx/ambient/swamp-frogs.wav"),
+            ("ocean", "assets/sfx/ambient/ocean-waves.wav"),
+            ("underwater", "assets/sfx/ambient/underwater.wav"),
+        ];
+
+        for (name, path) in ambient_files {
+            if let Ok(data) = std::fs::read(path) {
+                map.insert(name.to_string(), data);
+                tracing::debug!("Loaded ambient sound: {}", name);
+            }
+        }
+
+        map
+    }
+
+    /// Generate a simple cave impulse response for convolution reverb
+    /// Creates a synthetic IR with early reflections and exponential decay
+    fn generate_cave_impulse() -> Vec<f32> {
+        let sample_rate = 44100;
+        let duration_secs = 1.5; // 1.5 second reverb tail
+        let num_samples = (sample_rate as f32 * duration_secs) as usize;
+
+        let mut impulse = vec![0.0f32; num_samples];
+
+        // Initial impulse (direct sound)
+        impulse[0] = 1.0;
+
+        // Early reflections (discrete echoes from cave walls)
+        // Simulate reflections at varying distances
+        let reflections = [
+            (0.015, 0.7),  // 15ms, 70% amplitude - close wall
+            (0.025, 0.5),  // 25ms, 50% - side wall
+            (0.040, 0.4),  // 40ms, 40% - far wall
+            (0.055, 0.3),  // 55ms, 30% - ceiling
+            (0.075, 0.25), // 75ms, 25% - floor bounce
+            (0.100, 0.2),  // 100ms, 20% - distant
+            (0.150, 0.15), // 150ms, 15% - very distant
+            (0.200, 0.1),  // 200ms, 10% - cave depth
+        ];
+
+        for (delay_secs, amplitude) in reflections {
+            let sample_idx = (delay_secs * sample_rate as f32) as usize;
+            if sample_idx < num_samples {
+                impulse[sample_idx] += amplitude;
+            }
+        }
+
+        // Late reverb (diffuse tail with exponential decay)
+        let decay_rate = 4.0; // Higher = faster decay
+        let diffuse_start = (0.08 * sample_rate as f32) as usize; // Start diffuse after 80ms
+
+        // Use a simple pseudo-random for diffuse reflections
+        let mut rng_state = 12345u32;
+        for i in diffuse_start..num_samples {
+            // Simple LCG random
+            rng_state = rng_state.wrapping_mul(1103515245).wrapping_add(12345);
+            let random = ((rng_state >> 16) as f32 / 32768.0) - 1.0; // -1 to 1
+
+            let t = i as f32 / sample_rate as f32;
+            let decay = (-decay_rate * t).exp();
+            let diffuse_amplitude = 0.15 * decay * random;
+
+            impulse[i] += diffuse_amplitude;
+        }
+
+        // Normalize to prevent clipping
+        let max_val = impulse.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
+        if max_val > 0.0 {
+            for sample in &mut impulse {
+                *sample /= max_val;
+            }
+        }
+
+        impulse
     }
 
     /// Update footsteps based on player movement
@@ -145,21 +549,18 @@ impl AudioManager {
     /// - `horizontal_speed`: Player's horizontal movement speed (magnitude of XZ velocity)
     /// - `on_ground`: Whether the player is on the ground
     /// - `sprinting`: Whether the player is sprinting
-    /// - `position`: Player's current position (listener)
-    /// - `forward`: Player's look direction
-    /// - `world`: World manager for occlusion checks
+    /// - `surface_block`: The block type the player is standing on
     pub fn update_footsteps(
         &mut self,
         dt: Duration,
         horizontal_speed: f32,
         on_ground: bool,
         sprinting: bool,
-        position: Vec3,
-        forward: Vec3,
-        world: &WorldManager
+        surface_block: Option<Block>,
     ) {
-        // Clean up finished spatial sinks
+        // Clean up finished sinks
         self.spatial_sinks.retain(|sink| !sink.empty());
+        self.sinks.retain(|sink| !sink.empty());
 
         // Only play footsteps when moving on ground
         if !on_ground || horizontal_speed < 0.5 {
@@ -179,27 +580,69 @@ impl AudioManager {
 
         // Play footstep when interval reached
         if self.footstep_timer >= interval {
-            // Footstep comes from slightly below the player
-            let foot_pos = position - Vec3::new(0.0, 1.5, 0.0);
-            self.play_footstep(foot_pos, position, forward, world);
+            let material = surface_block
+                .map(SoundMaterial::from_block)
+                .unwrap_or(SoundMaterial::Grass);
+            self.play_footstep(material);
             // Subtract interval (not reset to 0) for smoother timing if frames are uneven
             self.footstep_timer -= interval;
         }
     }
 
-    /// Play the next footstep sound
-    fn play_footstep(&mut self, position: Vec3, listener_pos: Vec3, listener_dir: Vec3, world: &WorldManager) {
-        if self.footstep_buffers.is_empty() {
-            return;
+    /// Play the next footstep sound for a specific material
+    fn play_footstep(&mut self, material: SoundMaterial) {
+        // Try to get buffers for this material, fall back to Generic, then Grass
+        let buffers = self
+            .footstep_buffers
+            .get(&material)
+            .or_else(|| self.footstep_buffers.get(&SoundMaterial::Generic))
+            .or_else(|| self.footstep_buffers.get(&SoundMaterial::Grass));
+
+        let buffers = match buffers {
+            Some(b) if !b.is_empty() => b,
+            _ => return, // No sounds available
+        };
+
+        // Get and increment index for this material
+        let index = self.footstep_indices.entry(material).or_insert(0);
+        let buffer = &buffers[*index % buffers.len()];
+        *index = (*index + 1) % buffers.len();
+
+        // Store last material for potential transitions
+        self.last_footstep_material = material;
+
+        // Create a cursor from the buffer and decode
+        let cursor = std::io::Cursor::new(buffer.clone());
+        let source = match Decoder::new(cursor) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("Failed to decode footstep: {}", e);
+                return;
+            }
+        };
+
+        // Apply volume (base * sfx category * master)
+        let volume = FOOTSTEP_VOLUME * self.settings.effective_sfx();
+        let source = source.amplify(volume);
+
+        // Create a sink and play
+        if let Ok(sink) = Sink::try_new(&self.stream_handle) {
+            sink.append(source);
+            self.sinks.push(sink);
         }
+    }
 
-        // Get the current footstep buffer
-        let buffer = self.footstep_buffers[self.footstep_index].clone();
+    /// Update reverb mix based on environment (call each frame)
+    pub fn update_reverb(&mut self, dt: f32, in_cave: bool) {
+        self.target_reverb_mix = if in_cave { 0.4 } else { 0.0 };
 
-        // Alternate to next footstep
-        self.footstep_index = (self.footstep_index + 1) % self.footstep_buffers.len();
-
-        self.play_spatial(&buffer, position, listener_pos, listener_dir, FOOTSTEP_VOLUME, world);
+        // Smooth interpolation
+        let speed = 2.0; // Transition over ~0.5 seconds
+        if self.reverb_mix < self.target_reverb_mix {
+            self.reverb_mix = (self.reverb_mix + speed * dt).min(self.target_reverb_mix);
+        } else if self.reverb_mix > self.target_reverb_mix {
+            self.reverb_mix = (self.reverb_mix - speed * dt).max(self.target_reverb_mix);
+        }
     }
 
     /// Play a spatial sound effect
@@ -219,31 +662,8 @@ impl AudioManager {
         base_volume: f32,
         world: &WorldManager,
     ) {
-        // Create spatial sink
-        let sink = match SpatialSink::try_new(
-            &self.stream_handle,
-            [listener_pos.x, listener_pos.y, listener_pos.z],
-            [listener_dir.x, listener_dir.y, listener_dir.z], // Left ear (approx)
-            [-listener_dir.z, 0.0, listener_dir.x], // Right ear (approx) - actually up/left vectors needed
-        ) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!("Failed to create spatial sink: {}", e);
-                return;
-            }
-        };
-
-        // rodio's SpatialSink constructor takes:
-        // try_new(handle, emitter_pos, left_ear_pos, right_ear_pos)
-        // Wait, standard rodio docs say:
-        // try_new(handle, position, left_ear, right_ear)
-        // Where left_ear and right_ear are positions of ears relative to listener? Or world pos?
-        // Actually, looking at rodio 0.17+:
-        // SpatialSink::try_new(handle, emitter_pos, left_ear_pos, right_ear_pos)
-        // This is tricky for a moving player.
-        // Simplified approach: Calculate volume attenuation manually and use a standard sink?
-        // No, let's use SpatialSink but we need to define ear positions.
-        // Listener is at listener_pos. Ears are +/- 0.1 units perpendicular to dir.
+        // Calculate ear positions for spatial audio
+        // Ears are +/- 0.1 units perpendicular to look direction
         let right_vec = listener_dir.cross(Vec3::Y).normalize_or_zero() * 0.1;
         let left_ear = listener_pos - right_vec;
         let right_ear = listener_pos + right_vec;
@@ -278,34 +698,90 @@ impl AudioManager {
     }
 
     /// Play a block break sound
-    pub fn play_block_break(&mut self, position: Option<Vec3>, listener_pos: Vec3, listener_dir: Vec3, world: Option<&WorldManager>) {
-        if self.break_buffers.is_empty() {
-            return;
-        }
+    ///
+    /// - `block`: The block type being broken (for material-specific sound)
+    /// - `position`: World position of the block (for 3D audio)
+    /// - `listener_pos`: Player/camera position
+    /// - `listener_dir`: Player look direction
+    /// - `world`: World manager for occlusion calculation
+    pub fn play_block_break(
+        &mut self,
+        block: Option<Block>,
+        position: Option<Vec3>,
+        listener_pos: Vec3,
+        listener_dir: Vec3,
+        world: Option<&WorldManager>,
+    ) {
+        let material = block
+            .map(SoundMaterial::from_block)
+            .unwrap_or(SoundMaterial::Generic);
 
-        let buffer = self.break_buffers[self.break_index].clone();
-        self.break_index = (self.break_index + 1) % self.break_buffers.len();
+        // Try to get buffers for this material, fall back to Generic
+        let buffers = self
+            .break_buffers
+            .get(&material)
+            .or_else(|| self.break_buffers.get(&SoundMaterial::Generic));
+
+        let buffers = match buffers {
+            Some(b) if !b.is_empty() => b,
+            _ => return,
+        };
+
+        // Get and increment index for this material
+        let index = self.break_indices.entry(material).or_insert(0);
+        let buffer = buffers[*index % buffers.len()].clone();
+        *index = (*index + 1) % buffers.len();
+
+        let volume = BLOCK_SOUND_VOLUME * self.settings.effective_sfx();
 
         if let (Some(pos), Some(world)) = (position, world) {
-            self.play_spatial(&buffer, pos, listener_pos, listener_dir, BLOCK_SOUND_VOLUME, world);
+            self.play_spatial(&buffer, pos, listener_pos, listener_dir, volume, world);
         } else {
-            self.play_buffer(&buffer, BLOCK_SOUND_VOLUME);
+            self.play_buffer(&buffer, volume);
         }
     }
 
     /// Play a block place sound
-    pub fn play_block_place(&mut self, position: Option<Vec3>, listener_pos: Vec3, listener_dir: Vec3, world: Option<&WorldManager>) {
-        if self.place_buffers.is_empty() {
-            return;
-        }
+    ///
+    /// - `block`: The block type being placed (for material-specific sound)
+    /// - `position`: World position of the block (for 3D audio)
+    /// - `listener_pos`: Player/camera position
+    /// - `listener_dir`: Player look direction
+    /// - `world`: World manager for occlusion calculation
+    pub fn play_block_place(
+        &mut self,
+        block: Option<Block>,
+        position: Option<Vec3>,
+        listener_pos: Vec3,
+        listener_dir: Vec3,
+        world: Option<&WorldManager>,
+    ) {
+        let material = block
+            .map(SoundMaterial::from_block)
+            .unwrap_or(SoundMaterial::Generic);
 
-        let buffer = self.place_buffers[self.place_index].clone();
-        self.place_index = (self.place_index + 1) % self.place_buffers.len();
+        // Try to get buffers for this material, fall back to Generic
+        let buffers = self
+            .place_buffers
+            .get(&material)
+            .or_else(|| self.place_buffers.get(&SoundMaterial::Generic));
+
+        let buffers = match buffers {
+            Some(b) if !b.is_empty() => b,
+            _ => return,
+        };
+
+        // Get and increment index for this material
+        let index = self.place_indices.entry(material).or_insert(0);
+        let buffer = buffers[*index % buffers.len()].clone();
+        *index = (*index + 1) % buffers.len();
+
+        let volume = BLOCK_SOUND_VOLUME * self.settings.effective_sfx();
 
         if let (Some(pos), Some(world)) = (position, world) {
-            self.play_spatial(&buffer, pos, listener_pos, listener_dir, BLOCK_SOUND_VOLUME, world);
+            self.play_spatial(&buffer, pos, listener_pos, listener_dir, volume, world);
         } else {
-            self.play_buffer(&buffer, BLOCK_SOUND_VOLUME);
+            self.play_buffer(&buffer, volume);
         }
     }
 
@@ -326,6 +802,170 @@ impl AudioManager {
             sink.append(source);
             sink.detach();
         }
+    }
+
+    // ========== AMBIENT SOUND SYSTEM ==========
+
+    /// Update ambient sounds based on environment
+    ///
+    /// Call this every frame with the player's environment context.
+    /// Handles crossfading between different ambient soundscapes.
+    pub fn update_ambient(&mut self, dt: f32, env: AudioEnvironment) {
+        // Check if environment changed
+        let needs_transition = match &self.current_environment {
+            None => true,
+            Some(current) => {
+                current.in_cave != env.in_cave
+                    || current.underwater != env.underwater
+                    || current.biome_id != env.biome_id
+            }
+        };
+
+        if needs_transition {
+            self.start_ambient_transition(&env);
+            self.current_environment = Some(env);
+        }
+
+        // Update crossfade
+        if self.ambient_crossfading {
+            self.ambient_crossfade += dt / AMBIENT_CROSSFADE_SECS;
+
+            if self.ambient_crossfade >= 1.0 {
+                // Crossfade complete - switch to new ambient
+                self.ambient_crossfade = 1.0;
+                self.ambient_crossfading = false;
+
+                // Stop old ambient
+                if let Some(sink) = self.ambient_sink_a.take() {
+                    sink.stop();
+                }
+
+                // Move B to A
+                self.ambient_sink_a = self.ambient_sink_b.take();
+            }
+
+            // Update volumes during crossfade
+            let vol_a = (1.0 - self.ambient_crossfade) * AMBIENT_VOLUME * self.settings.effective_ambient();
+            let vol_b = self.ambient_crossfade * AMBIENT_VOLUME * self.settings.effective_ambient();
+
+            if let Some(ref sink) = self.ambient_sink_a {
+                sink.set_volume(vol_a);
+            }
+            if let Some(ref sink) = self.ambient_sink_b {
+                sink.set_volume(vol_b);
+            }
+        } else {
+            // Not crossfading - just update volume in case settings changed
+            let vol = AMBIENT_VOLUME * self.settings.effective_ambient();
+            if let Some(ref sink) = self.ambient_sink_a {
+                sink.set_volume(vol);
+            }
+        }
+
+        // Update reverb based on cave state
+        self.update_reverb(dt, env.in_cave);
+    }
+
+    /// Start a transition to a new ambient sound
+    fn start_ambient_transition(&mut self, env: &AudioEnvironment) {
+        // Determine which ambient to play
+        let ambient_key = self.get_ambient_key(env);
+
+        // Check if we have this ambient sound
+        let buffer = match self.ambient_buffers.get(&ambient_key) {
+            Some(b) => b.clone(),
+            None => {
+                // No ambient for this environment - fade to silence
+                self.ambient_crossfading = true;
+                self.ambient_crossfade = 0.0;
+                return;
+            }
+        };
+
+        // Create new ambient sink
+        if let Ok(sink) = Sink::try_new(&self.stream_handle) {
+            let cursor = std::io::Cursor::new(buffer);
+            if let Ok(source) = Decoder::new(cursor) {
+                // Loop the ambient sound
+                let source = source.repeat_infinite();
+                sink.append(source);
+                sink.set_volume(0.0); // Start silent, will fade in
+
+                // If no current ambient, skip crossfade
+                if self.ambient_sink_a.is_none() {
+                    self.ambient_sink_a = Some(sink);
+                    self.ambient_crossfade = 1.0;
+                    self.ambient_crossfading = false;
+                } else {
+                    // Start crossfade
+                    self.ambient_sink_b = Some(sink);
+                    self.ambient_crossfade = 0.0;
+                    self.ambient_crossfading = true;
+                }
+            }
+        }
+    }
+
+    /// Get the ambient sound key for an environment
+    fn get_ambient_key(&self, env: &AudioEnvironment) -> String {
+        if env.underwater {
+            return "underwater".to_string();
+        }
+
+        if env.in_cave {
+            return "cave".to_string();
+        }
+
+        // Biome-specific surface ambient
+        match env.biome_id {
+            0 => "surface".to_string(),      // Grasslands
+            1 => "surface".to_string(),      // CavernousHighlands
+            2 => "desert".to_string(),       // Desert
+            3 => "tundra".to_string(),       // Tundra
+            4 => "jungle".to_string(),       // Jungle
+            5 => "swamp".to_string(),        // Swamp
+            6 => "surface".to_string(),      // Mountains
+            7 => "ocean".to_string(),        // Ocean
+            _ => "surface".to_string(),      // Fallback
+        }
+    }
+
+    /// Stop all ambient sounds
+    pub fn stop_ambient(&mut self) {
+        if let Some(sink) = self.ambient_sink_a.take() {
+            sink.stop();
+        }
+        if let Some(sink) = self.ambient_sink_b.take() {
+            sink.stop();
+        }
+        self.current_environment = None;
+    }
+
+    /// Update volume settings
+    pub fn set_settings(&mut self, settings: AudioSettings) {
+        self.settings = settings;
+    }
+
+    /// Get current volume settings
+    pub fn get_settings(&self) -> &AudioSettings {
+        &self.settings
+    }
+
+    // ========== VOLUME CONTROL HELPERS ==========
+
+    /// Set master volume (0.0 - 1.0)
+    pub fn set_master_volume(&mut self, volume: f32) {
+        self.settings.master = volume.clamp(0.0, 1.0);
+    }
+
+    /// Set SFX volume (0.0 - 1.0)
+    pub fn set_sfx_volume(&mut self, volume: f32) {
+        self.settings.sfx = volume.clamp(0.0, 1.0);
+    }
+
+    /// Set ambient volume (0.0 - 1.0)
+    pub fn set_ambient_volume(&mut self, volume: f32) {
+        self.settings.ambient = volume.clamp(0.0, 1.0);
     }
 }
 

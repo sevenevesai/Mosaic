@@ -11,7 +11,7 @@ use winit::{
     window::{CursorGrabMode, Fullscreen, Window, WindowBuilder},
 };
 
-use crate::audio::AudioManager;
+use crate::audio::{AudioManager, AudioEnvironment, AudioSettings};
 use crate::inventory::Item;
 use crate::player::{Player, PlayerData, BlockInteraction};
 use crate::renderer::{DisplayMode, Renderer, DebugMetrics};
@@ -469,11 +469,16 @@ impl App {
                     }
                     // Mark only the affected block for voxel GI update (incremental)
                     self.renderer.mark_voxel_dirty_at(x, y, z);
+                    // Play block break sound (material-based, 3D spatial)
                     if let Some(ref mut audio) = self.audio {
+                        let block_pos = glam::Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
+                        let player_pos = self.player.position();
+                        let player_dir = self.player.forward();
                         audio.play_block_break(
-                            Some(glam::Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5)),
-                            self.player.position(),
-                            self.player.forward(),
+                            Some(block),
+                            Some(block_pos),
+                            player_pos,
+                            player_dir,
                             Some(&self.world),
                         );
                     }
@@ -490,11 +495,16 @@ impl App {
                     }
                     // Mark only the affected block for voxel GI update (incremental)
                     self.renderer.mark_voxel_dirty_at(x, y, z);
+                    // Play block place sound (material-based, 3D spatial)
                     if let Some(ref mut audio) = self.audio {
+                        let block_pos = glam::Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
+                        let player_pos = self.player.position();
+                        let player_dir = self.player.forward();
                         audio.play_block_place(
-                            Some(glam::Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5)),
-                            self.player.position(),
-                            self.player.forward(),
+                            Some(block),
+                            Some(block_pos),
+                            player_pos,
+                            player_dir,
                             Some(&self.world),
                         );
                     }
@@ -515,19 +525,74 @@ impl App {
             // Update footstep audio (only when not flying)
             if let Some(ref mut audio) = self.audio {
                 if !self.player.is_flying() {
+                    // Get the block the player is standing on for material-based sounds
+                    let feet_pos = self.player.position();
+                    let surface_block = self.world.get_block(
+                        feet_pos.x.floor() as i32,
+                        (feet_pos.y - 0.1).floor() as i32,
+                        feet_pos.z.floor() as i32,
+                    );
                     audio.update_footsteps(
                         dt,
                         self.player.horizontal_speed(),
                         self.player.is_on_ground(),
                         self.player.is_sprinting(),
-                        self.player.position(),
-                        self.player.forward(),
-                        &self.world,
+                        surface_block,
                     );
                 }
             }
         }
         self.profiler.end_section("player_update");
+
+        // Update audio system (ambient sounds, volume settings sync)
+        if let Some(ref mut audio) = self.audio {
+            // Sync volume settings from renderer to audio manager
+            let new_settings = AudioSettings {
+                master: self.renderer.audio_master(),
+                sfx: self.renderer.audio_sfx(),
+                ambient: self.renderer.audio_ambient(),
+            };
+            if audio.get_settings().master != new_settings.master
+                || audio.get_settings().sfx != new_settings.sfx
+                || audio.get_settings().ambient != new_settings.ambient
+            {
+                audio.set_settings(new_settings);
+            }
+
+            // Update ambient sounds based on environment
+            let player_pos = self.player.position();
+            let (_, sky_light, _) = self.world.get_light_at(
+                player_pos.x.floor() as i32,
+                player_pos.y.floor() as i32,
+                player_pos.z.floor() as i32,
+            );
+
+            // Determine if player is in cave (low sky light)
+            let in_cave = sky_light < 4;
+
+            // Determine if underwater (head below water level)
+            // For now just check if at sea level or below with water nearby
+            let underwater = player_pos.y < crate::constants::WATER_SEA_LEVEL as f32
+                && self.world.get_block(
+                    player_pos.x.floor() as i32,
+                    player_pos.y.floor() as i32,
+                    player_pos.z.floor() as i32,
+                ) == Some(Block::Water);
+
+            // Get biome ID (default to grasslands)
+            // TODO: Get actual biome from world generation
+            let biome_id = 0u8;
+
+            let env = AudioEnvironment {
+                in_cave,
+                underwater,
+                biome_id,
+                height: player_pos.y,
+                sky_light,
+            };
+
+            audio.update_ambient(dt.as_secs_f32(), env);
+        }
 
         // Update world (chunk loading/generation, meshing, lighting)
         self.profiler.begin_section("world_update");

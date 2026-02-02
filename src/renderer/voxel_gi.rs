@@ -467,7 +467,7 @@ impl VoxelGI {
             last_update_center: Vec3::ZERO,
             smoothed_center: Vec3::ZERO,
             follow_speed: 0.08,        // Smooth following - adjust for feel (0.05-0.15 range)
-            update_threshold: 2.0,     // Trigger update every ~2 blocks (frequent small updates)
+            update_threshold: 8.0,     // Trigger update every ~8 blocks (less frequent for better perf)
             volume_origin: glam::IVec3::ZERO,
             initialized: false,
             force_full_update: false,

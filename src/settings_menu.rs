@@ -136,6 +136,22 @@ impl SettingsMenu {
                 },
                 toggle: |r| { r.toggle_gpu_culling(); },
             },
+            // === AUDIO SETTINGS ===
+            MenuItem {
+                label: "MASTER VOLUME",
+                get_value: |r| format!("{}%", (r.audio_master() * 100.0).round() as i32),
+                toggle: |r| { r.cycle_audio_master(); },
+            },
+            MenuItem {
+                label: "SFX VOLUME",
+                get_value: |r| format!("{}%", (r.audio_sfx() * 100.0).round() as i32),
+                toggle: |r| { r.cycle_audio_sfx(); },
+            },
+            MenuItem {
+                label: "AMBIENT VOLUME",
+                get_value: |r| format!("{}%", (r.audio_ambient() * 100.0).round() as i32),
+                toggle: |r| { r.cycle_audio_ambient(); },
+            },
             // === DEBUG SETTINGS ===
             MenuItem {
                 label: "CYCLE SPEED",

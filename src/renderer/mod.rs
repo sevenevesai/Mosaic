@@ -192,6 +192,14 @@ pub struct Renderer {
     /// Whether torches cast shadows (more immersive but higher GPU cost)
     torch_shadows: bool,
 
+    // Audio settings (stored here for settings menu, synced to AudioManager in app.rs)
+    /// Master audio volume (0.0 - 1.0)
+    audio_master: f32,
+    /// SFX audio volume (0.0 - 1.0)
+    audio_sfx: f32,
+    /// Ambient audio volume (0.0 - 1.0)
+    audio_ambient: f32,
+
     // Voxel-based Global Illumination system
     // Uses DDA ray marching for shadows, VCT for indirect lighting
     voxel_gi: VoxelGI,
@@ -716,6 +724,10 @@ impl Renderer {
             display_mode: DisplayMode::Windowed,
             display_mode_pending: false,
             torch_shadows: false,  // Default OFF for performance
+            // Audio settings (defaults, will be overwritten by apply_settings)
+            audio_master: 0.8,
+            audio_sfx: 1.0,
+            audio_ambient: 0.6,
             voxel_gi,
             bloom,
             scene_texture,
@@ -985,6 +997,57 @@ impl Renderer {
     pub fn toggle_bloom(&mut self) -> bool {
         self.bloom_enabled = !self.bloom_enabled;
         self.bloom_enabled
+    }
+
+    // ========== AUDIO VOLUME CONTROLS ==========
+
+    /// Get master audio volume (0.0 - 1.0)
+    pub fn audio_master(&self) -> f32 {
+        self.audio_master
+    }
+
+    /// Cycle master audio volume: 0% -> 10% -> ... -> 100% -> 0%
+    pub fn cycle_audio_master(&mut self) {
+        self.audio_master = if self.audio_master >= 1.0 {
+            0.0
+        } else {
+            (self.audio_master + 0.1).min(1.0)
+        };
+    }
+
+    /// Get SFX audio volume (0.0 - 1.0)
+    pub fn audio_sfx(&self) -> f32 {
+        self.audio_sfx
+    }
+
+    /// Cycle SFX audio volume: 0% -> 10% -> ... -> 100% -> 0%
+    pub fn cycle_audio_sfx(&mut self) {
+        self.audio_sfx = if self.audio_sfx >= 1.0 {
+            0.0
+        } else {
+            (self.audio_sfx + 0.1).min(1.0)
+        };
+    }
+
+    /// Get ambient audio volume (0.0 - 1.0)
+    pub fn audio_ambient(&self) -> f32 {
+        self.audio_ambient
+    }
+
+    /// Cycle ambient audio volume: 0% -> 10% -> ... -> 100% -> 0%
+    pub fn cycle_audio_ambient(&mut self) {
+        self.audio_ambient = if self.audio_ambient >= 1.0 {
+            0.0
+        } else {
+            (self.audio_ambient + 0.1).min(1.0)
+        };
+    }
+
+    /// Check if audio settings have changed (for syncing to AudioManager)
+    pub fn audio_settings_changed(&self, master: f32, sfx: f32, ambient: f32) -> bool {
+        (self.audio_master - master).abs() > 0.001
+            || (self.audio_sfx - sfx).abs() > 0.001
+            || (self.audio_ambient - ambient).abs() > 0.001
     }
 
     /// Check if torch shadows are enabled
@@ -1311,6 +1374,11 @@ impl Renderer {
         // Apply extended view (impostor) range setting
         let impostor_range = ImpostorRange::from_str(&settings.impostor_quality);
         self.impostor_renderer.range = impostor_range;
+
+        // Apply audio settings
+        self.audio_master = settings.audio_master;
+        self.audio_sfx = settings.audio_sfx;
+        self.audio_ambient = settings.audio_ambient;
     }
 
     /// Collect current settings into a Settings struct
@@ -1329,6 +1397,10 @@ impl Renderer {
             windowed_height: windowed_size.1,
             shadow_update_step: self.voxel_gi.get_update_threshold(),
             torch_shadows: self.torch_shadows,
+            // Audio settings
+            audio_master: self.audio_master,
+            audio_sfx: self.audio_sfx,
+            audio_ambient: self.audio_ambient,
             ssao_quality: self.ssao.quality.as_str().to_string(),
             dof_quality: self.dof.quality.as_str().to_string(),
             dof_focus_distance: self.dof.params.manual_focus_distance,
@@ -1605,8 +1677,10 @@ impl Renderer {
         // Build frustum for culling
         let frustum = Frustum::from_view_proj(camera.view_projection_matrix());
 
-        // Get surface texture
+        // Get surface texture (can block waiting for vsync/present)
+        let surface_start = std::time::Instant::now();
         let output = self.surface.get_current_texture()?;
+        let surface_elapsed = surface_start.elapsed();
         let view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -2221,13 +2295,12 @@ impl Renderer {
         // Log spike breakdown when render exceeds 5ms
         if render_total.as_secs_f64() * 1000.0 > 5.0 {
             tracing::warn!(
-                "RENDER SPIKE {:.1}ms: sync={:.1}ms uniforms={:.1}ms voxel_gi={:.1}ms cull={:.1}ms mdi={:.1}ms submit={:.1}ms | {} chunks",
+                "RENDER SPIKE {:.1}ms: sync={:.1}ms surface={:.1}ms voxel_gi={:.1}ms main={:.1}ms submit={:.1}ms | {} chunks",
                 render_total.as_secs_f64() * 1000.0,
                 sync_elapsed.as_secs_f64() * 1000.0,
-                uniforms_elapsed.as_secs_f64() * 1000.0,
+                surface_elapsed.as_secs_f64() * 1000.0,
                 voxel_gi_elapsed.as_secs_f64() * 1000.0,
-                cull_elapsed.as_secs_f64() * 1000.0,
-                mdi_prep_elapsed.as_secs_f64() * 1000.0,
+                main_elapsed.as_secs_f64() * 1000.0,
                 submit_elapsed.as_secs_f64() * 1000.0,
                 chunks_rendered,
             );
