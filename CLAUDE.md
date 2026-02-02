@@ -27,6 +27,7 @@ cargo build --release
 src/
 ├── app.rs           # Main loop, input handling
 ├── lib.rs           # Constants: RENDER_DISTANCE, LOD thresholds, physics
+├── settings_menu.rs # Tabbed settings UI with hit detection (~760 LOC)
 ├── audio/
 │   └── mod.rs       # 3D spatial audio, material sounds, ambient system (~900 LOC)
 ├── inventory/
@@ -37,6 +38,7 @@ src/
 │   ├── mod.rs       # GPU state, render passes, day/night cycle
 │   ├── pipeline.rs  # WGSL shaders (chunk, sky, UI)
 │   ├── water.rs     # Ray-marched water system (~900 LOC)
+│   ├── clouds.rs    # Procedural cloud system (~600 LOC)
 │   ├── inventory_ui.rs # Hotbar/inventory UI rendering
 │   ├── gpu_culling.rs # GPU frustum culling + visibility cache (88% hit rate)
 │   ├── voxel_gi.rs  # Voxel GI: 256³ volume, DDA shadows, VCT
@@ -188,6 +190,30 @@ Ray-marched infinite water plane with SSR reflections (`renderer/water.rs`):
 | Ultra | 32 | 4 oct | 8% | 0.6% |
 
 **Gotcha**: `water_flow.rs` exists but is parked - visual flow not currently used.
+
+## Cloud Rendering
+
+Procedural cloud system with FBM noise (`renderer/clouds.rs`):
+- **Architecture**: Fullscreen post-process pass, ray marching through cloud layer
+- **Cloud layers**: Main cumulus at Y=180-230, optional cirrus at Y=280-300
+- **FBM noise**: 2-5 octaves of combined FBM + Worley noise for natural shapes
+- **Sun scattering**: Henyey-Greenstein phase function for realistic light scattering
+- **Day/night colors**: Clouds colored by sun/moon, warm sunset tones
+- **Wind animation**: Clouds drift based on wind direction and speed setting
+
+**Quality Presets** (ESC menu → CLOUDS):
+| Preset | Noise Octaves | Ray Steps | Resolution | Silver Lining |
+|--------|---------------|-----------|------------|---------------|
+| Off | 0 | 0 | - | No |
+| Low | 2 | 8 | Half | No |
+| Medium | 3 | 16 | Half | No |
+| High | 4 | 24 | Full | Yes |
+| Ultra | 5 | 32 | Full | Yes |
+
+**Settings** (ESC menu):
+- **CLOUD COVERAGE**: 0-100% - how much sky is covered
+- **CLOUD SPEED**: 0-100% - animation/drift speed
+- **CLOUD SHADOWS**: ON/OFF - whether clouds cast shadows on terrain
 
 ## Sun/Moon Rendering
 

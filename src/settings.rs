@@ -40,6 +40,16 @@ pub struct Settings {
     /// Impostor quality preset: OFF, LOW, MEDIUM, HIGH, ULTRA
     pub impostor_quality: String,
 
+    // === CLOUD SETTINGS ===
+    /// Cloud quality preset: OFF, LOW, MEDIUM, HIGH, ULTRA
+    pub cloud_quality: String,
+    /// Cloud coverage (0.0 - 1.0)
+    pub cloud_coverage: f32,
+    /// Cloud animation speed (0.0 - 1.0)
+    pub cloud_speed: f32,
+    /// Whether cloud shadows are enabled
+    pub cloud_shadows: bool,
+
     // === AUDIO SETTINGS ===
     /// Master volume (0.0 - 1.0)
     pub audio_master: f32,
@@ -72,6 +82,11 @@ impl Default for Settings {
             dof_focus_range: 10.0,              // Default focus range in blocks
             refraction_quality: "MEDIUM".to_string(), // Default water refraction quality
             impostor_quality: "MEDIUM".to_string(), // Default impostor quality
+            // Cloud defaults
+            cloud_quality: "MEDIUM".to_string(),   // Default cloud quality
+            cloud_coverage: 0.5,                   // 50% coverage
+            cloud_speed: 0.3,                      // 30% animation speed
+            cloud_shadows: true,                   // Cloud shadows on by default
             // Audio defaults
             audio_master: 0.8,   // 80% master volume
             audio_sfx: 1.0,      // 100% SFX
@@ -197,6 +212,23 @@ impl Settings {
                     "impostor_quality" => {
                         settings.impostor_quality = value.to_string();
                     }
+                    // Cloud settings
+                    "cloud_quality" => {
+                        settings.cloud_quality = value.to_string();
+                    }
+                    "cloud_coverage" => {
+                        if let Ok(v) = value.parse() {
+                            settings.cloud_coverage = v;
+                        }
+                    }
+                    "cloud_speed" => {
+                        if let Ok(v) = value.parse() {
+                            settings.cloud_speed = v;
+                        }
+                    }
+                    "cloud_shadows" => {
+                        settings.cloud_shadows = value == "true";
+                    }
                     // Audio settings
                     "audio_master" => {
                         if let Ok(v) = value.parse() {
@@ -246,6 +278,11 @@ impl Settings {
              dof_focus_range={}\n\
              refraction_quality={}\n\
              impostor_quality={}\n\
+             # Cloud Settings\n\
+             cloud_quality={}\n\
+             cloud_coverage={}\n\
+             cloud_speed={}\n\
+             cloud_shadows={}\n\
              # Audio Settings\n\
              audio_master={}\n\
              audio_sfx={}\n\
@@ -270,6 +307,10 @@ impl Settings {
             self.dof_focus_range,
             self.refraction_quality,
             self.impostor_quality,
+            self.cloud_quality,
+            self.cloud_coverage,
+            self.cloud_speed,
+            self.cloud_shadows,
             self.audio_master,
             self.audio_sfx,
             self.audio_ambient,

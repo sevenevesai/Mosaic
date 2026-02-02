@@ -20,6 +20,7 @@ pub mod voxel_gi;
 mod volumetrics;
 pub mod vox_loader;
 mod water;
+mod clouds;
 
 pub use bloom::Bloom;
 pub use camera::{Camera, Frustum};
@@ -36,6 +37,7 @@ pub use voxel_gi::VoxelGI;
 pub use vox_loader::{VoxModel, VoxMesh};
 pub use volumetrics::VolumetricLighting;
 pub use water::{Water, WaterQuality};
+pub use clouds::{Clouds, CloudQuality};
 
 /// Display mode for the window
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -218,6 +220,9 @@ pub struct Renderer {
 
     // Depth of Field post-processing
     dof: Dof,
+
+    // Procedural cloud rendering
+    clouds: Clouds,
 
     // Settings menu dimmer overlay
     dimmer_pipeline: wgpu::RenderPipeline,
@@ -633,6 +638,9 @@ impl Renderer {
         // Create ray-marched water system
         let water_system = Water::new(&device, surface_format, &camera_bind_group_layout);
 
+        // Create procedural cloud system
+        let clouds = Clouds::new(&device, surface_format);
+
         // Create refraction source texture (copy of scene before water renders)
         let refraction_source_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("refraction_source_texture"),
@@ -736,6 +744,7 @@ impl Renderer {
             volumetric_uniform_buffer,
             ssao,
             dof,
+            clouds,
             dimmer_pipeline,
             inventory_ui,
             item_renderer,
@@ -1516,6 +1525,80 @@ impl Renderer {
         self.render_distance + self.impostor_renderer.range.extra_chunks()
     }
 
+    // === Cloud Settings ===
+
+    /// Get current cloud quality
+    pub fn cloud_quality(&self) -> CloudQuality {
+        self.clouds.quality()
+    }
+
+    /// Cycle cloud quality: Off -> Low -> Medium -> High -> Ultra -> Off
+    pub fn cycle_cloud_quality(&mut self) -> CloudQuality {
+        self.clouds.cycle_quality();
+        let quality = self.clouds.quality();
+        tracing::info!("Cloud Quality: {}", quality.as_str());
+        quality
+    }
+
+    /// Cycle cloud quality backwards
+    pub fn cycle_cloud_quality_prev(&mut self) -> CloudQuality {
+        self.clouds.cycle_quality_prev();
+        self.clouds.quality()
+    }
+
+    /// Set cloud quality directly
+    pub fn set_cloud_quality(&mut self, quality: CloudQuality) {
+        self.clouds.set_quality(quality);
+    }
+
+    /// Set cloud quality by index (0=Off, 1=Low, 2=Medium, 3=High, 4=Ultra)
+    pub fn set_cloud_quality_index(&mut self, index: usize) {
+        let quality = match index {
+            0 => CloudQuality::Off,
+            1 => CloudQuality::Low,
+            2 => CloudQuality::Medium,
+            3 => CloudQuality::High,
+            _ => CloudQuality::Ultra,
+        };
+        self.clouds.set_quality(quality);
+    }
+
+    /// Get cloud coverage (0.0 - 1.0)
+    pub fn cloud_coverage(&self) -> f32 {
+        self.clouds.coverage
+    }
+
+    /// Set cloud coverage (0.0 - 1.0)
+    pub fn set_cloud_coverage(&mut self, coverage: f32) {
+        self.clouds.set_coverage(coverage);
+    }
+
+    /// Get cloud speed (0.0 - 1.0)
+    pub fn cloud_speed(&self) -> f32 {
+        self.clouds.speed
+    }
+
+    /// Set cloud speed (0.0 - 1.0)
+    pub fn set_cloud_speed(&mut self, speed: f32) {
+        self.clouds.set_speed(speed);
+    }
+
+    /// Get cloud shadows enabled
+    pub fn cloud_shadows_enabled(&self) -> bool {
+        self.clouds.shadows_enabled
+    }
+
+    /// Set cloud shadows enabled
+    pub fn set_cloud_shadows_enabled(&mut self, enabled: bool) {
+        self.clouds.set_shadows_enabled(enabled);
+    }
+
+    /// Toggle cloud shadows
+    pub fn toggle_cloud_shadows(&mut self) -> bool {
+        self.clouds.shadows_enabled = !self.clouds.shadows_enabled;
+        self.clouds.shadows_enabled
+    }
+
     /// Check if water refraction is enabled
     pub fn is_refraction_enabled(&self) -> bool {
         self.water_system.quality() != WaterQuality::Off
@@ -1674,6 +1757,13 @@ impl Renderer {
         let impostor_range = ImpostorRange::from_str(&settings.impostor_quality);
         self.impostor_renderer.range = impostor_range;
 
+        // Apply cloud settings
+        let cloud_quality = CloudQuality::from_str(&settings.cloud_quality);
+        self.clouds.set_quality(cloud_quality);
+        self.clouds.set_coverage(settings.cloud_coverage);
+        self.clouds.set_speed(settings.cloud_speed);
+        self.clouds.set_shadows_enabled(settings.cloud_shadows);
+
         // Apply audio settings
         self.audio_master = settings.audio_master;
         self.audio_sfx = settings.audio_sfx;
@@ -1707,6 +1797,11 @@ impl Renderer {
             dof_focus_range: self.dof.params.focus_transition,
             refraction_quality: self.refraction_quality().as_str().to_string(),
             impostor_quality: self.impostor_renderer.range.as_str().to_string(),
+            // Cloud settings
+            cloud_quality: self.clouds.quality().as_str().to_string(),
+            cloud_coverage: self.clouds.coverage,
+            cloud_speed: self.clouds.speed,
+            cloud_shadows: self.clouds.shadows_enabled,
         }
     }
 
@@ -2404,6 +2499,61 @@ impl Renderer {
             }
         }
 
+        // === CLOUD RENDER PASS (3D Voxel Geometry) ===
+        // Renders 3D voxel clouds as geometry with depth testing
+        if self.clouds.quality() != CloudQuality::Off {
+            // Update cloud mesh and uniforms
+            let delta_time = debug_metrics.frame_time_ms / 1000.0;
+            self.clouds.update(
+                &self.queue,
+                camera.position,
+                current_time,
+                delta_time,
+                camera.view_projection_matrix(),
+                cycle.sun_direction,
+                cycle.sun_intensity,
+                cycle.sun_color,
+                cycle.ambient,
+            );
+
+            // GPU timestamp: start cloud pass
+            if let Some(idx) = self.gpu_profiler.begin_pass("Clouds") {
+                self.gpu_profiler.write_timestamp(&mut encoder, idx);
+            }
+
+            // Render clouds as geometry with depth testing
+            {
+                let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Cloud Render Pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.scene_texture_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &self.depth_texture,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+
+                self.clouds.render(&mut render_pass);
+            }
+
+            // GPU timestamp: end cloud pass
+            if let Some(idx) = self.gpu_profiler.end_pass() {
+                self.gpu_profiler.write_timestamp(&mut encoder, idx);
+            }
+        }
+
         // === BLOCK OUTLINE PASS ===
         // Render block outline if targeting a block (needs depth testing)
         if let Some([bx, by, bz]) = target_block {
@@ -2866,40 +3016,56 @@ impl DayNightCycle {
                 Self::lerp_color(Vec3::new(0.05, 0.04, 0.07), Vec3::new(0.29, 0.21, 0.21), f), // dark -> warm ambient
             )
         } else if t < 0.35 {
-            // Dawn to morning (0.25 - 0.35)
+            // Dawn to morning (0.25 - 0.35) - transition from warm dawn to vivid blue sky
             let f = (t - 0.25) / 0.10;
             (
-                Self::lerp_color(Vec3::new(1.0, 0.48, 0.33), Vec3::new(0.53, 0.64, 0.79), f),  // coral -> warm blue
-                Self::lerp_color(Vec3::new(1.0, 0.70, 0.42), Vec3::new(1.0, 0.82, 0.52), f),  // peach -> cream
-                Self::lerp_color(Vec3::new(1.0, 0.42, 0.21), Vec3::new(1.0, 0.78, 0.34), f),  // orange -> gold
-                Self::lerp_color(Vec3::new(0.29, 0.21, 0.21), Vec3::new(0.63, 0.50, 0.38), f),
+                // Zenith: coral dawn -> DEEP saturated blue (more saturated!)
+                Self::lerp_color(Vec3::new(1.0, 0.48, 0.33), Vec3::new(0.15, 0.42, 0.90), f),
+                // Horizon: peach -> saturated but lighter blue
+                Self::lerp_color(Vec3::new(1.0, 0.70, 0.42), Vec3::new(0.40, 0.60, 0.88), f),
+                // Sun: orange -> bright warm white
+                Self::lerp_color(Vec3::new(1.0, 0.42, 0.21), Vec3::new(1.0, 0.95, 0.85), f),
+                // Ambient: warm shadows -> bright daylight
+                Self::lerp_color(Vec3::new(0.29, 0.21, 0.21), Vec3::new(0.60, 0.58, 0.52), f),
             )
         } else if t < 0.5 {
-            // Morning to noon (0.35 - 0.5)
+            // Morning to noon (0.35 - 0.5) - vivid blue sky
             let f = (t - 0.35) / 0.15;
             (
-                Self::lerp_color(Vec3::new(0.53, 0.64, 0.79), Vec3::new(0.35, 0.56, 0.74), f), // warm blue -> clear sky
-                Self::lerp_color(Vec3::new(1.0, 0.82, 0.52), Vec3::new(0.79, 0.86, 0.91), f), // cream -> soft white
-                Self::lerp_color(Vec3::new(1.0, 0.78, 0.34), Vec3::new(1.0, 0.96, 0.88), f),  // gold -> warm white
-                Self::lerp_color(Vec3::new(0.63, 0.50, 0.38), Vec3::new(0.82, 0.75, 0.63), f),
+                // Zenith: DEEP saturated blue -> rich blue at noon (very saturated!)
+                Self::lerp_color(Vec3::new(0.15, 0.42, 0.90), Vec3::new(0.12, 0.38, 0.92), f),
+                // Horizon: saturated blue -> warm-tinged blue at horizon
+                Self::lerp_color(Vec3::new(0.40, 0.60, 0.88), Vec3::new(0.50, 0.65, 0.85), f),
+                // Sun: warm white -> bright white (noon sun)
+                Self::lerp_color(Vec3::new(1.0, 0.95, 0.85), Vec3::new(1.0, 0.98, 0.92), f),
+                // Ambient: bright daylight
+                Self::lerp_color(Vec3::new(0.60, 0.58, 0.52), Vec3::new(0.65, 0.62, 0.55), f),
             )
         } else if t < 0.65 {
-            // Noon to afternoon (0.5 - 0.65)
+            // Noon to afternoon (0.5 - 0.65) - blue sky starts warming toward golden hour
             let f = (t - 0.5) / 0.15;
             (
-                Self::lerp_color(Vec3::new(0.35, 0.56, 0.74), Vec3::new(0.49, 0.64, 0.77), f), // clear sky -> soft blue
-                Self::lerp_color(Vec3::new(0.79, 0.86, 0.91), Vec3::new(0.96, 0.84, 0.63), f), // soft white -> golden
-                Self::lerp_color(Vec3::new(1.0, 0.96, 0.88), Vec3::new(1.0, 0.80, 0.40), f),   // warm white -> gold
-                Self::lerp_color(Vec3::new(0.82, 0.75, 0.63), Vec3::new(0.75, 0.63, 0.50), f),
+                // Zenith: deep blue -> warming blue
+                Self::lerp_color(Vec3::new(0.12, 0.38, 0.92), Vec3::new(0.25, 0.48, 0.85), f),
+                // Horizon: warm blue -> starting to warm with golden tones
+                Self::lerp_color(Vec3::new(0.50, 0.65, 0.85), Vec3::new(0.70, 0.70, 0.68), f),
+                // Sun: noon white -> warming toward gold
+                Self::lerp_color(Vec3::new(1.0, 0.98, 0.92), Vec3::new(1.0, 0.88, 0.65), f),
+                // Ambient: bright -> warming
+                Self::lerp_color(Vec3::new(0.65, 0.62, 0.55), Vec3::new(0.65, 0.58, 0.48), f),
             )
         } else if t < 0.75 {
-            // Afternoon to dusk (0.65 - 0.75)
+            // Afternoon to dusk (0.65 - 0.75) - golden hour into sunset (keep warm!)
             let f = (t - 0.65) / 0.10;
             (
-                Self::lerp_color(Vec3::new(0.49, 0.64, 0.77), Vec3::new(1.0, 0.42, 0.29), f),  // soft blue -> burnt orange
-                Self::lerp_color(Vec3::new(0.96, 0.84, 0.63), Vec3::new(1.0, 0.67, 0.36), f),  // golden -> amber
-                Self::lerp_color(Vec3::new(1.0, 0.80, 0.40), Vec3::new(1.0, 0.34, 0.13), f),   // gold -> deep orange
-                Self::lerp_color(Vec3::new(0.75, 0.63, 0.50), Vec3::new(0.50, 0.31, 0.25), f),
+                // Zenith: warm blue -> burnt orange sunset
+                Self::lerp_color(Vec3::new(0.35, 0.55, 0.82), Vec3::new(1.0, 0.42, 0.29), f),
+                // Horizon: golden -> deep amber
+                Self::lerp_color(Vec3::new(0.75, 0.75, 0.70), Vec3::new(1.0, 0.67, 0.36), f),
+                // Sun: gold -> deep orange
+                Self::lerp_color(Vec3::new(1.0, 0.88, 0.65), Vec3::new(1.0, 0.34, 0.13), f),
+                // Ambient: warm -> dim warm
+                Self::lerp_color(Vec3::new(0.70, 0.62, 0.52), Vec3::new(0.50, 0.31, 0.25), f),
             )
         } else if t < 0.80 {
             // Dusk to twilight (0.75 - 0.80) - faster transition to dark

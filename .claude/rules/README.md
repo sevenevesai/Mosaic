@@ -16,6 +16,7 @@ This directory contains detailed system documentation for the Mosaic engine. The
 | `day-night-cycle.md` | Time system, sun/moon, color palette | Modifying sky, lighting transitions |
 | `meshing-system.md` | Binary greedy meshing, vertex format, LOD | Mesh bugs, performance optimization |
 | `meta-prompt-generator.md` | Template for generating feature implementation prompts | Creating new feature specs |
+| `settings-menu.md` | Tabbed settings UI, control types, hit detection | Settings menu changes, adding options |
 
 ## Usage
 
