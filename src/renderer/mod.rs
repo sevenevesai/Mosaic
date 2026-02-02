@@ -1659,9 +1659,8 @@ impl Renderer {
         );
         let voxel_gi_elapsed = voxel_gi_start.elapsed();
 
-        // GPU per-pass timing disabled temporarily - staging buffer mapping conflict
-        // CPU timing in pass_times provides the needed breakdown
-        let _ = &self.gpu_profiler; // Silence unused warning
+        // GPU per-pass timing with double-buffered staging buffers
+        self.gpu_profiler.begin_frame();
 
         // Reset stats
         let mut chunks_rendered = 0u32;
@@ -1762,6 +1761,10 @@ impl Renderer {
         }
 
         // === MAIN RENDER PASS (render to scene texture for bloom) ===
+        // GPU timestamp: start main pass
+        if let Some(idx) = self.gpu_profiler.begin_pass("Main") {
+            self.gpu_profiler.write_timestamp(&mut encoder, idx);
+        }
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Main Render Pass"),
@@ -1940,6 +1943,10 @@ impl Renderer {
 
             // End opaque pass to allow scene texture copy for water refraction
         }
+        // GPU timestamp: end main pass
+        if let Some(idx) = self.gpu_profiler.end_pass() {
+            self.gpu_profiler.write_timestamp(&mut encoder, idx);
+        }
 
         // === COPY SCENE FOR WATER REFRACTION ===
         // Copy the current scene (before water) so water shader can sample it for refraction
@@ -1997,6 +2004,10 @@ impl Renderer {
         // === WATER RENDER PASS (Ray-marched fullscreen) ===
         // Renders water as fullscreen ray-plane intersection
         if self.water_system.quality() != WaterQuality::Off {
+            // GPU timestamp: start water pass
+            if let Some(idx) = self.gpu_profiler.begin_pass("Water") {
+                self.gpu_profiler.write_timestamp(&mut encoder, idx);
+            }
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Water Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -2013,6 +2024,11 @@ impl Renderer {
             });
 
             self.water_system.render(&mut render_pass, &self.camera_bind_group);
+            // GPU timestamp: end water pass (inside block to ensure pass is dropped first)
+            drop(render_pass);
+            if let Some(idx) = self.gpu_profiler.end_pass() {
+                self.gpu_profiler.write_timestamp(&mut encoder, idx);
+            }
         }
 
         // === BLOCK OUTLINE PASS ===
@@ -2082,12 +2098,24 @@ impl Renderer {
         // === SSAO (Screen-Space Ambient Occlusion) ===
         // Compute AO from depth buffer and apply to scene
         // This runs after main pass (needs depth) and before volumetrics/bloom
+        // GPU timestamp: start SSAO
+        if let Some(idx) = self.gpu_profiler.begin_pass("SSAO") {
+            self.gpu_profiler.write_timestamp(&mut encoder, idx);
+        }
         self.ssao.create_bind_groups(&self.device, &self.depth_texture);
         self.ssao.render(&mut encoder, &self.scene_texture_view);
+        // GPU timestamp: end SSAO
+        if let Some(idx) = self.gpu_profiler.end_pass() {
+            self.gpu_profiler.write_timestamp(&mut encoder, idx);
+        }
 
         // === VOLUMETRIC LIGHT SHAFTS ===
         // Render god rays using raymarching through voxel volume
         // This runs at half resolution and composites onto the scene
+        // GPU timestamp: start Volumetrics
+        if let Some(idx) = self.gpu_profiler.begin_pass("Volumetrics") {
+            self.gpu_profiler.write_timestamp(&mut encoder, idx);
+        }
         self.volumetrics.create_bind_group(
             &self.device,
             &self.depth_texture,
@@ -2098,12 +2126,24 @@ impl Renderer {
             &self.scene_texture_view,  // Composite onto scene (before bloom)
             self.voxel_gi.bind_group(),
         );
+        // GPU timestamp: end Volumetrics
+        if let Some(idx) = self.gpu_profiler.end_pass() {
+            self.gpu_profiler.write_timestamp(&mut encoder, idx);
+        }
 
         // === DEPTH OF FIELD ===
         // Apply DoF effect: separate near/far blur layers to prevent color bleeding
         // This runs after volumetrics (needs lit scene) and before UI/bloom
+        // GPU timestamp: start DoF
+        if let Some(idx) = self.gpu_profiler.begin_pass("DoF") {
+            self.gpu_profiler.write_timestamp(&mut encoder, idx);
+        }
         self.dof.create_bind_groups(&self.device, &self.depth_texture, &self.scene_texture_view);
         self.dof.render(&mut encoder, &self.scene_texture_view);
+        // GPU timestamp: end DoF
+        if let Some(idx) = self.gpu_profiler.end_pass() {
+            self.gpu_profiler.write_timestamp(&mut encoder, idx);
+        }
 
         // === UI RENDER PASS (after DoF to prevent blur on text) ===
         {
@@ -2153,7 +2193,15 @@ impl Renderer {
         // === BLOOM POST-PROCESSING ===
         // Apply bloom effect: extract bright pixels, blur, composite to output
         // If bloom disabled, just blits scene to output with tone mapping
+        // GPU timestamp: start Bloom
+        if let Some(idx) = self.gpu_profiler.begin_pass("Bloom") {
+            self.gpu_profiler.write_timestamp(&mut encoder, idx);
+        }
         self.bloom.render_or_blit(&mut encoder, &view, &self.scene_texture_view, &self.device, self.bloom_enabled);
+        // GPU timestamp: end Bloom
+        if let Some(idx) = self.gpu_profiler.end_pass() {
+            self.gpu_profiler.write_timestamp(&mut encoder, idx);
+        }
 
         let main_elapsed = main_start.elapsed();
 
@@ -2185,7 +2233,21 @@ impl Renderer {
             );
         }
 
-        // Update stats (CPU timing breakdown - GPU per-pass timing disabled)
+        // Combine CPU timing (sync, voxel_gi, cull, submit) with GPU pass timing
+        let mut pass_times = vec![
+            ("sync".to_string(), sync_elapsed.as_secs_f64() * 1000.0),
+            ("voxel_gi".to_string(), voxel_gi_elapsed.as_secs_f64() * 1000.0),
+            ("cull".to_string(), cull_elapsed.as_secs_f64() * 1000.0),
+            ("submit".to_string(), submit_elapsed.as_secs_f64() * 1000.0),
+        ];
+        // Add GPU per-pass timing (Main, Water, SSAO, Volumetrics, DoF, Bloom)
+        let gpu_pass_times = self.gpu_profiler.pass_times_vec();
+        if !gpu_pass_times.is_empty() {
+            pass_times.push(("---GPU---".to_string(), 0.0)); // Separator
+            pass_times.extend(gpu_pass_times);
+        }
+
+        // Update stats
         self.stats = RenderStats {
             chunks_rendered,
             chunks_culled,
@@ -2197,13 +2259,7 @@ impl Renderer {
             shadow_pass_ms: shadow_elapsed.as_secs_f64() * 1000.0,
             main_pass_ms: main_elapsed.as_secs_f64() * 1000.0,
             voxel_gi_ms: voxel_gi_elapsed.as_secs_f64() * 1000.0,
-            // CPU timing breakdown for bottleneck identification
-            pass_times: vec![
-                ("sync".to_string(), sync_elapsed.as_secs_f64() * 1000.0),
-                ("voxel_gi".to_string(), voxel_gi_elapsed.as_secs_f64() * 1000.0),
-                ("cull".to_string(), cull_elapsed.as_secs_f64() * 1000.0),
-                ("submit".to_string(), submit_elapsed.as_secs_f64() * 1000.0),
-            ],
+            pass_times,
         };
 
         Ok(())
@@ -2273,53 +2329,56 @@ impl Renderer {
             }
         }
 
-        // Throttle regular uploads to prevent frame spikes when many chunks arrive at once
+        // SECOND: Upload pending meshes from worker threads (throttled)
+        // This is O(pending) instead of O(all_visible) - huge optimization when stable
         // 16 uploads/frame at 60fps = 960 chunks/sec, plenty fast for smooth loading
         const MAX_UPLOADS_PER_FRAME: usize = 16;
-        let mut uploads_this_frame = 0;
+        let pending = world.take_pending_uploads(MAX_UPLOADS_PER_FRAME);
 
-        // Only upload meshes within render_distance (impostor chunks skip mesh upload)
-        for mesh in world.visible_meshes() {
-            if mesh.vertices.is_empty() {
-                continue;
-            }
-
-            // Skip chunks beyond render_distance - they render as impostors
-            let dist = (mesh.pos.center() - camera_pos).length();
-            if dist > render_dist_blocks {
-                continue;
-            }
-
+        for pos in pending {
             // Skip urgent meshes we already uploaded
-            if urgent.contains(&mesh.pos) {
+            if urgent.contains(&pos) {
                 continue;
             }
 
-            // Check if already in pool with same data
-            if let Some(existing) = self.chunk_pool.get_slot(&mesh.pos) {
-                // Only re-upload if vertex count changed (mesh was regenerated)
-                if existing.vertex_count == mesh.vertices.len() as u32 {
+            // Find the mesh for this position
+            if let Some(mesh) = world.visible_meshes().find(|m| m.pos == pos) {
+                if mesh.vertices.is_empty() {
                     continue;
                 }
-            }
 
-            // Upload new or changed mesh (throttled)
-            self.chunk_pool.upload_chunk(&self.queue, mesh);
-            uploads_this_frame += 1;
+                // Skip chunks beyond render_distance - they render as impostors
+                let dist = (mesh.pos.center() - camera_pos).length();
+                if dist > render_dist_blocks {
+                    continue;
+                }
 
-            if uploads_this_frame >= MAX_UPLOADS_PER_FRAME {
-                break; // Continue next frame
+                // Upload the mesh (checking for duplicates done in upload_chunk)
+                self.chunk_pool.upload_chunk(&self.queue, mesh);
             }
         }
 
-        // ALWAYS evict chunks that are no longer in the world or beyond render_distance
-        // This is critical - when the world unloads chunks, the GPU pool must remove them too
-        // Otherwise ghost meshes accumulate and keep rendering forever
-        let within_render: Vec<_> = world.visible_meshes()
-            .filter(|m| (m.pos.center() - camera_pos).length() <= render_dist_blocks)
-            .map(|m| m.pos)
+        // Evict chunks that were unloaded from the world
+        // This is O(unloaded) instead of O(all_visible) - huge optimization when stable
+        let unloaded = world.take_unloaded_chunks();
+        for pos in unloaded {
+            self.chunk_pool.remove_chunk(pos);
+        }
+
+        // Also evict chunks that moved beyond render distance (impostor range)
+        // This handles the case where chunks are still in world but shouldn't have GPU mesh
+        // Check pool slots directly instead of iterating all visible meshes
+        let slots_to_evict: Vec<_> = self.chunk_pool.slots()
+            .iter()
+            .filter(|(pos, _)| {
+                let dist = (pos.center() - camera_pos).length();
+                dist > render_dist_blocks
+            })
+            .map(|(pos, _)| *pos)
             .collect();
-        self.chunk_pool.evict_non_visible(&within_render);
+        for pos in slots_to_evict {
+            self.chunk_pool.remove_chunk(pos);
+        }
     }
 
     /// Get chunk pool stats for debug display

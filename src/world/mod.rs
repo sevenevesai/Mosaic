@@ -220,6 +220,14 @@ pub struct WorldManager {
     /// These bypass the normal throttled upload and get uploaded the same frame
     urgent_mesh_uploads: Vec<ChunkPos>,
 
+    /// Meshes that need upload to chunk pool (regular mesh generation)
+    /// Populated when mesh results arrive from workers, drained by renderer
+    pending_mesh_uploads: Vec<ChunkPos>,
+
+    /// Chunks that were unloaded and need eviction from GPU pool
+    /// Populated when chunks are removed, drained by renderer
+    unloaded_chunks: Vec<ChunkPos>,
+
     /// Chunks that should be marked urgent when their mesh result arrives
     /// (neighbors of player-modified chunks)
     pending_urgent: ahash::AHashSet<ChunkPos>,
@@ -302,6 +310,8 @@ impl WorldManager {
             storage,
             seed,
             urgent_mesh_uploads: Vec::new(),
+            pending_mesh_uploads: Vec::new(),
+            unloaded_chunks: Vec::new(),
             pending_urgent: ahash::AHashSet::new(),
             render_distance: RENDER_DISTANCE,
             load_distance: RENDER_DISTANCE, // Initially same, updated when impostor range is set
@@ -548,6 +558,9 @@ impl WorldManager {
                         // Check if this was a priority neighbor mesh - mark for urgent upload
                         if self.pending_urgent.remove(&pos) {
                             self.urgent_mesh_uploads.push(pos);
+                        } else {
+                            // Regular mesh - add to pending uploads for throttled upload
+                            self.pending_mesh_uploads.push(pos);
                         }
                     }
                     // else: discard stale mesh, a newer one is coming
@@ -639,6 +652,8 @@ impl WorldManager {
             self.chunks.write().remove(&pos);
             self.meshes.remove(&pos);
             self.water_meshes.remove(&pos);
+            // Track for GPU pool eviction
+            self.unloaded_chunks.push(pos);
         }
     }
 
@@ -758,6 +773,31 @@ impl WorldManager {
     /// Called by renderer to prioritize player-modified meshes
     pub fn take_urgent_uploads(&mut self) -> Vec<ChunkPos> {
         std::mem::take(&mut self.urgent_mesh_uploads)
+    }
+
+    /// Take up to `limit` meshes that need upload to chunk pool
+    /// Called by renderer each frame - returns newly generated meshes
+    /// Remaining meshes stay in the queue for next frame
+    pub fn take_pending_uploads(&mut self, limit: usize) -> Vec<ChunkPos> {
+        if self.pending_mesh_uploads.len() <= limit {
+            std::mem::take(&mut self.pending_mesh_uploads)
+        } else {
+            // Take first `limit` items, leave rest for next frame
+            let remaining = self.pending_mesh_uploads.split_off(limit);
+            let taken = std::mem::replace(&mut self.pending_mesh_uploads, remaining);
+            taken
+        }
+    }
+
+    /// Get count of pending mesh uploads (for debug display)
+    pub fn pending_upload_count(&self) -> usize {
+        self.pending_mesh_uploads.len()
+    }
+
+    /// Take the list of chunks that were unloaded and need GPU eviction
+    /// Called by renderer to remove stale chunks from the pool
+    pub fn take_unloaded_chunks(&mut self) -> Vec<ChunkPos> {
+        std::mem::take(&mut self.unloaded_chunks)
     }
 
     /// Get access to the chunk storage for voxel GI system

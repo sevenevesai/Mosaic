@@ -393,7 +393,48 @@ pub enum Block {
     Chest = 55,         // Storage container (rendered as vox prop)
 }
 
+/// Material type for audio feedback
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SoundMaterial {
+    Stone,      // Stone, ores, brick
+    Dirt,       // Dirt, grass (underneath)
+    Sand,       // Sand, gravel
+    Wood,       // Planks, logs
+    Grass,      // Grass top, leaves
+    Water,      // Water surface
+    Metal,      // Future: iron blocks
+}
+
 impl Block {
+    pub fn sound_material(&self) -> SoundMaterial {
+        match self {
+            Block::Stone | Block::Brick | Block::StoneRubble2 | Block::Bedrock |
+            Block::IronOre | Block::GoldOre | Block::DiamondOre | Block::RedstoneOre |
+            Block::CoalOre | Block::CopperOre | Block::EmeraldOre | Block::SapphireOre |
+            Block::QuartzOre | Block::AmethystOre | Block::SilverOre | Block::TinOre |
+            Block::NickelOre | Block::LeadOre | Block::TitaniumOre | Block::UraniumOre |
+            Block::Sandstone | Block::RedSandstone | Block::Gravel |
+            Block::MossyStone | Block::CrackedStone | Block::ClayStone |
+            Block::Stalactite | Block::Stalagmite | Block::CrystalAmethyst | Block::CrystalQuartz => SoundMaterial::Stone,
+
+            Block::Dirt | Block::StoneDirt | Block::MudBlock | Block::Peat => SoundMaterial::Dirt,
+
+            Block::Sand => SoundMaterial::Sand,
+
+            Block::Wood | Block::OakLog | Block::BirchLog | Block::PineLog | Block::JungleLog |
+            Block::Chest => SoundMaterial::Wood,
+
+            Block::Grass | Block::Leaves | Block::JungleGrass | Block::JungleLeaves |
+            Block::Vines | Block::DeadBush | Block::SpruceLeaves | Block::SnowGrass => SoundMaterial::Grass,
+
+            Block::Water | Block::Ice | Block::PackedIce => SoundMaterial::Water, // Ice sounds like glass/stone usually, but water for now or add Ice
+
+            Block::Snow => SoundMaterial::Grass, // Muffled
+
+            _ => SoundMaterial::Stone, // Default fallback
+        }
+    }
+
     pub fn is_solid(&self) -> bool {
         !matches!(
             self,

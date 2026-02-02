@@ -200,29 +200,42 @@ impl GpuProfiler {
     ///
     /// The copy happens one frame after the resolve, guaranteeing the GPU
     /// has finished writing the timestamp data.
+    ///
+    /// IMPORTANT: If the staging buffer is still mapped from a previous readback,
+    /// we skip the copy to avoid wgpu validation errors. This is safe because
+    /// we'll get the data on the next frame instead.
     pub fn resolve(&mut self, encoder: &mut wgpu::CommandEncoder) {
         if !self.supported || self.current_pass == 0 {
             return;
         }
 
-        let (query_set, buffers) = match (&self.query_set, &self.buffers) {
+        let (query_set, buffers) = match (&self.query_set, &mut self.buffers) {
             (Some(qs), Some(bufs)) => (qs, bufs),
             _ => return,
         };
 
         // Resolve current frame's timestamps to current buffer
         let query_count = (self.current_pass * 2) as u32;
+        let current_buffer = self.current_buffer;
         encoder.resolve_query_set(
             query_set,
             0..query_count,
-            &buffers[self.current_buffer].resolve_buffer,
+            &buffers[current_buffer].resolve_buffer,
             0,
         );
 
         // Copy PREVIOUS frame's resolve buffer to its staging buffer
         // (Skip on first frame - no previous data yet)
         if self.frame_count > 0 {
-            let prev_buffer = 1 - self.current_buffer;
+            let prev_buffer = 1 - current_buffer;
+
+            // CRITICAL: Check if staging buffer is still mapped from a previous readback
+            // If so, skip this copy to avoid wgpu validation error
+            if buffers[prev_buffer].pending_readback {
+                // Buffer still mapped - skip copy, will get data next frame
+                return;
+            }
+
             let copy_size = query_count as u64 * 8;
             encoder.copy_buffer_to_buffer(
                 &buffers[prev_buffer].resolve_buffer,
