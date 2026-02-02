@@ -266,6 +266,7 @@ impl App {
                             } else {
                                 // Open menu and release cursor
                                 self.settings_menu.is_open = true;
+                                self.settings_menu.on_open();
                                 if self.cursor_grabbed {
                                     self.toggle_cursor_grab();
                                 }

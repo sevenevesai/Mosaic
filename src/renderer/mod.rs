@@ -902,6 +902,22 @@ impl Renderer {
         self.voxel_gi.get_update_threshold()
     }
 
+    /// Cycle shadow update step backwards: 2 <- 4 <- 8 <- 16 <- 32 <- 48 <- 2
+    pub fn cycle_shadow_update_step_prev(&mut self) -> f32 {
+        let current = self.voxel_gi.get_update_threshold() as i32;
+        let new_step = match current {
+            2 => 48.0,
+            4 => 2.0,
+            8 => 4.0,
+            16 => 8.0,
+            32 => 16.0,
+            48 => 32.0,
+            _ => 2.0,
+        };
+        self.voxel_gi.set_update_threshold(new_step);
+        new_step
+    }
+
     /// Get current time of day (0.0-1.0)
     pub fn time_of_day(&self) -> f32 {
         self.time_of_day
@@ -909,6 +925,25 @@ impl Renderer {
 
     /// Get current cycle speed multiplier
     pub fn cycle_speed(&self) -> f32 {
+        self.cycle_speed
+    }
+
+    /// Set cycle speed directly
+    pub fn set_cycle_speed(&mut self, speed: f32) {
+        self.cycle_speed = speed;
+    }
+
+    /// Cycle speed backwards: 1x -> paused -> 100x -> 50x -> 20x -> 5x -> 1x
+    pub fn cycle_speed_prev(&mut self) -> f32 {
+        self.cycle_speed = match self.cycle_speed as i32 {
+            0 => 100.0,
+            1 => 0.0,  // Paused
+            5 => 1.0,
+            20 => 5.0,
+            50 => 20.0,
+            100 => 50.0,
+            _ => 0.0,
+        };
         self.cycle_speed
     }
 
@@ -939,6 +974,11 @@ impl Renderer {
         } else {
             "SOFT"
         }
+    }
+
+    /// Set shadow mode directly (-1=off, 0=hard, 1=soft)
+    pub fn set_shadow_mode(&mut self, mode: f32) {
+        self.shadow_mode = mode;
     }
 
     /// Toggle shadow debug visualization
@@ -999,6 +1039,33 @@ impl Renderer {
         self.bloom_enabled
     }
 
+    /// Set bloom enabled state directly
+    pub fn set_bloom_enabled(&mut self, enabled: bool) {
+        self.bloom_enabled = enabled;
+    }
+
+    /// Set volumetrics enabled state directly
+    pub fn set_volumetrics_enabled(&mut self, enabled: bool) {
+        self.volumetrics.set_enabled(enabled);
+    }
+
+    /// Set GPU voxel fill enabled state directly
+    pub fn set_gpu_voxel_fill_enabled(&mut self, enabled: bool) {
+        self.voxel_gi.set_use_gpu_fill(enabled);
+    }
+
+    /// Set GPU culling enabled state directly
+    pub fn set_gpu_culling_enabled(&mut self, enabled: bool) {
+        if self.mdi_count_available {
+            self.use_gpu_culling = enabled;
+        }
+    }
+
+    /// Set debug overlay enabled state directly
+    pub fn set_debug_overlay_enabled(&mut self, enabled: bool) {
+        self.debug_overlay.set_enabled(enabled);
+    }
+
     // ========== AUDIO VOLUME CONTROLS ==========
 
     /// Get master audio volume (0.0 - 1.0)
@@ -1043,6 +1110,48 @@ impl Renderer {
         };
     }
 
+    /// Set master audio volume directly (0.0-1.0)
+    pub fn set_audio_master(&mut self, value: f32) {
+        self.audio_master = value.clamp(0.0, 1.0);
+    }
+
+    /// Cycle master audio volume backwards
+    pub fn cycle_audio_master_prev(&mut self) {
+        self.audio_master = if self.audio_master <= 0.0 {
+            1.0
+        } else {
+            (self.audio_master - 0.1).max(0.0)
+        };
+    }
+
+    /// Set SFX audio volume directly (0.0-1.0)
+    pub fn set_audio_sfx(&mut self, value: f32) {
+        self.audio_sfx = value.clamp(0.0, 1.0);
+    }
+
+    /// Cycle SFX audio volume backwards
+    pub fn cycle_audio_sfx_prev(&mut self) {
+        self.audio_sfx = if self.audio_sfx <= 0.0 {
+            1.0
+        } else {
+            (self.audio_sfx - 0.1).max(0.0)
+        };
+    }
+
+    /// Set ambient audio volume directly (0.0-1.0)
+    pub fn set_audio_ambient(&mut self, value: f32) {
+        self.audio_ambient = value.clamp(0.0, 1.0);
+    }
+
+    /// Cycle ambient audio volume backwards
+    pub fn cycle_audio_ambient_prev(&mut self) {
+        self.audio_ambient = if self.audio_ambient <= 0.0 {
+            1.0
+        } else {
+            (self.audio_ambient - 0.1).max(0.0)
+        };
+    }
+
     /// Check if audio settings have changed (for syncing to AudioManager)
     pub fn audio_settings_changed(&self, master: f32, sfx: f32, ambient: f32) -> bool {
         (self.audio_master - master).abs() > 0.001
@@ -1060,6 +1169,11 @@ impl Renderer {
         self.torch_shadows = !self.torch_shadows;
         tracing::info!("Torch shadows: {}", if self.torch_shadows { "ON" } else { "OFF" });
         self.torch_shadows
+    }
+
+    /// Set torch shadows enabled state directly
+    pub fn set_torch_shadows_enabled(&mut self, enabled: bool) {
+        self.torch_shadows = enabled;
     }
 
     /// Check if SSAO is enabled
@@ -1082,6 +1196,31 @@ impl Renderer {
     /// Set SSAO quality directly
     pub fn set_ssao_quality(&mut self, quality: SsaoQuality) {
         self.ssao.set_quality(&self.device, self.size.width, self.size.height, quality);
+    }
+
+    /// Set SSAO quality by index (0=Off, 1=Low, 2=Medium, 3=High, 4=Ultra)
+    pub fn set_ssao_quality_index(&mut self, index: usize) {
+        let quality = match index {
+            0 => SsaoQuality::Off,
+            1 => SsaoQuality::Low,
+            2 => SsaoQuality::Medium,
+            3 => SsaoQuality::High,
+            _ => SsaoQuality::Ultra,
+        };
+        self.set_ssao_quality(quality);
+    }
+
+    /// Cycle SSAO quality backwards
+    pub fn cycle_ssao_quality_prev(&mut self) -> SsaoQuality {
+        let new_quality = match self.ssao.quality {
+            SsaoQuality::Off => SsaoQuality::Ultra,
+            SsaoQuality::Low => SsaoQuality::Off,
+            SsaoQuality::Medium => SsaoQuality::Low,
+            SsaoQuality::High => SsaoQuality::Medium,
+            SsaoQuality::Ultra => SsaoQuality::High,
+        };
+        self.set_ssao_quality(new_quality);
+        new_quality
     }
 
     /// Get mutable access to SSAO params for advanced settings
@@ -1177,6 +1316,82 @@ impl Renderer {
         next
     }
 
+    /// Set DoF focus range directly
+    pub fn set_dof_focus_range(&mut self, range: f32) {
+        self.dof.params.focus_transition = range;
+    }
+
+    /// Cycle DoF focus range backwards
+    pub fn cycle_dof_focus_range_prev(&mut self) -> f32 {
+        let ranges = [5.0, 10.0, 15.0, 20.0, 30.0, 50.0, 75.0, 100.0];
+        let current = self.dof.params.focus_transition;
+        let prev = ranges.iter().rev()
+            .find(|&&r| r < current - 0.1)
+            .copied()
+            .unwrap_or(ranges[ranges.len() - 1]);
+        self.dof.params.focus_transition = prev;
+        prev
+    }
+
+    /// Set DoF blur strength directly (0.0-1.0)
+    pub fn set_dof_blur_strength(&mut self, strength: f32) {
+        self.dof.params.aperture = strength.clamp(0.0, 1.0);
+    }
+
+    /// Cycle DoF blur strength backwards
+    pub fn cycle_dof_blur_strength_prev(&mut self) -> f32 {
+        let strengths = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
+        let current = self.dof.params.aperture;
+        let prev = strengths.iter().rev()
+            .find(|&&s| s < current - 0.01)
+            .copied()
+            .unwrap_or(strengths[strengths.len() - 1]);
+        self.dof.params.aperture = prev;
+        prev
+    }
+
+    /// Set DoF focus distance directly
+    pub fn set_dof_focus_distance(&mut self, distance: f32) {
+        self.dof.params.manual_focus_distance = distance;
+    }
+
+    /// Cycle DoF focus distance backwards
+    pub fn cycle_dof_focus_distance_prev(&mut self) -> f32 {
+        let distances = [5.0, 10.0, 15.0, 20.0, 30.0, 50.0, 75.0, 100.0];
+        let current = self.dof.params.manual_focus_distance;
+        let prev = distances.iter().rev()
+            .find(|&&d| d < current - 0.1)
+            .copied()
+            .unwrap_or(distances[distances.len() - 1]);
+        self.dof.params.manual_focus_distance = prev;
+        prev
+    }
+
+    /// Set DoF quality by index (0=Off, 1=Low, 2=Medium, 3=High, 4=Ultra)
+    pub fn set_dof_quality_index(&mut self, index: usize) {
+        let quality = match index {
+            0 => DofQuality::Off,
+            1 => DofQuality::Low,
+            2 => DofQuality::Medium,
+            3 => DofQuality::High,
+            _ => DofQuality::Ultra,
+        };
+        self.dof.set_quality(quality);
+    }
+
+    /// Cycle DoF quality backwards
+    pub fn cycle_dof_quality_prev(&mut self) -> DofQuality {
+        let new_quality = match self.dof.quality {
+            DofQuality::Off => DofQuality::Ultra,
+            DofQuality::Low => DofQuality::Off,
+            DofQuality::Medium => DofQuality::Low,
+            DofQuality::High => DofQuality::Medium,
+            DofQuality::Ultra => DofQuality::High,
+        };
+        self.dof.set_quality(new_quality);
+        new_quality
+    }
+
     // === Water Quality Settings ===
 
     /// Get current water quality
@@ -1229,6 +1444,31 @@ impl Renderer {
         self.water_system.set_quality(water_quality);
     }
 
+    /// Set refraction quality by index (0=Off, 1=Low, 2=Medium, 3=High, 4=Ultra)
+    pub fn set_refraction_quality_index(&mut self, index: usize) {
+        let quality = match index {
+            0 => RefractionQuality::Off,
+            1 => RefractionQuality::Low,
+            2 => RefractionQuality::Medium,
+            3 => RefractionQuality::High,
+            _ => RefractionQuality::Ultra,
+        };
+        self.set_refraction_quality(quality);
+    }
+
+    /// Cycle refraction quality backwards
+    pub fn cycle_refraction_quality_prev(&mut self) -> RefractionQuality {
+        let new_quality = match self.refraction_quality() {
+            RefractionQuality::Off => RefractionQuality::Ultra,
+            RefractionQuality::Low => RefractionQuality::Off,
+            RefractionQuality::Medium => RefractionQuality::Low,
+            RefractionQuality::High => RefractionQuality::Medium,
+            RefractionQuality::Ultra => RefractionQuality::High,
+        };
+        self.set_refraction_quality(new_quality);
+        new_quality
+    }
+
     // === Extended View (Impostor) Settings ===
 
     /// Get current extended view range
@@ -1246,6 +1486,29 @@ impl Renderer {
     /// Set extended view range directly
     pub fn set_impostor_range(&mut self, range: ImpostorRange) {
         self.impostor_renderer.range = range;
+    }
+
+    /// Set impostor range by index (0=Off, 1=+16, 2=+24, 3=+32, 4=+40)
+    pub fn set_impostor_range_index(&mut self, index: usize) {
+        self.impostor_renderer.range = match index {
+            0 => ImpostorRange::Off,
+            1 => ImpostorRange::Plus16,
+            2 => ImpostorRange::Plus24,
+            3 => ImpostorRange::Plus32,
+            _ => ImpostorRange::Plus40,
+        };
+    }
+
+    /// Cycle impostor range backwards
+    pub fn cycle_impostor_range_prev(&mut self) -> ImpostorRange {
+        self.impostor_renderer.range = match self.impostor_renderer.range {
+            ImpostorRange::Off => ImpostorRange::Plus40,
+            ImpostorRange::Plus16 => ImpostorRange::Off,
+            ImpostorRange::Plus24 => ImpostorRange::Plus16,
+            ImpostorRange::Plus32 => ImpostorRange::Plus24,
+            ImpostorRange::Plus40 => ImpostorRange::Plus32,
+        };
+        self.impostor_renderer.range
     }
 
     /// Get total view distance (render_distance + impostor extra)
@@ -1271,6 +1534,21 @@ impl Renderer {
             self.render_distance + 4
         };
         self.render_distance
+    }
+
+    /// Cycle render distance backwards: 32 -> 28 -> ... -> 8 -> 32
+    pub fn cycle_render_distance_prev(&mut self) -> i32 {
+        self.render_distance = if self.render_distance <= 8 {
+            32
+        } else {
+            self.render_distance - 4
+        };
+        self.render_distance
+    }
+
+    /// Set render distance directly
+    pub fn set_render_distance(&mut self, distance: i32) {
+        self.render_distance = distance.clamp(8, 32);
     }
 
     /// Get current shadow distance
@@ -1306,6 +1584,27 @@ impl Renderer {
     /// Set display mode (used when applying mode from window)
     pub fn set_display_mode(&mut self, mode: DisplayMode) {
         self.display_mode = mode;
+    }
+
+    /// Cycle display mode backwards: Windowed <- Fullscreen <- Borderless <- Windowed
+    pub fn cycle_display_mode_prev(&mut self) -> DisplayMode {
+        self.display_mode = match self.display_mode {
+            DisplayMode::Windowed => DisplayMode::Fullscreen,
+            DisplayMode::Borderless => DisplayMode::Windowed,
+            DisplayMode::Fullscreen => DisplayMode::Borderless,
+        };
+        self.display_mode_pending = true;
+        self.display_mode
+    }
+
+    /// Set display mode by index (0=Windowed, 1=Borderless, 2=Fullscreen)
+    pub fn set_display_mode_index(&mut self, index: usize) {
+        self.display_mode = match index {
+            0 => DisplayMode::Windowed,
+            1 => DisplayMode::Borderless,
+            _ => DisplayMode::Fullscreen,
+        };
+        self.display_mode_pending = true;
     }
 
     /// Check if display mode change is pending
