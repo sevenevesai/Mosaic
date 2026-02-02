@@ -634,26 +634,6 @@ fn add_face_right(v: &mut Vec<ChunkVertex>, i: &mut Vec<u32>, x: f32, y: f32, z:
     );
 }
 
-/// Add a quad with foliage flag for wind animation
-fn add_quad_foliage(
-    vertices: &mut Vec<ChunkVertex>,
-    indices: &mut Vec<u32>,
-    positions: [[f32; 3]; 4],
-    normal: [f32; 3],
-    uvs: [[f32; 2]; 4],
-    light: u8,
-) {
-    let base = vertices.len() as u32;
-    for idx in 0..4 {
-        vertices.push(ChunkVertex::new_tiled_lit_foliage(
-            positions[idx], normal, uvs[idx], 1.0, 1, 1, light, true
-        ));
-    }
-    // Vertices are in order: 0-1-2-3
-    // Two CCW triangles when viewed from outside: 0-2-1 and 0-3-2
-    indices.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
-}
-
 /// Add a quad with emissive flag for light sources visible at any distance
 fn add_quad_emissive(
     vertices: &mut Vec<ChunkVertex>,
@@ -674,47 +654,9 @@ fn add_quad_emissive(
     indices.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
 }
 
-/// Check if a foliage face should be rendered (neighbor doesn't occlude it)
-/// Returns true if the face is exposed to air/water/transparent blocks
-#[inline]
-fn foliage_face_visible(
-    chunk: &Chunk,
-    neighbors: &[Option<Arc<Chunk>>; 6],
-    x: usize, y: usize, z: usize,
-    dx: i32, dy: i32, dz: i32,
-    neighbor_idx: usize,
-) -> bool {
-    let nx = x as i32 + dx;
-    let ny = y as i32 + dy;
-    let nz = z as i32 + dz;
-
-    // Check if neighbor is within this chunk
-    if nx >= 0 && nx < CHUNK_SIZE as i32 &&
-       ny >= 0 && ny < CHUNK_SIZE as i32 &&
-       nz >= 0 && nz < CHUNK_SIZE as i32 {
-        let nb = chunk.get_block(nx as usize, ny as usize, nz as usize);
-        // Occlude if neighbor is solid (including other foliage)
-        // Only render face if neighbor is air, water, or other transparent non-solid
-        !nb.is_solid()
-    } else {
-        // Neighbor is in adjacent chunk
-        if let Some(nc) = &neighbors[neighbor_idx] {
-            // Calculate position in neighbor chunk (wrap around)
-            let lx = ((nx % CHUNK_SIZE as i32) + CHUNK_SIZE as i32) as usize % CHUNK_SIZE;
-            let ly = ((ny % CHUNK_SIZE as i32) + CHUNK_SIZE as i32) as usize % CHUNK_SIZE;
-            let lz = ((nz % CHUNK_SIZE as i32) + CHUNK_SIZE as i32) as usize % CHUNK_SIZE;
-            let nb = nc.get_block(lx, ly, lz);
-            !nb.is_solid()
-        } else {
-            // No neighbor chunk loaded = assume air = face visible
-            true
-        }
-    }
-}
-
-/// Generate cube faces for foliage blocks (leaves) with neighbor culling
-/// Since wind animation is disabled, we can safely cull foliage-to-foliage faces
-/// This provides ~3x vertex reduction in dense tree canopies
+/// Generate foliage faces using greedy meshing
+/// Merges adjacent same-type foliage faces into larger quads for better performance
+/// Since wind animation is disabled, we can safely merge foliage faces
 fn add_foliage_blocks(
     chunk: &Chunk,
     neighbors: &[Option<Arc<Chunk>>; 6],
@@ -722,128 +664,252 @@ fn add_foliage_blocks(
     vertices: &mut Vec<ChunkVertex>,
     indices: &mut Vec<u32>,
 ) {
-    let s = BLOCK_SCALE;
+    // Process all 6 face directions using greedy meshing
+    for &(axis, positive) in &[
+        (Axis::Y, true),   // Top (+Y)
+        (Axis::Y, false),  // Bottom (-Y)
+        (Axis::Z, true),   // Front (+Z)
+        (Axis::Z, false),  // Back (-Z)
+        (Axis::X, false),  // Left (-X)
+        (Axis::X, true),   // Right (+X)
+    ] {
+        greedy_mesh_foliage_axis(chunk, neighbors, axis, positive, world_origin, vertices, indices);
+    }
+}
 
-    for z in 0..CHUNK_SIZE {
-        for y in 0..CHUNK_SIZE {
-            for x in 0..CHUNK_SIZE {
+/// Greedy mesh foliage blocks for one axis direction
+/// Similar to binary_greedy_mesh_axis but for foliage with solid-neighbor culling
+fn greedy_mesh_foliage_axis(
+    chunk: &Chunk,
+    neighbors: &[Option<Arc<Chunk>>; 6],
+    axis: Axis,
+    positive: bool,
+    world_origin: glam::Vec3,
+    vertices: &mut Vec<ChunkVertex>,
+    indices: &mut Vec<u32>,
+) {
+    // Determine which neighbor chunk to check for face culling
+    let neighbor_idx = match (axis, positive) {
+        (Axis::X, false) => 0, // -X neighbor
+        (Axis::X, true) => 1,  // +X neighbor
+        (Axis::Y, false) => 2, // -Y neighbor
+        (Axis::Y, true) => 3,  // +Y neighbor
+        (Axis::Z, false) => 4, // -Z neighbor
+        (Axis::Z, true) => 5,  // +Z neighbor
+    };
+    let neighbor_chunk = &neighbors[neighbor_idx];
+
+    // Process each 2D slice perpendicular to the axis
+    for d in 0..CHUNK_SIZE {
+        // ═══════════════════════════════════════════════════════════════════
+        // PHASE 1: Build foliage occupancy bitmasks
+        // Each row is a u16 where bit i = 1 means foliage block at position i
+        // ═══════════════════════════════════════════════════════════════════
+
+        let mut foliage_occupancy = [0u16; CHUNK_SIZE];
+        let mut block_types = [[Block::Air; CHUNK_SIZE]; CHUNK_SIZE]; // Cache for texture lookup
+
+        for v in 0..CHUNK_SIZE {
+            for u in 0..CHUNK_SIZE {
+                let (x, y, z) = match axis {
+                    Axis::X => (d, v, u),
+                    Axis::Y => (u, d, v),
+                    Axis::Z => (u, v, d),
+                };
                 let block = chunk.get_block(x, y, z);
-                if !block.is_foliage() {
-                    continue;
+                if block.is_foliage() {
+                    foliage_occupancy[v] |= 1 << u;
+                    block_types[v][u] = block;
                 }
+            }
+        }
 
-                let bx = world_origin.x + x as f32 * s;
-                let by = world_origin.y + y as f32 * s;
-                let bz = world_origin.z + z as f32 * s;
+        // Early exit: Skip this slice if no foliage blocks
+        let slice_has_foliage = foliage_occupancy.iter().any(|&row| row != 0);
+        if !slice_has_foliage {
+            continue;
+        }
 
-                // Get texture UVs with half-texel inset (same pattern as get_tile_uvs)
-                let tex_idx = block.texture_indices()[0];
-                let tiles_per_row = 8u32;
-                let tile_size = 1.0 / tiles_per_row as f32;
-                let inset = 0.001; // ~2 texels of padding to prevent bleeding
-                let u0 = (tex_idx % tiles_per_row) as f32 * tile_size + inset;
-                let v0 = (tex_idx / tiles_per_row) as f32 * tile_size + inset;
-                let u1 = u0 + tile_size - inset * 2.0;
-                let v1 = v0 + tile_size - inset * 2.0;
-                let uv0 = [u0, v1]; // bottom-left
-                let uv1 = [u1, v1]; // bottom-right
-                let uv2 = [u1, v0]; // top-right
-                let uv3 = [u0, v0]; // top-left
+        // ═══════════════════════════════════════════════════════════════════
+        // PHASE 2: Build neighbor solid occupancy (blocks that occlude faces)
+        // ═══════════════════════════════════════════════════════════════════
 
-                // Top face (+Y) - only if not occluded by block above
-                // Neighbor indices: 0=-X, 1=+X, 2=-Y, 3=+Y, 4=-Z, 5=+Z
-                if foliage_face_visible(chunk, neighbors, x, y, z, 0, 1, 0, 3) {
-                    let light = get_face_light(chunk, neighbors, x, y, z, Axis::Y, true);
-                    add_quad_foliage(vertices, indices,
-                        [
-                            [bx,     by + s, bz],       // 0: back-left
-                            [bx + s, by + s, bz],       // 1: back-right
-                            [bx + s, by + s, bz + s],   // 2: front-right
-                            [bx,     by + s, bz + s],   // 3: front-left
-                        ],
-                        [0.0, 1.0, 0.0],
-                        [uv0, uv1, uv2, uv3],
-                        light,
+        let mut solid_neighbor_occupancy = [0u16; CHUNK_SIZE];
+
+        if positive {
+            // Positive direction: check slice at d+1
+            if d + 1 < CHUNK_SIZE {
+                // Neighbor slice is within this chunk
+                for v in 0..CHUNK_SIZE {
+                    for u in 0..CHUNK_SIZE {
+                        let (x, y, z) = match axis {
+                            Axis::X => (d + 1, v, u),
+                            Axis::Y => (u, d + 1, v),
+                            Axis::Z => (u, v, d + 1),
+                        };
+                        let nb = chunk.get_block(x, y, z);
+                        // Any solid block (including foliage) occludes the face
+                        if nb.is_solid() {
+                            solid_neighbor_occupancy[v] |= 1 << u;
+                        }
+                    }
+                }
+            } else if let Some(nc) = neighbor_chunk {
+                // Neighbor slice is in adjacent chunk (slice 0)
+                for v in 0..CHUNK_SIZE {
+                    for u in 0..CHUNK_SIZE {
+                        let (x, y, z) = match axis {
+                            Axis::X => (0, v, u),
+                            Axis::Y => (u, 0, v),
+                            Axis::Z => (u, v, 0),
+                        };
+                        let nb = nc.get_block(x, y, z);
+                        if nb.is_solid() {
+                            solid_neighbor_occupancy[v] |= 1 << u;
+                        }
+                    }
+                }
+            }
+            // No neighbor chunk = all air = all faces visible (occupancy stays 0)
+        } else {
+            // Negative direction: check slice at d-1
+            if d > 0 {
+                for v in 0..CHUNK_SIZE {
+                    for u in 0..CHUNK_SIZE {
+                        let (x, y, z) = match axis {
+                            Axis::X => (d - 1, v, u),
+                            Axis::Y => (u, d - 1, v),
+                            Axis::Z => (u, v, d - 1),
+                        };
+                        let nb = chunk.get_block(x, y, z);
+                        if nb.is_solid() {
+                            solid_neighbor_occupancy[v] |= 1 << u;
+                        }
+                    }
+                }
+            } else if let Some(nc) = neighbor_chunk {
+                // Neighbor slice is in adjacent chunk (last slice)
+                for v in 0..CHUNK_SIZE {
+                    for u in 0..CHUNK_SIZE {
+                        let (x, y, z) = match axis {
+                            Axis::X => (CHUNK_SIZE - 1, v, u),
+                            Axis::Y => (u, CHUNK_SIZE - 1, v),
+                            Axis::Z => (u, v, CHUNK_SIZE - 1),
+                        };
+                        let nb = nc.get_block(x, y, z);
+                        if nb.is_solid() {
+                            solid_neighbor_occupancy[v] |= 1 << u;
+                        }
+                    }
+                }
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════════════
+        // PHASE 3: Compute visibility via bitwise AND-NOT
+        // A foliage face is visible when: foliage AND neighbor is NOT solid
+        // visible = foliage & !solid_neighbor
+        // ═══════════════════════════════════════════════════════════════════
+
+        let mut visible_mask = [0u16; CHUNK_SIZE];
+        for v in 0..CHUNK_SIZE {
+            visible_mask[v] = foliage_occupancy[v] & !solid_neighbor_occupancy[v];
+        }
+
+        // ═══════════════════════════════════════════════════════════════════
+        // PHASE 4: Group visible faces by texture index
+        // ═══════════════════════════════════════════════════════════════════
+
+        let mut texture_masks = [[0u16; CHUNK_SIZE]; MAX_TEXTURES];
+        let mut textures_present: u64 = 0;
+
+        for v in 0..CHUNK_SIZE {
+            let mut row_bits = visible_mask[v];
+            while row_bits != 0 {
+                let u = row_bits.trailing_zeros() as usize;
+                row_bits &= row_bits - 1; // Clear lowest bit
+
+                // Get texture index for this foliage block
+                let tex_idx = block_types[v][u].texture_indices()[0] as usize;
+
+                texture_masks[tex_idx][v] |= 1 << u;
+                textures_present |= 1 << tex_idx;
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════════════
+        // PHASE 5: Binary Greedy Merge for each texture
+        // ═══════════════════════════════════════════════════════════════════
+
+        while textures_present != 0 {
+            let tex_idx = textures_present.trailing_zeros() as usize;
+            textures_present &= textures_present - 1;
+
+            let tex_mask = &mut texture_masks[tex_idx];
+
+            for start_v in 0..CHUNK_SIZE {
+                while tex_mask[start_v] != 0 {
+                    // Step 1: Find horizontal run start
+                    let start_u = tex_mask[start_v].trailing_zeros() as usize;
+
+                    // Step 2: Find horizontal run length
+                    let shifted = tex_mask[start_v] >> start_u;
+                    let width = (!shifted).trailing_zeros() as usize;
+                    let width = width.min(CHUNK_SIZE - start_u);
+
+                    // Step 3: Clear this run from current row
+                    let run_mask: u16 = (((1u32 << width) - 1) << start_u) as u16;
+                    tex_mask[start_v] &= !run_mask;
+
+                    // Step 4: Extend vertically
+                    let mut height = 1usize;
+                    for v in (start_v + 1)..CHUNK_SIZE {
+                        if (tex_mask[v] & run_mask) == run_mask {
+                            tex_mask[v] &= !run_mask;
+                            height += 1;
+                        } else {
+                            break;
+                        }
+                    }
+
+                    // Step 5: Sample light at quad corners
+                    let corners = [
+                        (start_u, start_v),
+                        (start_u + width - 1, start_v),
+                        (start_u, start_v + height - 1),
+                        (start_u + width - 1, start_v + height - 1),
+                    ];
+                    let light = corners.iter().map(|&(u, v)| {
+                        let (bx, by, bz) = match axis {
+                            Axis::X => (d, v, u),
+                            Axis::Y => (u, d, v),
+                            Axis::Z => (u, v, d),
+                        };
+                        get_face_light(chunk, neighbors, bx, by, bz, axis, positive)
+                    }).max().unwrap_or(0);
+
+                    // Calculate AO for the 4 corners
+                    let ao_values = calculate_greedy_ao(
+                        chunk, neighbors, axis, positive,
+                        d, start_u, start_v, width, height,
                     );
-                }
 
-                // Bottom face (-Y) - only if not occluded by block below
-                if foliage_face_visible(chunk, neighbors, x, y, z, 0, -1, 0, 2) {
-                    let light = get_face_light(chunk, neighbors, x, y, z, Axis::Y, false);
-                    add_quad_foliage(vertices, indices,
-                        [
-                            [bx,     by, bz + s],   // 0: front-left
-                            [bx + s, by, bz + s],   // 1: front-right
-                            [bx + s, by, bz],       // 2: back-right
-                            [bx,     by, bz],       // 3: back-left
-                        ],
-                        [0.0, -1.0, 0.0],
-                        [uv0, uv1, uv2, uv3],
+                    // Emit greedy quad with foliage flag
+                    emit_greedy_quad(
+                        vertices,
+                        indices,
+                        world_origin,
+                        axis,
+                        positive,
+                        d,
+                        start_u,
+                        start_v,
+                        width,
+                        height,
+                        tex_idx as u32,
                         light,
-                    );
-                }
-
-                // Front face (+Z) - only if not occluded by block in front
-                if foliage_face_visible(chunk, neighbors, x, y, z, 0, 0, 1, 5) {
-                    let light = get_face_light(chunk, neighbors, x, y, z, Axis::Z, true);
-                    add_quad_foliage(vertices, indices,
-                        [
-                            [bx + s, by,     bz + s],   // 0: bottom-right
-                            [bx,     by,     bz + s],   // 1: bottom-left
-                            [bx,     by + s, bz + s],   // 2: top-left
-                            [bx + s, by + s, bz + s],   // 3: top-right
-                        ],
-                        [0.0, 0.0, 1.0],
-                        [uv0, uv1, uv2, uv3],
-                        light,
-                    );
-                }
-
-                // Back face (-Z) - only if not occluded by block behind
-                if foliage_face_visible(chunk, neighbors, x, y, z, 0, 0, -1, 4) {
-                    let light = get_face_light(chunk, neighbors, x, y, z, Axis::Z, false);
-                    add_quad_foliage(vertices, indices,
-                        [
-                            [bx,     by,     bz],   // 0: bottom-left
-                            [bx + s, by,     bz],   // 1: bottom-right
-                            [bx + s, by + s, bz],   // 2: top-right
-                            [bx,     by + s, bz],   // 3: top-left
-                        ],
-                        [0.0, 0.0, -1.0],
-                        [uv0, uv1, uv2, uv3],
-                        light,
-                    );
-                }
-
-                // Left face (-X) - only if not occluded by block to the left
-                if foliage_face_visible(chunk, neighbors, x, y, z, -1, 0, 0, 0) {
-                    let light = get_face_light(chunk, neighbors, x, y, z, Axis::X, false);
-                    add_quad_foliage(vertices, indices,
-                        [
-                            [bx, by,     bz],       // 0: bottom-back
-                            [bx, by + s, bz],       // 1: top-back
-                            [bx, by + s, bz + s],   // 2: top-front
-                            [bx, by,     bz + s],   // 3: bottom-front
-                        ],
-                        [-1.0, 0.0, 0.0],
-                        [uv0, uv3, uv2, uv1],  // Reordered like add_face_left
-                        light,
-                    );
-                }
-
-                // Right face (+X) - only if not occluded by block to the right
-                if foliage_face_visible(chunk, neighbors, x, y, z, 1, 0, 0, 1) {
-                    let light = get_face_light(chunk, neighbors, x, y, z, Axis::X, true);
-                    add_quad_foliage(vertices, indices,
-                        [
-                            [bx + s, by,     bz + s],   // 0: bottom-front
-                            [bx + s, by + s, bz + s],   // 1: top-front
-                            [bx + s, by + s, bz],       // 2: top-back
-                            [bx + s, by,     bz],       // 3: bottom-back
-                        ],
-                        [1.0, 0.0, 0.0],
-                        [uv0, uv3, uv2, uv1],  // Reordered like add_face_right
-                        light,
+                        ao_values,
+                        true, // is_foliage = true
                     );
                 }
             }
