@@ -1076,19 +1076,25 @@ fn reconstruct_position(uv: vec2<f32>, depth: f32) -> vec3<f32> {
 fn reconstruct_normal(uv: vec2<f32>, view_pos: vec3<f32>) -> vec3<f32> {
     let texel = vec2<f32>(1.0 / uniforms.screen_params.x, 1.0 / uniforms.screen_params.y);
 
+    // Clamp UVs to avoid sampling outside screen (prevents edge artifacts)
+    let uv_r = clamp(uv + vec2<f32>(texel.x, 0.0), vec2<f32>(0.001), vec2<f32>(0.999));
+    let uv_l = clamp(uv - vec2<f32>(texel.x, 0.0), vec2<f32>(0.001), vec2<f32>(0.999));
+    let uv_u = clamp(uv + vec2<f32>(0.0, texel.y), vec2<f32>(0.001), vec2<f32>(0.999));
+    let uv_d = clamp(uv - vec2<f32>(0.0, texel.y), vec2<f32>(0.001), vec2<f32>(0.999));
+
     // Sample neighboring depths
-    let depth_r = textureSampleLevel(t_depth, s_depth, uv + vec2<f32>(texel.x, 0.0), 0.0);
-    let depth_l = textureSampleLevel(t_depth, s_depth, uv - vec2<f32>(texel.x, 0.0), 0.0);
-    let depth_u = textureSampleLevel(t_depth, s_depth, uv + vec2<f32>(0.0, texel.y), 0.0);
-    let depth_d = textureSampleLevel(t_depth, s_depth, uv - vec2<f32>(0.0, texel.y), 0.0);
+    let depth_r = textureSampleLevel(t_depth, s_depth, uv_r, 0.0);
+    let depth_l = textureSampleLevel(t_depth, s_depth, uv_l, 0.0);
+    let depth_u = textureSampleLevel(t_depth, s_depth, uv_u, 0.0);
+    let depth_d = textureSampleLevel(t_depth, s_depth, uv_d, 0.0);
 
     // Reconstruct neighboring positions
-    let pos_r = reconstruct_position(uv + vec2<f32>(texel.x, 0.0), depth_r);
-    let pos_l = reconstruct_position(uv - vec2<f32>(texel.x, 0.0), depth_l);
-    let pos_u = reconstruct_position(uv + vec2<f32>(0.0, texel.y), depth_u);
-    let pos_d = reconstruct_position(uv - vec2<f32>(0.0, texel.y), depth_d);
+    let pos_r = reconstruct_position(uv_r, depth_r);
+    let pos_l = reconstruct_position(uv_l, depth_l);
+    let pos_u = reconstruct_position(uv_u, depth_u);
+    let pos_d = reconstruct_position(uv_d, depth_d);
 
-    // Use the smaller derivatives to avoid artifacts at edges
+    // Use the smaller derivatives to avoid artifacts at depth discontinuities
     let dx_r = pos_r - view_pos;
     let dx_l = view_pos - pos_l;
     let dy_u = pos_u - view_pos;
@@ -1143,7 +1149,13 @@ fn fs_main(in: VertexOutput) -> @location(0) f32 {
     if (dist > fade_end) {
         return 1.0; // Early out for distant pixels
     }
-    let fade = 1.0 - smoothstep(fade_start, fade_end, dist);
+    let dist_fade = 1.0 - smoothstep(fade_start, fade_end, dist);
+
+    // Edge fade - reduce SSAO at screen edges to avoid normal reconstruction artifacts
+    let edge_dist = min(min(in.uv.x, 1.0 - in.uv.x), min(in.uv.y, 1.0 - in.uv.y));
+    let edge_fade = smoothstep(0.0, 0.08, edge_dist); // Fade out within 8% of screen edge
+
+    let fade = dist_fade * edge_fade;
 
     let normal = reconstruct_normal(in.uv, view_pos);
 
