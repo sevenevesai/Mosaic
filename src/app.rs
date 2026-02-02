@@ -470,7 +470,12 @@ impl App {
                     // Mark only the affected block for voxel GI update (incremental)
                     self.renderer.mark_voxel_dirty_at(x, y, z);
                     if let Some(ref mut audio) = self.audio {
-                        audio.play_block_break();
+                        audio.play_block_break(
+                            Some(glam::Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5)),
+                            self.player.position(),
+                            self.player.forward(),
+                            Some(&self.world),
+                        );
                     }
                 }
                 BlockInteraction::Place { x, y, z, block } => {
@@ -486,7 +491,12 @@ impl App {
                     // Mark only the affected block for voxel GI update (incremental)
                     self.renderer.mark_voxel_dirty_at(x, y, z);
                     if let Some(ref mut audio) = self.audio {
-                        audio.play_block_place();
+                        audio.play_block_place(
+                            Some(glam::Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5)),
+                            self.player.position(),
+                            self.player.forward(),
+                            Some(&self.world),
+                        );
                     }
                 }
                 BlockInteraction::None => {}
@@ -510,6 +520,9 @@ impl App {
                         self.player.horizontal_speed(),
                         self.player.is_on_ground(),
                         self.player.is_sprinting(),
+                        self.player.position(),
+                        self.player.forward(),
+                        &self.world,
                     );
                 }
             }

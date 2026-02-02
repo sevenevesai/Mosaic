@@ -674,8 +674,47 @@ fn add_quad_emissive(
     indices.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
 }
 
-/// Generate cube faces for foliage blocks (leaves) with all 6 faces rendered
-/// No neighbor culling - ensures no gaps when foliage sways in the wind
+/// Check if a foliage face should be rendered (neighbor doesn't occlude it)
+/// Returns true if the face is exposed to air/water/transparent blocks
+#[inline]
+fn foliage_face_visible(
+    chunk: &Chunk,
+    neighbors: &[Option<Arc<Chunk>>; 6],
+    x: usize, y: usize, z: usize,
+    dx: i32, dy: i32, dz: i32,
+    neighbor_idx: usize,
+) -> bool {
+    let nx = x as i32 + dx;
+    let ny = y as i32 + dy;
+    let nz = z as i32 + dz;
+
+    // Check if neighbor is within this chunk
+    if nx >= 0 && nx < CHUNK_SIZE as i32 &&
+       ny >= 0 && ny < CHUNK_SIZE as i32 &&
+       nz >= 0 && nz < CHUNK_SIZE as i32 {
+        let nb = chunk.get_block(nx as usize, ny as usize, nz as usize);
+        // Occlude if neighbor is solid (including other foliage)
+        // Only render face if neighbor is air, water, or other transparent non-solid
+        !nb.is_solid()
+    } else {
+        // Neighbor is in adjacent chunk
+        if let Some(nc) = &neighbors[neighbor_idx] {
+            // Calculate position in neighbor chunk (wrap around)
+            let lx = ((nx % CHUNK_SIZE as i32) + CHUNK_SIZE as i32) as usize % CHUNK_SIZE;
+            let ly = ((ny % CHUNK_SIZE as i32) + CHUNK_SIZE as i32) as usize % CHUNK_SIZE;
+            let lz = ((nz % CHUNK_SIZE as i32) + CHUNK_SIZE as i32) as usize % CHUNK_SIZE;
+            let nb = nc.get_block(lx, ly, lz);
+            !nb.is_solid()
+        } else {
+            // No neighbor chunk loaded = assume air = face visible
+            true
+        }
+    }
+}
+
+/// Generate cube faces for foliage blocks (leaves) with neighbor culling
+/// Since wind animation is disabled, we can safely cull foliage-to-foliage faces
+/// This provides ~3x vertex reduction in dense tree canopies
 fn add_foliage_blocks(
     chunk: &Chunk,
     neighbors: &[Option<Arc<Chunk>>; 6],
@@ -711,8 +750,9 @@ fn add_foliage_blocks(
                 let uv2 = [u1, v0]; // top-right
                 let uv3 = [u0, v0]; // top-left
 
-                // Top face (+Y) - same positions as add_face_top
-                {
+                // Top face (+Y) - only if not occluded by block above
+                // Neighbor indices: 0=-X, 1=+X, 2=-Y, 3=+Y, 4=-Z, 5=+Z
+                if foliage_face_visible(chunk, neighbors, x, y, z, 0, 1, 0, 3) {
                     let light = get_face_light(chunk, neighbors, x, y, z, Axis::Y, true);
                     add_quad_foliage(vertices, indices,
                         [
@@ -727,8 +767,8 @@ fn add_foliage_blocks(
                     );
                 }
 
-                // Bottom face (-Y) - same positions as add_face_bottom
-                {
+                // Bottom face (-Y) - only if not occluded by block below
+                if foliage_face_visible(chunk, neighbors, x, y, z, 0, -1, 0, 2) {
                     let light = get_face_light(chunk, neighbors, x, y, z, Axis::Y, false);
                     add_quad_foliage(vertices, indices,
                         [
@@ -743,8 +783,8 @@ fn add_foliage_blocks(
                     );
                 }
 
-                // Front face (+Z) - same positions as add_face_front
-                {
+                // Front face (+Z) - only if not occluded by block in front
+                if foliage_face_visible(chunk, neighbors, x, y, z, 0, 0, 1, 5) {
                     let light = get_face_light(chunk, neighbors, x, y, z, Axis::Z, true);
                     add_quad_foliage(vertices, indices,
                         [
@@ -759,8 +799,8 @@ fn add_foliage_blocks(
                     );
                 }
 
-                // Back face (-Z) - same positions as add_face_back
-                {
+                // Back face (-Z) - only if not occluded by block behind
+                if foliage_face_visible(chunk, neighbors, x, y, z, 0, 0, -1, 4) {
                     let light = get_face_light(chunk, neighbors, x, y, z, Axis::Z, false);
                     add_quad_foliage(vertices, indices,
                         [
@@ -775,8 +815,8 @@ fn add_foliage_blocks(
                     );
                 }
 
-                // Left face (-X) - same positions as add_face_left
-                {
+                // Left face (-X) - only if not occluded by block to the left
+                if foliage_face_visible(chunk, neighbors, x, y, z, -1, 0, 0, 0) {
                     let light = get_face_light(chunk, neighbors, x, y, z, Axis::X, false);
                     add_quad_foliage(vertices, indices,
                         [
@@ -791,8 +831,8 @@ fn add_foliage_blocks(
                     );
                 }
 
-                // Right face (+X) - same positions as add_face_right
-                {
+                // Right face (+X) - only if not occluded by block to the right
+                if foliage_face_visible(chunk, neighbors, x, y, z, 1, 0, 0, 1) {
                     let light = get_face_light(chunk, neighbors, x, y, z, Axis::X, true);
                     add_quad_foliage(vertices, indices,
                         [
