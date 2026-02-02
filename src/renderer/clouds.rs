@@ -224,7 +224,7 @@ impl CloudGrid {
         }
     }
 
-    /// Generate clouds using 3D noise
+    /// Generate clouds using billow noise + detail for distinct cumulus-style puffs
     pub fn generate(&mut self, center_x: f32, center_z: f32, coverage: f32, seed: u64) {
         // Update world offset to center grid on position
         let half_size_x = (self.size_x * self.voxel_scale) as f32 / 2.0;
@@ -232,32 +232,59 @@ impl CloudGrid {
         self.world_offset_x = center_x - half_size_x;
         self.world_offset_z = center_z - half_size_z;
 
-        // Coverage controls threshold - higher coverage = lower threshold = more clouds
-        // Map 0.0-1.0 coverage to 0.7-0.3 threshold (inverted, narrower range)
-        let threshold = 0.7 - coverage.clamp(0.0, 1.0) * 0.4;
+        // Coverage controls threshold
+        // 0% coverage → threshold 0.82 (very sparse)
+        // 50% coverage → threshold 0.52 (scattered clouds)
+        // 100% coverage → threshold 0.22 (heavy but still shaped)
+        let threshold = 0.82 - coverage.clamp(0.0, 1.0) * 0.60;
 
         // Clear grid
         self.data.fill(false);
 
-        // Generate using 3D noise
+        let seed_f = (seed % 10000) as f32;
+
+        // Generate using billow noise + detail
         for y in 0..self.size_y {
             for z in 0..self.size_z {
                 for x in 0..self.size_x {
-                    // World position for this voxel
+                    // World position for this voxel (in blocks)
                     let wx = self.world_offset_x + (x * self.voxel_scale) as f32;
                     let wz = self.world_offset_z + (z * self.voxel_scale) as f32;
-                    let wy = y as f32;
+                    let wy = y as f32 * self.voxel_scale as f32; // Scale Y too for proper 3D
 
-                    // Multi-octave 3D noise for cloud shapes
-                    let noise = self.cloud_noise_3d(wx, wy, wz, seed);
+                    // === DOMAIN WARPING ===
+                    // Warp coordinates for organic, non-uniform shapes
+                    let warp_strength = 30.0;
+                    let warp_freq = 0.008;
+                    let warp_x = self.noise_3d(wx * warp_freq + seed_f, wy * warp_freq * 0.5, wz * warp_freq + 50.0) * warp_strength;
+                    let warp_z = self.noise_3d(wx * warp_freq + 100.0 + seed_f, wy * warp_freq * 0.5, wz * warp_freq + 150.0) * warp_strength;
 
-                    // Height-based density falloff (thicker in middle, thinner at edges)
+                    let warped_x = wx + warp_x;
+                    let warped_z = wz + warp_z;
+
+                    // === CLOUD PLACEMENT (Billow Noise) ===
+                    // Creates distinct cloud formations - valleys are cloud centers
+                    let placement = self.billow_noise_3d(warped_x, wy, warped_z, seed_f, 0.012);
+
+                    // === DETAIL NOISE ===
+                    // Adds organic edge variation
+                    let detail = self.fbm_noise_3d(warped_x, wy, warped_z, seed_f + 500.0, 0.025, 3);
+
+                    // === HEIGHT FALLOFF ===
+                    // Clouds thicker in middle, thinner at top/bottom (cumulus shape)
                     let height_norm = y as f32 / (self.size_y - 1).max(1) as f32;
-                    let height_factor = 1.0 - (2.0 * height_norm - 1.0).abs();
-                    let height_boost = height_factor * 0.15;
+                    // Parabolic falloff - peaks at middle
+                    let height_factor = 1.0 - (2.0 * height_norm - 1.0).powi(2);
 
-                    // Cloud if noise exceeds threshold
-                    if noise + height_boost > threshold {
+                    // === COMBINE LAYERS ===
+                    // Placement defines where clouds CAN exist
+                    // Detail modulates the edges
+                    // Height shapes vertical profile
+                    let cloud_density = placement * 0.7 + detail * 0.3;
+                    let shaped_density = cloud_density * (0.6 + height_factor * 0.4);
+
+                    // Cloud if density exceeds threshold
+                    if shaped_density > threshold {
                         self.set(x, y, z, true);
                     }
                 }
@@ -265,32 +292,61 @@ impl CloudGrid {
         }
     }
 
-    /// 3D noise function for cloud generation - creates distinct cloud puffs
-    fn cloud_noise_3d(&self, x: f32, y: f32, z: f32, seed: u64) -> f32 {
-        // Multi-octave FBM noise with frequency tuned for cloud-sized features
-        // At voxel_scale=4, we want clouds ~20-60 blocks across = 5-15 voxels
-        // So frequency ~0.02-0.05 in voxel space = 0.005-0.0125 in world space
+    /// Billow noise - creates ridges that naturally separate into distinct formations
+    /// Valleys become cloud cores, ridges become boundaries between clouds
+    fn billow_noise_3d(&self, x: f32, y: f32, z: f32, seed: f32, base_freq: f32) -> f32 {
         let mut value = 0.0;
-        let mut amplitude = 0.6;
-        let mut frequency = 0.025; // Creates ~40 block features at scale 4
+        let mut amplitude = 1.0;
+        let mut frequency = base_freq;
         let mut total_amp = 0.0;
 
-        let seed_offset = (seed % 10000) as f32;
-
-        // 3 octaves for cloud shapes
+        // 3 octaves of billow noise
         for i in 0..3 {
-            let freq_x = frequency;
-            let freq_y = frequency * 0.5; // Flatter clouds (stretched in Y)
-            let freq_z = frequency;
+            // Flatten in Y for horizontal cloud layers
+            let freq_y = frequency * 0.3;
 
-            value += amplitude * self.noise_3d(
-                x * freq_x + seed_offset + i as f32 * 100.0,
+            let n = self.noise_3d(
+                x * frequency + seed + i as f32 * 73.7,
                 y * freq_y,
-                z * freq_z + seed_offset * 0.7,
+                z * frequency + seed * 0.7 + i as f32 * 31.3,
             );
+
+            // Billow transform: creates ridges from noise
+            // abs(n * 2 - 1) creates V-shaped valleys
+            // 1 - abs() inverts so peaks become cloud centers
+            let billowed = 1.0 - (n * 2.0 - 1.0).abs();
+
+            value += billowed * amplitude;
             total_amp += amplitude;
+
             amplitude *= 0.5;
-            frequency *= 2.2; // Slightly more than 2x for variety
+            frequency *= 2.1; // Slightly offset from 2x to avoid patterns
+        }
+
+        value / total_amp
+    }
+
+    /// FBM noise for detail/edge variation
+    fn fbm_noise_3d(&self, x: f32, y: f32, z: f32, seed: f32, base_freq: f32, octaves: u32) -> f32 {
+        let mut value = 0.0;
+        let mut amplitude = 1.0;
+        let mut frequency = base_freq;
+        let mut total_amp = 0.0;
+
+        for i in 0..octaves {
+            let freq_y = frequency * 0.4; // Flatten
+
+            let n = self.noise_3d(
+                x * frequency + seed + i as f32 * 127.1,
+                y * freq_y,
+                z * frequency + seed * 0.6 + i as f32 * 89.3,
+            );
+
+            value += n * amplitude;
+            total_amp += amplitude;
+
+            amplitude *= 0.5;
+            frequency *= 2.0;
         }
 
         value / total_amp
@@ -951,36 +1007,77 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let sun_dir = normalize(u.sun_direction.xyz);
     let sun_intensity = u.sun_direction.w;
 
-    // Simple directional lighting for clouds
+    // === FACE-BASED LIGHTING ===
     let ndotl = dot(in.normal, sun_dir);
 
-    // Clouds are bright on sun-facing side, darker on shadow side
     // Top faces are brightest, bottom faces are darkest
-    let top_factor = max(in.normal.y, 0.0);
+    let is_top = max(in.normal.y, 0.0);
+    let is_bottom = max(-in.normal.y, 0.0);
+    let is_side = 1.0 - abs(in.normal.y);
+
+    // Sun contribution on sun-facing surfaces
     let sun_factor = max(ndotl, 0.0) * sun_intensity;
 
-    // Base brightness with face-based variation
-    let base_brightness = 0.7 + top_factor * 0.2 + sun_factor * 0.3;
+    // === COLOR PALETTE ===
+    // Bright white for sun-lit tops
+    let cloud_lit = vec3<f32>(1.0, 1.0, 1.0);
+    // Subtle blue-gray for shadowed sides
+    let cloud_shadow = vec3<f32>(0.7, 0.73, 0.8);
+    // Darker blue-gray for undersides
+    let cloud_bottom = vec3<f32>(0.55, 0.58, 0.68);
+    // Ambient sky color influence
+    let sky_tint = u.ambient_color.rgb * 0.3 + vec3<f32>(0.7, 0.75, 0.85) * 0.7;
 
-    // Soft white cloud color
-    let cloud_white = vec3<f32>(1.0, 1.0, 1.0);
-    let cloud_shadow = vec3<f32>(0.75, 0.78, 0.85); // Slight blue tint in shadows
+    // === COMPUTE BRIGHTNESS ===
+    // Top faces: bright, sun-lit
+    // Side faces: medium, affected by sun angle
+    // Bottom faces: dark, shadowed
+    var brightness = 0.0;
+    brightness += is_top * (0.85 + sun_factor * 0.15);
+    brightness += is_side * (0.6 + sun_factor * 0.25);
+    brightness += is_bottom * (0.35 + sun_factor * 0.1);
 
-    // Mix based on lighting
-    let brightness = clamp(base_brightness, 0.0, 1.0);
-    var color = mix(cloud_shadow, cloud_white, brightness);
+    brightness = clamp(brightness, 0.0, 1.0);
 
-    // Tint by sun color at sunset
-    color = mix(color, color * u.sun_color.rgb, sun_intensity * 0.3);
+    // === MIX COLORS ===
+    // Interpolate between bottom, shadow, and lit colors
+    var color: vec3<f32>;
+    if (brightness < 0.5) {
+        // Dark range: bottom to shadow
+        let t = brightness * 2.0;
+        color = mix(cloud_bottom, cloud_shadow, t);
+    } else {
+        // Light range: shadow to lit
+        let t = (brightness - 0.5) * 2.0;
+        color = mix(cloud_shadow, cloud_lit, t);
+    }
 
-    // Distance fade for soft edges
+    // === TIME OF DAY TINTING ===
+    // Sunrise/sunset: warm orange tint
+    let sun_height = sun_dir.y;
+    let sunset_factor = smoothstep(0.0, 0.3, sun_height) * (1.0 - smoothstep(0.3, 0.6, sun_height));
+    let sunset_tint = vec3<f32>(1.0, 0.85, 0.7);
+
+    // Night: subtle blue moonlight
+    let night_factor = smoothstep(0.1, -0.1, sun_height);
+    let night_tint = vec3<f32>(0.7, 0.75, 0.9);
+
+    // Apply tints
+    color = mix(color, color * sunset_tint, sunset_factor * 0.4);
+    color = mix(color, color * night_tint, night_factor * 0.3);
+
+    // Sun color influence (golden hour, etc)
+    color = mix(color, color * u.sun_color.rgb, sun_intensity * 0.2);
+
+    // === DISTANCE FADE ===
     let dist = length(u.camera_pos.xyz - in.world_position);
-    let fade_start = 300.0;
-    let fade_end = 400.0;
+    let fade_start = 280.0;
+    let fade_end = 380.0;
     let distance_alpha = 1.0 - smoothstep(fade_start, fade_end, dist);
 
-    // Final alpha
-    let alpha = u.wind_offset.w * distance_alpha;
+    // Final alpha - clouds are slightly translucent
+    let base_alpha = 0.92;
+    let alpha = base_alpha * distance_alpha;
 
     return vec4<f32>(color, alpha);
 }
