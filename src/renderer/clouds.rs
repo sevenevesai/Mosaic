@@ -18,20 +18,20 @@ use glam::{Vec3, Mat4};
 pub const CLOUD_VOXEL_SCALE: i32 = 4;
 
 /// Cloud layer base altitude (world Y coordinate)
-pub const CLOUD_BASE_Y: f32 = 90.0;
+pub const CLOUD_BASE_Y: f32 = 115.0;
 
 /// Cloud layer thickness in cloud voxels
 pub const CLOUD_THICKNESS: i32 = 4;
 
-/// Cloud grid size in cloud voxels (covers render distance)
-/// At scale 4, 96 voxels = 384 blocks = 24 chunks
-pub const CLOUD_GRID_SIZE: i32 = 96;
+/// Cloud grid size in cloud voxels (covers MORE than render distance for smooth edges)
+/// At scale 4, 160 voxels = 640 blocks = 40 chunks (extends beyond view)
+pub const CLOUD_GRID_SIZE: i32 = 160;
 
-/// Maximum vertices for cloud mesh (generous for complex cloud shapes)
-pub const MAX_CLOUD_VERTICES: usize = 32768;
+/// Maximum vertices for cloud mesh (generous for large grid)
+pub const MAX_CLOUD_VERTICES: usize = 65536;
 
 /// Maximum indices for cloud mesh
-pub const MAX_CLOUD_INDICES: usize = 65536;
+pub const MAX_CLOUD_INDICES: usize = 131072;
 
 /// Cloud rendering quality preset
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -224,7 +224,7 @@ impl CloudGrid {
         }
     }
 
-    /// Generate clouds using billow noise + detail for distinct cumulus-style puffs
+    /// Generate clouds using cellular noise for guaranteed separation + detail
     pub fn generate(&mut self, center_x: f32, center_z: f32, coverage: f32, seed: u64) {
         // Update world offset to center grid on position
         let half_size_x = (self.size_x * self.voxel_scale) as f32 / 2.0;
@@ -232,64 +232,87 @@ impl CloudGrid {
         self.world_offset_x = center_x - half_size_x;
         self.world_offset_z = center_z - half_size_z;
 
-        // Coverage controls threshold
-        // 0% coverage → threshold 0.82 (very sparse)
-        // 50% coverage → threshold 0.52 (scattered clouds)
-        // 100% coverage → threshold 0.22 (heavy but still shaped)
-        let threshold = 0.82 - coverage.clamp(0.0, 1.0) * 0.60;
+        // Coverage controls how large each cloud cell grows
+        // 0% = tiny clouds, 100% = large clouds (but ALWAYS with gaps between cells)
+        let cell_fill = 0.15 + coverage.clamp(0.0, 1.0) * 0.55; // 0.15 to 0.70
 
         // Clear grid
         self.data.fill(false);
 
         let seed_f = (seed % 10000) as f32;
 
-        // Generate using billow noise + detail
+        // Cloud cell size in world blocks - determines cloud spacing
+        // Larger cells = bigger, more spaced clouds
+        let cell_size = 80.0; // ~80 block spacing between cloud centers
+
+        // Generate using cellular approach - each cell can have ONE cloud
         for y in 0..self.size_y {
             for z in 0..self.size_z {
                 for x in 0..self.size_x {
                     // World position for this voxel (in blocks)
                     let wx = self.world_offset_x + (x * self.voxel_scale) as f32;
                     let wz = self.world_offset_z + (z * self.voxel_scale) as f32;
-                    let wy = y as f32 * self.voxel_scale as f32; // Scale Y too for proper 3D
+                    let wy = y as f32 * self.voxel_scale as f32;
 
-                    // === DOMAIN WARPING ===
-                    // Warp coordinates for organic, non-uniform shapes
-                    let warp_strength = 30.0;
-                    let warp_freq = 0.008;
-                    let warp_x = self.noise_3d(wx * warp_freq + seed_f, wy * warp_freq * 0.5, wz * warp_freq + 50.0) * warp_strength;
-                    let warp_z = self.noise_3d(wx * warp_freq + 100.0 + seed_f, wy * warp_freq * 0.5, wz * warp_freq + 150.0) * warp_strength;
+                    // === CELLULAR CLOUD PLACEMENT ===
+                    // Find which cell this voxel belongs to
+                    let cell_x = (wx / cell_size).floor();
+                    let cell_z = (wz / cell_size).floor();
 
-                    let warped_x = wx + warp_x;
-                    let warped_z = wz + warp_z;
+                    // Get cell's cloud center (jittered from cell center)
+                    let cell_hash = self.hash_2d(cell_x as i32, cell_z as i32, seed_f);
+                    let jitter_x = (cell_hash * 0.6 + 0.2) * cell_size; // 20-80% into cell
+                    let jitter_z = (self.hash_2d(cell_x as i32 + 73, cell_z as i32 + 37, seed_f) * 0.6 + 0.2) * cell_size;
 
-                    // === CLOUD PLACEMENT (Billow Noise) ===
-                    // Creates distinct cloud formations - valleys are cloud centers
-                    let placement = self.billow_noise_3d(warped_x, wy, warped_z, seed_f, 0.012);
+                    let cloud_center_x = cell_x * cell_size + jitter_x;
+                    let cloud_center_z = cell_z * cell_size + jitter_z;
 
-                    // === DETAIL NOISE ===
-                    // Adds organic edge variation
-                    let detail = self.fbm_noise_3d(warped_x, wy, warped_z, seed_f + 500.0, 0.025, 3);
+                    // Distance from this voxel to cloud center (in XZ plane)
+                    let dx = wx - cloud_center_x;
+                    let dz = wz - cloud_center_z;
+                    let dist_xz = (dx * dx + dz * dz).sqrt();
+
+                    // Cloud radius for this cell (varies per cell)
+                    let cell_size_var = self.hash_2d(cell_x as i32 + 100, cell_z as i32 + 100, seed_f);
+                    let base_radius = cell_size * cell_fill * (0.6 + cell_size_var * 0.8); // 60-140% of base
 
                     // === HEIGHT FALLOFF ===
-                    // Clouds thicker in middle, thinner at top/bottom (cumulus shape)
+                    // Clouds are dome-shaped: radius shrinks at top and bottom
                     let height_norm = y as f32 / (self.size_y - 1).max(1) as f32;
-                    // Parabolic falloff - peaks at middle
                     let height_factor = 1.0 - (2.0 * height_norm - 1.0).powi(2);
+                    let radius_at_height = base_radius * (0.3 + height_factor * 0.7);
 
-                    // === COMBINE LAYERS ===
-                    // Placement defines where clouds CAN exist
-                    // Detail modulates the edges
-                    // Height shapes vertical profile
-                    let cloud_density = placement * 0.7 + detail * 0.3;
-                    let shaped_density = cloud_density * (0.6 + height_factor * 0.4);
+                    // === EDGE NOISE ===
+                    // Add noise to the edge for organic shapes
+                    let edge_noise = self.fbm_noise_3d(wx, wy * 0.5, wz, seed_f + 200.0, 0.04, 3);
+                    let noisy_radius = radius_at_height * (0.7 + edge_noise * 0.6);
 
-                    // Cloud if density exceeds threshold
-                    if shaped_density > threshold {
-                        self.set(x, y, z, true);
+                    // === DENSITY CHECK ===
+                    // Inside cloud if distance < noisy radius
+                    if dist_xz < noisy_radius {
+                        // Additional density falloff from center (softer edges)
+                        let density = 1.0 - (dist_xz / noisy_radius).powi(2);
+
+                        // Small detail noise for internal variation
+                        let detail = self.noise_3d(wx * 0.05 + seed_f, wy * 0.03, wz * 0.05);
+
+                        // Cloud exists if density is high enough
+                        if density + detail * 0.3 > 0.2 {
+                            self.set(x, y, z, true);
+                        }
                     }
                 }
             }
         }
+    }
+
+    /// Hash function for cell jitter (2D)
+    fn hash_2d(&self, x: i32, z: i32, seed: f32) -> f32 {
+        let n = x.wrapping_mul(374761393)
+            .wrapping_add(z.wrapping_mul(668265263))
+            .wrapping_add((seed * 1000.0) as i32);
+        let n = (n ^ (n >> 13)).wrapping_mul(1274126177);
+        (n as u32 as f32) / (u32::MAX as f32)
     }
 
     /// Billow noise - creates ridges that naturally separate into distinct formations
@@ -789,37 +812,32 @@ impl Clouds {
         self.wind_offset_x += wind_dir_x * wind_speed * delta_time;
         self.wind_offset_z += wind_dir_z * wind_speed * delta_time;
 
-        // Grid cell size in world units
+        // Grid world size
         let voxel_scale = self.quality.voxel_scale() as f32;
         let grid_world_size = self.grid.size_x as f32 * voxel_scale;
-        let half_grid = grid_world_size / 2.0;
 
-        // Snap player position to grid for stable cloud generation
-        let snap_size = grid_world_size / 2.0; // Regenerate when player moves half a grid
-        let snapped_x = (camera_pos.x / snap_size).floor() * snap_size;
-        let snapped_z = (camera_pos.z / snap_size).floor() * snap_size;
+        // The grid is large (640 blocks at scale 4), so we only regenerate when
+        // the player has moved a significant distance from the grid center
+        // This prevents the "hard flip" - grid is always larger than visible area
+        let regen_distance = grid_world_size * 0.25; // Regenerate when 25% off-center
 
-        // Check if we need to regenerate (player moved to new grid cell, or first frame)
-        let grid_changed = (snapped_x - self.grid_origin_x).abs() > 1.0
-            || (snapped_z - self.grid_origin_z).abs() > 1.0;
+        let dx = camera_pos.x - self.grid_origin_x;
+        let dz = camera_pos.z - self.grid_origin_z;
+        let dist_from_center = (dx * dx + dz * dz).sqrt();
 
-        if self.needs_regenerate || grid_changed {
-            // Generate at snapped position
-            self.grid_origin_x = snapped_x;
-            self.grid_origin_z = snapped_z;
-            self.regenerate_mesh(queue, snapped_x, snapped_z);
+        let player_moved_far = dist_from_center > regen_distance;
+
+        if self.needs_regenerate || player_moved_far {
+            // Center grid on player
+            self.grid_origin_x = camera_pos.x;
+            self.grid_origin_z = camera_pos.z;
+            self.regenerate_mesh(queue, camera_pos.x, camera_pos.z);
             self.needs_regenerate = false;
         }
 
-        // Wrap wind offset to prevent floating point issues over long play sessions
-        // Wrap at grid size so clouds tile seamlessly
-        let wrap_size = grid_world_size;
-        if self.wind_offset_x.abs() > wrap_size {
-            self.wind_offset_x = self.wind_offset_x.rem_euclid(wrap_size);
-        }
-        if self.wind_offset_z.abs() > wrap_size {
-            self.wind_offset_z = self.wind_offset_z.rem_euclid(wrap_size);
-        }
+        // Wind offset doesn't cause regeneration - it just moves the mesh
+        // The mesh is large enough that wind can blow for a long time
+        // before clouds exit the visible area
 
         // Update uniforms
         self.uniforms.view_proj = view_proj.to_cols_array_2d();
@@ -831,7 +849,7 @@ impl Clouds {
             self.wind_offset_x,
             self.wind_offset_z,
             CLOUD_BASE_Y,
-            0.85, // Alpha
+            0.93, // Alpha
         ];
 
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[self.uniforms]));
@@ -1010,74 +1028,83 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // === FACE-BASED LIGHTING ===
     let ndotl = dot(in.normal, sun_dir);
 
-    // Top faces are brightest, bottom faces are darkest
+    // Face classification
     let is_top = max(in.normal.y, 0.0);
     let is_bottom = max(-in.normal.y, 0.0);
     let is_side = 1.0 - abs(in.normal.y);
 
-    // Sun contribution on sun-facing surfaces
+    // Sun contribution - stronger effect
     let sun_factor = max(ndotl, 0.0) * sun_intensity;
 
-    // === COLOR PALETTE ===
-    // Bright white for sun-lit tops
-    let cloud_lit = vec3<f32>(1.0, 1.0, 1.0);
-    // Subtle blue-gray for shadowed sides
-    let cloud_shadow = vec3<f32>(0.7, 0.73, 0.8);
-    // Darker blue-gray for undersides
-    let cloud_bottom = vec3<f32>(0.55, 0.58, 0.68);
-    // Ambient sky color influence
-    let sky_tint = u.ambient_color.rgb * 0.3 + vec3<f32>(0.7, 0.75, 0.85) * 0.7;
+    // === COLOR PALETTE - More contrast ===
+    // Bright pure white for sun-lit tops
+    let cloud_bright = vec3<f32>(1.0, 1.0, 1.0);
+    // Light gray-blue for shaded areas
+    let cloud_mid = vec3<f32>(0.82, 0.85, 0.90);
+    // Darker blue-gray for undersides - more contrast
+    let cloud_dark = vec3<f32>(0.50, 0.55, 0.65);
 
-    // === COMPUTE BRIGHTNESS ===
-    // Top faces: bright, sun-lit
-    // Side faces: medium, affected by sun angle
-    // Bottom faces: dark, shadowed
+    // === COMPUTE BASE BRIGHTNESS ===
     var brightness = 0.0;
-    brightness += is_top * (0.85 + sun_factor * 0.15);
-    brightness += is_side * (0.6 + sun_factor * 0.25);
-    brightness += is_bottom * (0.35 + sun_factor * 0.1);
+
+    // Top faces: very bright
+    brightness += is_top * (0.90 + sun_factor * 0.10);
+
+    // Side faces: medium brightness, sun angle matters more
+    brightness += is_side * (0.55 + sun_factor * 0.35);
+
+    // Bottom faces: dark, minimal sun
+    brightness += is_bottom * (0.25 + sun_factor * 0.08);
 
     brightness = clamp(brightness, 0.0, 1.0);
 
-    // === MIX COLORS ===
-    // Interpolate between bottom, shadow, and lit colors
+    // === COLOR INTERPOLATION ===
     var color: vec3<f32>;
-    if (brightness < 0.5) {
-        // Dark range: bottom to shadow
-        let t = brightness * 2.0;
-        color = mix(cloud_bottom, cloud_shadow, t);
+    if (brightness < 0.4) {
+        // Dark range: deep shadow to mid
+        let t = brightness / 0.4;
+        color = mix(cloud_dark, cloud_mid, t);
+    } else if (brightness < 0.7) {
+        // Mid range: mid to light
+        let t = (brightness - 0.4) / 0.3;
+        color = mix(cloud_mid, cloud_bright, t * 0.5);
     } else {
-        // Light range: shadow to lit
-        let t = (brightness - 0.5) * 2.0;
-        color = mix(cloud_shadow, cloud_lit, t);
+        // Bright range: approaching white
+        let t = (brightness - 0.7) / 0.3;
+        color = mix(cloud_mid, cloud_bright, 0.5 + t * 0.5);
     }
 
-    // === TIME OF DAY TINTING ===
-    // Sunrise/sunset: warm orange tint
+    // === TIME OF DAY EFFECTS ===
     let sun_height = sun_dir.y;
-    let sunset_factor = smoothstep(0.0, 0.3, sun_height) * (1.0 - smoothstep(0.3, 0.6, sun_height));
-    let sunset_tint = vec3<f32>(1.0, 0.85, 0.7);
 
-    // Night: subtle blue moonlight
-    let night_factor = smoothstep(0.1, -0.1, sun_height);
-    let night_tint = vec3<f32>(0.7, 0.75, 0.9);
+    // Sunset/sunrise: warm golden-pink tint
+    let sunset_factor = smoothstep(-0.1, 0.2, sun_height) * (1.0 - smoothstep(0.2, 0.5, sun_height));
+    let sunset_color = vec3<f32>(1.0, 0.9, 0.75); // Warm gold
+    let sunset_shadow = vec3<f32>(0.9, 0.7, 0.8);  // Pink-purple shadows
 
-    // Apply tints
-    color = mix(color, color * sunset_tint, sunset_factor * 0.4);
-    color = mix(color, color * night_tint, night_factor * 0.3);
+    // Apply sunset - brighter parts get gold, darker get pink
+    if (sunset_factor > 0.01) {
+        let sunset_mix = mix(sunset_shadow, sunset_color, brightness);
+        color = mix(color, color * sunset_mix, sunset_factor * 0.5);
+    }
 
-    // Sun color influence (golden hour, etc)
-    color = mix(color, color * u.sun_color.rgb, sun_intensity * 0.2);
+    // Night: cool blue tint
+    let night_factor = smoothstep(0.05, -0.15, sun_height);
+    let night_tint = vec3<f32>(0.65, 0.70, 0.85);
+    color = mix(color, color * night_tint, night_factor * 0.4);
+
+    // Sun color influence during day
+    color = mix(color, color * u.sun_color.rgb, sun_intensity * 0.15);
 
     // === DISTANCE FADE ===
+    // Extended range for clouds visible far into distance
     let dist = length(u.camera_pos.xyz - in.world_position);
-    let fade_start = 280.0;
-    let fade_end = 380.0;
+    let fade_start = 450.0;  // Start fading at 450 blocks
+    let fade_end = 600.0;    // Fully faded at 600 blocks
     let distance_alpha = 1.0 - smoothstep(fade_start, fade_end, dist);
 
-    // Final alpha - clouds are slightly translucent
-    let base_alpha = 0.92;
-    let alpha = base_alpha * distance_alpha;
+    // Final alpha
+    let alpha = u.wind_offset.w * distance_alpha;
 
     return vec4<f32>(color, alpha);
 }
