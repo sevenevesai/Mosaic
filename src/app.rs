@@ -582,7 +582,15 @@ impl App {
         // Build debug metrics
         let pos = self.player.position();
         let chunk_pos = ChunkPos::from_world_pos(pos);
-        let render_stats = self.profiler.render_stats();
+
+        // Update profiler settings snapshot (for context in verbose logging)
+        self.profiler.update_settings(self.renderer.settings_snapshot());
+
+        // Clone render stats to avoid borrow conflict
+        let render_stats = self.profiler.render_stats().clone();
+
+        // Get frame time percentiles for stutter detection
+        let (fps_1pct_low, fps_01pct_low) = self.profiler.fps_percentiles();
 
         // Get light level at player's feet position
         let light_pos = (pos.x.floor() as i32, (pos.y - 0.1).floor() as i32, pos.z.floor() as i32);
@@ -593,6 +601,8 @@ impl App {
             frame_time_ms: self.profiler.frame_time_ms() as f32,
             world_update_ms: self.profiler.section_time_ms("world_update") as f32,
             render_ms: self.profiler.section_time_ms("render") as f32,
+            fps_1pct_low: fps_1pct_low as f32,
+            fps_01pct_low: fps_01pct_low as f32,
             chunks_pending_gen: self.world.pending_generation_count() as u32,
             chunks_pending_mesh: self.world.pending_meshing_count() as u32,
             triangles: render_stats.triangles,
@@ -623,6 +633,10 @@ impl App {
             mesh_avg_time_us: MESH_STATS.avg_mesh_time_us(),
             mesh_total_time_ms: MESH_STATS.total_mesh_time_ms(),
             mesh_total_quads: MESH_STATS.total_quads.load(std::sync::atomic::Ordering::Relaxed),
+            // Settings context for log files
+            settings_context: self.profiler.settings().as_compact_string(),
+            // Per-pass timing breakdown
+            pass_times: render_stats.pass_times.clone(),
         };
 
         // Render

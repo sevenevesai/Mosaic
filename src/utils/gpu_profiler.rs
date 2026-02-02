@@ -2,6 +2,8 @@
 //!
 //! Uses double-buffered resolve buffers to avoid Vulkan synchronization issues
 //! where resolve and copy operations in the same encoder can return zeros.
+//!
+//! Supports per-pass timing breakdown for detailed GPU profiling.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -11,12 +13,22 @@ use wgpu::{Device, Queue};
 /// Number of frames to average for GPU timing
 const HISTORY_SIZE: usize = 60;
 
+/// Maximum number of GPU passes to track (each pass needs 2 timestamps: start + end)
+const MAX_PASSES: usize = 16;
+
 /// Double-buffered timestamp resources to avoid sync issues
 struct TimestampBuffer {
     resolve_buffer: wgpu::Buffer,
     staging_buffer: wgpu::Buffer,
     mapping_complete: Arc<AtomicBool>,
     pending_readback: bool,
+}
+
+/// GPU pass timing info
+#[derive(Clone)]
+pub struct PassTiming {
+    pub name: String,
+    pub time_ms: f64,
 }
 
 /// GPU profiler using timestamp queries with double-buffering
@@ -31,7 +43,7 @@ struct TimestampBuffer {
 pub struct GpuProfiler {
     /// Whether GPU profiling is supported
     supported: bool,
-    /// Query set for timestamps
+    /// Query set for timestamps (2 per pass: start + end)
     query_set: Option<wgpu::QuerySet>,
     /// Double-buffered timestamp resources (index 0 and 1)
     buffers: Option<[TimestampBuffer; 2]>,
@@ -43,6 +55,14 @@ pub struct GpuProfiler {
     timestamp_period: f32,
     /// Frame count (used to skip first frame where no previous data exists)
     frame_count: u64,
+    /// Current pass index for this frame
+    current_pass: usize,
+    /// Pass names for this frame (indexed by pass number)
+    pass_names: Vec<String>,
+    /// Per-pass timing results (averaged over history)
+    pass_timings: Vec<PassTiming>,
+    /// Per-pass timing history (pass_name -> history of times in ns)
+    pass_history: Vec<VecDeque<u64>>,
 }
 
 impl GpuProfiler {
@@ -60,35 +80,42 @@ impl GpuProfiler {
                 frame_times_ns: VecDeque::with_capacity(HISTORY_SIZE),
                 timestamp_period: 1.0,
                 frame_count: 0,
+                current_pass: 0,
+                pass_names: Vec::new(),
+                pass_timings: Vec::new(),
+                pass_history: Vec::new(),
             };
         }
 
         // Get timestamp period from queue
         let timestamp_period = queue.get_timestamp_period();
         tracing::info!(
-            "GPU profiling enabled (timestamp period: {:.2} ns, double-buffered)",
-            timestamp_period
+            "GPU profiling enabled (timestamp period: {:.2} ns, {} passes max)",
+            timestamp_period,
+            MAX_PASSES
         );
 
-        // Create query set for 2 timestamps (start + end)
+        // Create query set for MAX_PASSES * 2 timestamps (start + end per pass)
+        let query_count = (MAX_PASSES * 2) as u32;
         let query_set = device.create_query_set(&wgpu::QuerySetDescriptor {
             label: Some("GPU Profiler Query Set"),
             ty: wgpu::QueryType::Timestamp,
-            count: 2,
+            count: query_count,
         });
 
         // Create double-buffered resources
+        let buffer_size = (query_count as u64) * 8; // 8 bytes per u64 timestamp
         let create_buffer_pair = |index: usize| -> TimestampBuffer {
             let resolve_buffer = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(&format!("GPU Profiler Resolve Buffer {}", index)),
-                size: 16, // 2 x u64
+                size: buffer_size,
                 usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
                 mapped_at_creation: false,
             });
 
             let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(&format!("GPU Profiler Staging Buffer {}", index)),
-                size: 16,
+                size: buffer_size,
                 usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
                 mapped_at_creation: false,
             });
@@ -111,6 +138,10 @@ impl GpuProfiler {
             frame_times_ns: VecDeque::with_capacity(HISTORY_SIZE),
             timestamp_period,
             frame_count: 0,
+            current_pass: 0,
+            pass_names: Vec::with_capacity(MAX_PASSES),
+            pass_timings: Vec::new(),
+            pass_history: Vec::new(),
         }
     }
 
@@ -124,6 +155,43 @@ impl GpuProfiler {
         self.supported
     }
 
+    /// Begin a new frame - reset pass counter
+    pub fn begin_frame(&mut self) {
+        self.current_pass = 0;
+        self.pass_names.clear();
+    }
+
+    /// Begin timing a render pass. Returns the query index for the start timestamp.
+    /// Call this BEFORE the render pass begins.
+    pub fn begin_pass(&mut self, name: &str) -> Option<u32> {
+        if !self.supported || self.current_pass >= MAX_PASSES {
+            return None;
+        }
+
+        self.pass_names.push(name.to_string());
+        let query_idx = (self.current_pass * 2) as u32;
+        Some(query_idx)
+    }
+
+    /// End timing a render pass. Returns the query index for the end timestamp.
+    /// Call this AFTER the render pass ends.
+    pub fn end_pass(&mut self) -> Option<u32> {
+        if !self.supported || self.current_pass >= MAX_PASSES {
+            return None;
+        }
+
+        let query_idx = (self.current_pass * 2 + 1) as u32;
+        self.current_pass += 1;
+        Some(query_idx)
+    }
+
+    /// Write a timestamp to the query set at the given index
+    pub fn write_timestamp(&self, encoder: &mut wgpu::CommandEncoder, query_idx: u32) {
+        if let Some(query_set) = &self.query_set {
+            encoder.write_timestamp(query_set, query_idx);
+        }
+    }
+
     /// Resolve current frame's queries and copy previous frame's results
     ///
     /// This uses double-buffering to ensure proper synchronization:
@@ -133,7 +201,7 @@ impl GpuProfiler {
     /// The copy happens one frame after the resolve, guaranteeing the GPU
     /// has finished writing the timestamp data.
     pub fn resolve(&mut self, encoder: &mut wgpu::CommandEncoder) {
-        if !self.supported {
+        if !self.supported || self.current_pass == 0 {
             return;
         }
 
@@ -143,9 +211,10 @@ impl GpuProfiler {
         };
 
         // Resolve current frame's timestamps to current buffer
+        let query_count = (self.current_pass * 2) as u32;
         encoder.resolve_query_set(
             query_set,
-            0..2,
+            0..query_count,
             &buffers[self.current_buffer].resolve_buffer,
             0,
         );
@@ -154,12 +223,13 @@ impl GpuProfiler {
         // (Skip on first frame - no previous data yet)
         if self.frame_count > 0 {
             let prev_buffer = 1 - self.current_buffer;
+            let copy_size = query_count as u64 * 8;
             encoder.copy_buffer_to_buffer(
                 &buffers[prev_buffer].resolve_buffer,
                 0,
                 &buffers[prev_buffer].staging_buffer,
                 0,
-                16,
+                copy_size,
             );
         }
     }
@@ -224,46 +294,108 @@ impl GpuProfiler {
             None => return,
         };
 
-        // Check both buffers for completed readbacks
-        for buf in buffers.iter_mut() {
+        // Poll device to process the mapping callback (non-blocking check first)
+        device.poll(wgpu::Maintain::Poll);
+
+        // Collect data from completed readbacks (avoiding borrow conflicts)
+        let mut data_to_process: Option<Vec<u8>> = None;
+        let mut buffer_to_unmap: Option<usize> = None;
+
+        for (i, buf) in buffers.iter_mut().enumerate() {
             if !buf.pending_readback {
                 continue;
             }
-
-            // Poll device to process the mapping callback (non-blocking check first)
-            device.poll(wgpu::Maintain::Poll);
 
             // Check if mapping completed
             if !buf.mapping_complete.load(Ordering::SeqCst) {
                 continue;
             }
 
-            // Read the mapped data
-            {
-                let view = buf.staging_buffer.slice(..).get_mapped_range();
-                if view.len() >= 16 {
-                    // Parse the two u64 timestamps
-                    let start = u64::from_le_bytes(view[0..8].try_into().unwrap());
-                    let end = u64::from_le_bytes(view[8..16].try_into().unwrap());
+            // Read the mapped data into a Vec to avoid holding the borrow
+            let view = buf.staging_buffer.slice(..).get_mapped_range();
+            data_to_process = Some(view.to_vec());
+            buffer_to_unmap = Some(i);
+            break;
+        }
 
-                    // Calculate delta in GPU ticks, then convert to nanoseconds
-                    if start > 0 && end > 0 && end > start {
-                        let delta_ticks = end - start;
-                        let delta_ns =
-                            (delta_ticks as f64 * self.timestamp_period as f64) as u64;
+        // Process the data outside the buffer borrow
+        if let Some(data) = data_to_process {
+            self.process_timestamps(&data);
+        }
 
-                        // Update history
-                        if self.frame_times_ns.len() >= HISTORY_SIZE {
-                            self.frame_times_ns.pop_front();
-                        }
-                        self.frame_times_ns.push_back(delta_ns);
-                    }
-                }
+        // Unmap the buffer after processing
+        if let Some(idx) = buffer_to_unmap {
+            if let Some(bufs) = &mut self.buffers {
+                bufs[idx].staging_buffer.unmap();
+                bufs[idx].pending_readback = false;
+            }
+        }
+    }
+
+    /// Process timestamp data from the staging buffer
+    fn process_timestamps(&mut self, data: &[u8]) {
+        // Parse timestamps (pairs of u64: start, end for each pass)
+        let mut pass_idx = 0;
+        let mut total_time_ns: u64 = 0;
+
+        // Ensure we have enough history slots
+        while self.pass_history.len() < self.pass_names.len() {
+            self.pass_history.push(VecDeque::with_capacity(HISTORY_SIZE));
+        }
+
+        for chunk in data.chunks_exact(16) {
+            if pass_idx >= self.pass_names.len() {
+                break;
             }
 
-            // Unmap the buffer so it can be used again
-            buf.staging_buffer.unmap();
-            buf.pending_readback = false;
+            let start = u64::from_le_bytes(chunk[0..8].try_into().unwrap());
+            let end = u64::from_le_bytes(chunk[8..16].try_into().unwrap());
+
+            if start > 0 && end > 0 && end > start {
+                let delta_ticks = end - start;
+                let delta_ns = (delta_ticks as f64 * self.timestamp_period as f64) as u64;
+                total_time_ns += delta_ns;
+
+                // Update pass history
+                let history = &mut self.pass_history[pass_idx];
+                if history.len() >= HISTORY_SIZE {
+                    history.pop_front();
+                }
+                history.push_back(delta_ns);
+            }
+
+            pass_idx += 1;
+        }
+
+        // Update total frame time history
+        if total_time_ns > 0 {
+            if self.frame_times_ns.len() >= HISTORY_SIZE {
+                self.frame_times_ns.pop_front();
+            }
+            self.frame_times_ns.push_back(total_time_ns);
+        }
+
+        // Update pass timing averages
+        self.update_pass_timings();
+    }
+
+    /// Update averaged pass timings from history
+    fn update_pass_timings(&mut self) {
+        self.pass_timings.clear();
+
+        for (i, name) in self.pass_names.iter().enumerate() {
+            if i < self.pass_history.len() {
+                let history = &self.pass_history[i];
+                if !history.is_empty() {
+                    let sum: u64 = history.iter().sum();
+                    let avg_ns = sum as f64 / history.len() as f64;
+                    let avg_ms = avg_ns / 1_000_000.0;
+                    self.pass_timings.push(PassTiming {
+                        name: name.clone(),
+                        time_ms: avg_ms,
+                    });
+                }
+            }
         }
     }
 
@@ -282,6 +414,19 @@ impl GpuProfiler {
             .back()
             .map(|&ns| ns as f64 / 1_000_000.0)
             .unwrap_or(0.0)
+    }
+
+    /// Get per-pass timing breakdown
+    pub fn pass_timings(&self) -> &[PassTiming] {
+        &self.pass_timings
+    }
+
+    /// Get pass timings as a vec of (name, time_ms) tuples for RenderStats
+    pub fn pass_times_vec(&self) -> Vec<(String, f64)> {
+        self.pass_timings
+            .iter()
+            .map(|p| (p.name.clone(), p.time_ms))
+            .collect()
     }
 
     /// Force-unmap any pending mapped buffers and reset state

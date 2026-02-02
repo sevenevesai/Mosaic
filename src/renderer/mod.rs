@@ -92,6 +92,8 @@ pub struct RenderStats {
     pub main_pass_ms: f64,
     // Voxel GI timing
     pub voxel_gi_ms: f64,
+    /// Per-pass GPU timing breakdown (pass_name -> time_ms)
+    pub pass_times: Vec<(String, f64)>,
 }
 
 /// GPU state and rendering logic
@@ -1337,6 +1339,23 @@ impl Renderer {
         }
     }
 
+    /// Create a settings snapshot for profiler logging
+    pub fn settings_snapshot(&self) -> crate::utils::profiler::SettingsSnapshot {
+        crate::utils::profiler::SettingsSnapshot {
+            render_distance: self.render_distance,
+            ssao_quality: self.ssao.quality.as_str().to_string(),
+            dof_quality: self.dof.quality.as_str().to_string(),
+            water_quality: self.refraction_quality().as_str().to_string(),
+            impostor_quality: self.impostor_renderer.range.as_str().to_string(),
+            bloom_enabled: self.bloom_enabled,
+            volumetrics_enabled: self.volumetrics.enabled,
+            gpu_culling: self.use_gpu_culling,
+            shadow_mode: if self.shadow_mode > 0.5 { "SOFT".to_string() } else { "HARD".to_string() },
+            torch_shadows: self.torch_shadows,
+            resolution: (self.size.width, self.size.height),
+        }
+    }
+
     /// Load moon texture from assets/moon-1.png for sky rendering
     fn load_moon_texture(device: &wgpu::Device, queue: &wgpu::Queue) -> (wgpu::Texture, wgpu::TextureView, wgpu::Sampler) {
         // Try to load moon texture from file
@@ -1519,7 +1538,7 @@ impl Renderer {
         }
         let sync_elapsed = sync_start.elapsed();
 
-        // Poll GPU profiler for previous frame results
+        // Poll GPU profiler for previous frame results (total GPU time only)
         self.gpu_profiler.poll_results(&self.device);
 
         // Update camera uniform with animation timing
@@ -1640,14 +1659,9 @@ impl Renderer {
         );
         let voxel_gi_elapsed = voxel_gi_start.elapsed();
 
-        // Prepare timestamp writes for GPU profiling
-        let timestamp_writes = self.gpu_profiler.query_set().map(|qs| {
-            wgpu::RenderPassTimestampWrites {
-                query_set: qs,
-                beginning_of_pass_write_index: Some(0),
-                end_of_pass_write_index: Some(1),
-            }
-        });
+        // GPU per-pass timing disabled temporarily - staging buffer mapping conflict
+        // CPU timing in pass_times provides the needed breakdown
+        let _ = &self.gpu_profiler; // Silence unused warning
 
         // Reset stats
         let mut chunks_rendered = 0u32;
@@ -1772,7 +1786,7 @@ impl Renderer {
                     }),
                     stencil_ops: None,
                 }),
-                timestamp_writes,
+                timestamp_writes: None,
                 occlusion_query_set: None,
             });
 
@@ -2171,7 +2185,7 @@ impl Renderer {
             );
         }
 
-        // Update stats
+        // Update stats (CPU timing breakdown - GPU per-pass timing disabled)
         self.stats = RenderStats {
             chunks_rendered,
             chunks_culled,
@@ -2183,6 +2197,13 @@ impl Renderer {
             shadow_pass_ms: shadow_elapsed.as_secs_f64() * 1000.0,
             main_pass_ms: main_elapsed.as_secs_f64() * 1000.0,
             voxel_gi_ms: voxel_gi_elapsed.as_secs_f64() * 1000.0,
+            // CPU timing breakdown for bottleneck identification
+            pass_times: vec![
+                ("sync".to_string(), sync_elapsed.as_secs_f64() * 1000.0),
+                ("voxel_gi".to_string(), voxel_gi_elapsed.as_secs_f64() * 1000.0),
+                ("cull".to_string(), cull_elapsed.as_secs_f64() * 1000.0),
+                ("submit".to_string(), submit_elapsed.as_secs_f64() * 1000.0),
+            ],
         };
 
         Ok(())

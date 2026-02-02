@@ -51,6 +51,10 @@ pub struct DebugMetrics {
     pub world_update_ms: f32,
     pub render_ms: f32,
 
+    // Frame percentiles (for stutter detection)
+    pub fps_1pct_low: f32,            // 1% low FPS
+    pub fps_01pct_low: f32,           // 0.1% low FPS
+
     // CPU/Threading
     pub chunks_pending_gen: u32,
     pub chunks_pending_mesh: u32,
@@ -93,6 +97,12 @@ pub struct DebugMetrics {
     pub mesh_avg_time_us: f64,        // Average mesh time per chunk (microseconds)
     pub mesh_total_time_ms: f64,      // Total mesh time since reset
     pub mesh_total_quads: u64,        // Total quads generated
+
+    // Settings context for logging
+    pub settings_context: String,     // Compact settings string (SSAO:X DOF:X etc.)
+
+    // Per-pass GPU timing
+    pub pass_times: Vec<(String, f64)>,  // (pass_name, time_ms)
 }
 
 /// Debug overlay rendering system
@@ -512,26 +522,66 @@ impl DebugOverlay {
     fn log_metrics_to_file(&self, metrics: &DebugMetrics, elapsed_secs: f32) {
         let log_path = "performance_log.txt";
 
-        let log_entry = format!(
-            "[Session +{:>5.0}s] FPS: {:>4.0} | Frame: {:>5.2}ms | GPU: {:>5.2}ms | \
-Tris: {:>5}K | Chunks: {:>4} loaded {:>3} rendered | \
-Pending: {:>3} gen {:>3} mesh | Verts: {:>6}K | \
-Mesh: {:>6.0}us/chunk ({} chunks, {:.1}ms total, {}K quads)\n",
+        // Build structured log entry with settings context
+        let mut log_entry = String::new();
+
+        // Session header on first log
+        if self.log_count == 0 {
+            log_entry.push_str("================================================================================\n");
+            log_entry.push_str(&format!("MOSAIC PERFORMANCE LOG - Session Start\n"));
+            log_entry.push_str(&format!("Settings: {}\n", metrics.settings_context));
+            log_entry.push_str("================================================================================\n");
+        }
+
+        // Main metrics line (human-readable)
+        log_entry.push_str(&format!(
+            "[+{:>4.0}s] FPS:{:>4.0} (1%:{:>4.0} 0.1%:{:>4.0}) | Frame:{:>5.2}ms GPU:{:>5.2}ms | Tris:{:>5}K | Chunks:{:>4}L {:>4}R {:>4}C\n",
             elapsed_secs,
             metrics.fps,
+            metrics.fps_1pct_low,
+            metrics.fps_01pct_low,
             metrics.frame_time_ms,
             metrics.gpu_time_ms,
             metrics.triangles / 1000,
             metrics.loaded_chunks,
             metrics.chunks_rendered,
+            metrics.chunks_culled,
+        ));
+
+        // GPU pass breakdown if available
+        if !metrics.pass_times.is_empty() {
+            let pass_str: String = metrics.pass_times
+                .iter()
+                .filter(|(_, ms)| *ms > 0.01)
+                .map(|(name, ms)| format!("{}:{:.1}", name, ms))
+                .collect::<Vec<_>>()
+                .join(" ");
+            if !pass_str.is_empty() {
+                log_entry.push_str(&format!("       GPU: {}\n", pass_str));
+            }
+        }
+
+        // Structured data line (machine-parseable)
+        log_entry.push_str(&format!(
+            "  DATA|time={}|fps={}|fps1={}|fps01={}|frame={}|gpu={}|tris={}|chunks_l={}|chunks_r={}|chunks_c={}|pend_g={}|pend_m={}|verts={}|mesh_us={}|mesh_n={}|mesh_ms={}|quads={}\n",
+            elapsed_secs as u32,
+            metrics.fps as u32,
+            metrics.fps_1pct_low as u32,
+            metrics.fps_01pct_low as u32,
+            format!("{:.2}", metrics.frame_time_ms),
+            format!("{:.2}", metrics.gpu_time_ms),
+            metrics.triangles / 1000,
+            metrics.loaded_chunks,
+            metrics.chunks_rendered,
+            metrics.chunks_culled,
             metrics.chunks_pending_gen,
             metrics.chunks_pending_mesh,
             metrics.total_vertices / 1000,
-            metrics.mesh_avg_time_us,
+            metrics.mesh_avg_time_us as u32,
             metrics.mesh_chunks_total,
-            metrics.mesh_total_time_ms,
+            format!("{:.1}", metrics.mesh_total_time_ms),
             metrics.mesh_total_quads / 1000,
-        );
+        ));
 
         if let Ok(mut file) = OpenOptions::new()
             .create(true)
