@@ -35,6 +35,8 @@ pub struct App {
     settings_menu: SettingsMenu,
     /// Remembered window size for returning from fullscreen
     windowed_size: PhysicalSize<u32>,
+    /// Flag to indicate quit was requested from menu
+    quit_requested: bool,
 }
 
 impl App {
@@ -132,6 +134,7 @@ impl App {
             audio,
             settings_menu,
             windowed_size: window_size,
+            quit_requested: false,
         };
 
         tracing::info!("Engine initialized successfully");
@@ -214,30 +217,7 @@ impl App {
     fn handle_window_event(&mut self, event: WindowEvent, elwt: &winit::event_loop::EventLoopWindowTarget<()>) {
         match event {
             WindowEvent::CloseRequested => {
-                tracing::info!("Shutting down...");
-
-                // Save player data (position, rotation, inventory)
-                let player_data = self.player.to_save_data();
-                let player_path = std::path::PathBuf::from("saves/world1/player.dat");
-                if let Err(e) = player_data.save(&player_path) {
-                    tracing::error!("Failed to save player data: {}", e);
-                }
-
-                // Save item entities
-                let items_path = std::path::PathBuf::from("saves/world1/items.dat");
-                if let Err(e) = save_items(&items_path, &self.item_entities) {
-                    tracing::error!("Failed to save item entities: {}", e);
-                }
-
-                // Also update spawn in world metadata
-                let pos = self.player.position();
-                self.world.set_spawn(pos.x, pos.y, pos.z);
-
-                // Save settings before exit
-                let settings = self.renderer.collect_settings((self.windowed_size.width, self.windowed_size.height));
-                settings.save();
-
-                elwt.exit();
+                self.shutdown(elwt);
             }
 
             WindowEvent::Resized(new_size) => {
@@ -255,13 +235,18 @@ impl App {
                     match key_code {
                         KeyCode::Escape if pressed => {
                             if self.settings_menu.is_open {
-                                // Close menu and resume gameplay
-                                self.settings_menu.is_open = false;
-                                // Save settings when closing menu
-                                let settings = self.renderer.collect_settings((self.windowed_size.width, self.windowed_size.height));
-                                settings.save();
-                                if !self.cursor_grabbed {
-                                    self.toggle_cursor_grab();
+                                if self.settings_menu.is_main_menu() {
+                                    // In main menu: close menu and resume gameplay
+                                    self.settings_menu.is_open = false;
+                                    // Save settings when closing menu
+                                    let settings = self.renderer.collect_settings((self.windowed_size.width, self.windowed_size.height));
+                                    settings.save();
+                                    if !self.cursor_grabbed {
+                                        self.toggle_cursor_grab();
+                                    }
+                                } else {
+                                    // In settings: go back to main menu
+                                    self.settings_menu.go_back();
                                 }
                             } else {
                                 // Open menu and release cursor
@@ -352,7 +337,10 @@ impl App {
                 if self.settings_menu.is_open {
                     // Handle menu clicks
                     if state == ElementState::Pressed && button == MouseButton::Left {
-                        self.settings_menu.click(&mut self.renderer);
+                        let quit = self.settings_menu.click(&mut self.renderer);
+                        if quit {
+                            self.quit_requested = true;
+                        }
                         // Save settings immediately after each toggle
                         let settings = self.renderer.collect_settings((self.windowed_size.width, self.windowed_size.height));
                         settings.save();
@@ -386,11 +374,15 @@ impl App {
 
             WindowEvent::MouseWheel { delta, .. } => {
                 use winit::event::MouseScrollDelta;
-                if !self.settings_menu.is_open && !self.player.is_inventory_open() {
-                    let scroll = match delta {
-                        MouseScrollDelta::LineDelta(_, y) => y,
-                        MouseScrollDelta::PixelDelta(pos) => (pos.y / 50.0) as f32,
-                    };
+                let scroll = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => y,
+                    MouseScrollDelta::PixelDelta(pos) => (pos.y / 50.0) as f32,
+                };
+
+                if self.settings_menu.is_open {
+                    // Handle menu scrolling
+                    self.settings_menu.scroll(scroll);
+                } else if !self.player.is_inventory_open() {
                     self.player.handle_scroll(scroll);
                 }
             }
@@ -413,6 +405,40 @@ impl App {
 
             _ => {}
         }
+
+        // Check if quit was requested from menu
+        if self.quit_requested {
+            self.quit_requested = false; // Reset in case exit fails
+            self.shutdown(elwt);
+        }
+    }
+
+    /// Perform shutdown: save data and exit
+    fn shutdown(&mut self, elwt: &winit::event_loop::EventLoopWindowTarget<()>) {
+        tracing::info!("Shutting down...");
+
+        // Save player data (position, rotation, inventory)
+        let player_data = self.player.to_save_data();
+        let player_path = std::path::PathBuf::from("saves/world1/player.dat");
+        if let Err(e) = player_data.save(&player_path) {
+            tracing::error!("Failed to save player data: {}", e);
+        }
+
+        // Save item entities
+        let items_path = std::path::PathBuf::from("saves/world1/items.dat");
+        if let Err(e) = save_items(&items_path, &self.item_entities) {
+            tracing::error!("Failed to save item entities: {}", e);
+        }
+
+        // Update spawn in world metadata
+        let pos = self.player.position();
+        self.world.set_spawn(pos.x, pos.y, pos.z);
+
+        // Save settings
+        let settings = self.renderer.collect_settings((self.windowed_size.width, self.windowed_size.height));
+        settings.save();
+
+        elwt.exit();
     }
 
     fn handle_device_event(&mut self, event: DeviceEvent) {

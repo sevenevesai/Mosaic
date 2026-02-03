@@ -82,7 +82,8 @@ use crate::utils::gpu_profiler::GpuProfiler;
 use crate::utils::profiler::FrameProfiler;
 use crate::world::WorldManager;
 
-use pipeline::{UiVertex, LineVertex, create_voxel_lit_chunk_pipeline, create_dimmer_pipeline};
+use pipeline::{UiVertex, LineVertex, create_voxel_lit_chunk_pipeline, create_dimmer_pipeline,
+    create_menu_blur_bind_group_layout, create_menu_blur_bind_group, create_menu_blur_pipeline};
 use glam::{Vec3, Mat4};
 
 /// Render statistics for the current frame
@@ -230,8 +231,14 @@ pub struct Renderer {
     // Procedural cloud rendering
     clouds: Clouds,
 
-    // Settings menu dimmer overlay
+    // Settings menu blur overlay
     dimmer_pipeline: wgpu::RenderPipeline,
+    menu_blur_pipeline: wgpu::RenderPipeline,
+    menu_blur_bind_group_layout: wgpu::BindGroupLayout,
+    menu_blur_bind_group: wgpu::BindGroup,
+    menu_blur_sampler: wgpu::Sampler,
+    menu_blur_texture: wgpu::Texture,
+    menu_blur_texture_view: wgpu::TextureView,
 
     // Inventory UI
     inventory_ui: inventory_ui::InventoryUI,
@@ -607,8 +614,8 @@ impl Renderer {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: surface_format, // Use surface format for pipeline compatibility
-            // COPY_SRC needed for water refraction (copy to refraction_source_texture)
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+            // COPY_SRC for water refraction, COPY_DST for menu blur
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
         let scene_texture_view = scene_texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -616,6 +623,39 @@ impl Renderer {
         // Create bloom system
         let mut bloom = Bloom::new(&device, size.width, size.height, surface_format);
         bloom.create_extract_bind_group(&device, &scene_texture_view);
+
+        // Create menu blur system
+        let menu_blur_bind_group_layout = create_menu_blur_bind_group_layout(&device);
+        let menu_blur_pipeline = create_menu_blur_pipeline(&device, surface_format, &menu_blur_bind_group_layout);
+        let menu_blur_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Menu Blur Sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let menu_blur_bind_group = create_menu_blur_bind_group(
+            &device,
+            &menu_blur_bind_group_layout,
+            &scene_texture_view,
+            &menu_blur_sampler,
+        );
+
+        // Create intermediate texture for menu blur
+        let menu_blur_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Menu Blur Texture"),
+            size: wgpu::Extent3d {
+                width: size.width,
+                height: size.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: surface_format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let menu_blur_texture_view = menu_blur_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         // Create volumetric light shafts system
         let volumetrics = VolumetricLighting::new(
@@ -778,6 +818,12 @@ impl Renderer {
             dof,
             clouds,
             dimmer_pipeline,
+            menu_blur_pipeline,
+            menu_blur_bind_group_layout,
+            menu_blur_bind_group,
+            menu_blur_sampler,
+            menu_blur_texture,
+            menu_blur_texture_view,
             inventory_ui,
             item_renderer,
             prop_renderer,
@@ -819,11 +865,34 @@ impl Renderer {
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: self.config.format, // Use surface format
-                // COPY_SRC needed for water refraction
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+                // COPY_SRC for water refraction, COPY_DST for menu blur
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST,
                 view_formats: &[],
             });
             self.scene_texture_view = self.scene_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+            // Recreate menu blur texture and bind group
+            self.menu_blur_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("Menu Blur Texture"),
+                size: wgpu::Extent3d {
+                    width: new_size.width,
+                    height: new_size.height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: self.config.format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            self.menu_blur_texture_view = self.menu_blur_texture.create_view(&wgpu::TextureViewDescriptor::default());
+            self.menu_blur_bind_group = create_menu_blur_bind_group(
+                &self.device,
+                &self.menu_blur_bind_group_layout,
+                &self.scene_texture_view,
+                &self.menu_blur_sampler,
+            );
 
             // Resize bloom textures
             self.bloom.resize(&self.device, new_size.width, new_size.height);
@@ -2468,8 +2537,8 @@ impl Renderer {
             );
         }
 
-        // Pre-generate menu lines if menu is open (before render pass borrow)
-        let menu_lines = if settings_menu.is_open {
+        // Pre-generate menu data if menu is open (before render pass borrow)
+        let menu_data = if settings_menu.is_open {
             Some(settings_menu.generate_lines(self))
         } else {
             None
@@ -2981,6 +3050,52 @@ impl Renderer {
             self.gpu_profiler.write_timestamp(&mut encoder, idx);
         }
 
+        // === MENU BLUR PASS (if menu is open, blur scene before UI) ===
+        if menu_data.is_some() {
+            // Pass 1: Blur scene_texture → menu_blur_texture
+            {
+                let mut blur_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Menu Blur Pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.menu_blur_texture_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+
+                blur_pass.set_pipeline(&self.menu_blur_pipeline);
+                blur_pass.set_bind_group(0, &self.menu_blur_bind_group, &[]);
+                blur_pass.draw(0..3, 0..1);
+            }
+
+            // Copy blurred result back to scene_texture
+            encoder.copy_texture_to_texture(
+                wgpu::ImageCopyTexture {
+                    texture: &self.menu_blur_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::ImageCopyTexture {
+                    texture: &self.scene_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d {
+                    width: self.config.width,
+                    height: self.config.height,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+
         // === UI RENDER PASS (after DoF to prevent blur on text) ===
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -2989,7 +3104,7 @@ impl Renderer {
                     view: &self.scene_texture_view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load, // Keep the post-processed scene
+                        load: wgpu::LoadOp::Load, // Keep the (potentially blurred) scene
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -3017,12 +3132,13 @@ impl Renderer {
             self.inventory_ui.render(&mut render_pass, &self.texture_bind_group);
 
             // Render debug overlay and optionally settings menu
+            // Note: dimmer is no longer needed since blur pass already darkens
             self.debug_overlay.render(
                 &mut render_pass,
                 &self.queue,
                 debug_metrics,
-                menu_lines.as_deref(),
-                if menu_lines.is_some() { Some(&self.dimmer_pipeline) } else { None },
+                menu_data.as_ref(),
+                None, // Blur pass already applied darkening
             );
         }
 

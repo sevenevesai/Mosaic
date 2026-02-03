@@ -1784,6 +1784,150 @@ pub fn create_line_pipeline(
 // DIMMER SHADER - Fullscreen overlay for settings menu
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Menu blur shader - applies subtle Gaussian blur and darkening for menu overlay
+const MENU_BLUR_SHADER: &str = r#"
+@group(0) @binding(0) var scene_tex: texture_2d<f32>;
+@group(0) @binding(1) var scene_sampler: sampler;
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vi: u32) -> VertexOutput {
+    // Fullscreen triangle from vertex index
+    let x = f32(i32(vi & 1u) * 4 - 1);
+    let y = f32(i32(vi >> 1u) * 4 - 1);
+    var out: VertexOutput;
+    out.position = vec4<f32>(x, y, 0.0, 1.0);
+    // Convert from NDC to UV (flip Y)
+    out.uv = vec2<f32>((x + 1.0) * 0.5, (1.0 - y) * 0.5);
+    return out;
+}
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    let tex_size = vec2<f32>(textureDimensions(scene_tex));
+    let texel = 1.0 / tex_size;
+
+    // Subtle 9-tap Gaussian blur (sigma ~1.5)
+    // Weights: center=0.25, adjacent=0.125, diagonal=0.0625
+    var color = vec3<f32>(0.0);
+
+    // Center
+    color += textureSample(scene_tex, scene_sampler, in.uv).rgb * 0.25;
+
+    // Adjacent (up, down, left, right)
+    let blur_radius = 2.0; // Subtle blur
+    color += textureSample(scene_tex, scene_sampler, in.uv + vec2<f32>(0.0, -texel.y * blur_radius)).rgb * 0.125;
+    color += textureSample(scene_tex, scene_sampler, in.uv + vec2<f32>(0.0, texel.y * blur_radius)).rgb * 0.125;
+    color += textureSample(scene_tex, scene_sampler, in.uv + vec2<f32>(-texel.x * blur_radius, 0.0)).rgb * 0.125;
+    color += textureSample(scene_tex, scene_sampler, in.uv + vec2<f32>(texel.x * blur_radius, 0.0)).rgb * 0.125;
+
+    // Diagonals
+    color += textureSample(scene_tex, scene_sampler, in.uv + vec2<f32>(-texel.x * blur_radius, -texel.y * blur_radius)).rgb * 0.0625;
+    color += textureSample(scene_tex, scene_sampler, in.uv + vec2<f32>(texel.x * blur_radius, -texel.y * blur_radius)).rgb * 0.0625;
+    color += textureSample(scene_tex, scene_sampler, in.uv + vec2<f32>(-texel.x * blur_radius, texel.y * blur_radius)).rgb * 0.0625;
+    color += textureSample(scene_tex, scene_sampler, in.uv + vec2<f32>(texel.x * blur_radius, texel.y * blur_radius)).rgb * 0.0625;
+
+    // Darken the blurred result
+    let darken = 0.5; // 50% darker
+    color = color * darken;
+
+    return vec4<f32>(color, 1.0);
+}
+"#;
+
+/// Create bind group layout for menu blur (scene texture + sampler)
+pub fn create_menu_blur_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("Menu Blur Bind Group Layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    })
+}
+
+/// Create bind group for menu blur
+pub fn create_menu_blur_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    scene_view: &wgpu::TextureView,
+    sampler: &wgpu::Sampler,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("Menu Blur Bind Group"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(scene_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+        ],
+    })
+}
+
+/// Create a pipeline for menu blur overlay
+pub fn create_menu_blur_pipeline(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    bind_group_layout: &wgpu::BindGroupLayout,
+) -> wgpu::RenderPipeline {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("Menu Blur Shader"),
+        source: wgpu::ShaderSource::Wgsl(MENU_BLUR_SHADER.into()),
+    });
+
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("Menu Blur Pipeline Layout"),
+        bind_group_layouts: &[bind_group_layout],
+        push_constant_ranges: &[],
+    });
+
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("Menu Blur Pipeline"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: "vs_main",
+            buffers: &[],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: "fs_main",
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: None, // No blending - fully replace
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None, // No depth test for post-process
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+    })
+}
+
 /// Dimmer shader - renders a semi-transparent dark overlay
 const DIMMER_SHADER: &str = r#"
 @vertex
@@ -1796,11 +1940,12 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
 
 @fragment
 fn fs_main() -> @location(0) vec4<f32> {
-    return vec4<f32>(0.0, 0.0, 0.0, 0.4);
+    // Darker overlay - 60% opacity black
+    return vec4<f32>(0.0, 0.0, 0.0, 0.6);
 }
 "#;
 
-/// Create a pipeline for dimmer overlay (settings menu background)
+/// Create a pipeline for dimmer overlay (settings menu background) - fallback
 pub fn create_dimmer_pipeline(
     device: &wgpu::Device,
     format: wgpu::TextureFormat,

@@ -622,7 +622,7 @@ impl DebugOverlay {
         render_pass: &mut wgpu::RenderPass<'a>,
         queue: &wgpu::Queue,
         metrics: &DebugMetrics,
-        menu_lines: Option<&[(String, bool)]>,
+        menu_data: Option<&crate::settings_menu::MenuRenderData>,
         dimmer_pipeline: Option<&'a wgpu::RenderPipeline>,
     ) {
         // Always check for periodic logging (even if overlay disabled)
@@ -693,41 +693,82 @@ impl DebugOverlay {
             render_pass.draw(0..vertex_count as u32, 0..1);
         }
 
-        // Render settings menu if provided
-        if let Some(lines) = menu_lines {
+        // Render settings/main menu if provided
+        if let Some(data) = menu_data {
             // Render dimmer overlay first
             if let Some(dimmer) = dimmer_pipeline {
                 render_pass.set_pipeline(dimmer);
                 render_pass.draw(0..3, 0..1);
             }
 
-            // Generate menu vertices
             let mut menu_vertices = Vec::new();
-            let line_height = char_h * 1.4; // Slightly more spacing for menu
+            let line_height = char_h * 1.4;
 
-            // Calculate total menu height
-            let total_height = lines.len() as f32 * line_height;
+            if data.is_main_menu {
+                // Main menu: centered on screen
+                let total_height = data.lines.len() as f32 * line_height;
+                let mut y = total_height / 2.0 - char_h / 2.0;
 
-            // Start from center
-            let mut y = total_height / 2.0 - char_h / 2.0;
+                for (line, _is_hovered) in &data.lines {
+                    let line_width = line.len() as f32 * char_w;
+                    let mut x = -line_width / 2.0;
 
-            for (line, _is_hovered) in lines {
-                // Calculate line width and center it
-                let line_width = line.len() as f32 * char_w;
-                let mut x = -line_width / 2.0;
-
-                for ch in line.chars() {
-                    if let Some((u0, v0, u1, v1)) = self.char_uvs(ch) {
-                        menu_vertices.push(TextVertex { position: [x, y - char_h], uv: [u0, v1] });
-                        menu_vertices.push(TextVertex { position: [x + char_w, y - char_h], uv: [u1, v1] });
-                        menu_vertices.push(TextVertex { position: [x + char_w, y], uv: [u1, v0] });
-                        menu_vertices.push(TextVertex { position: [x, y - char_h], uv: [u0, v1] });
-                        menu_vertices.push(TextVertex { position: [x + char_w, y], uv: [u1, v0] });
-                        menu_vertices.push(TextVertex { position: [x, y], uv: [u0, v0] });
+                    for ch in line.chars() {
+                        if let Some((u0, v0, u1, v1)) = self.char_uvs(ch) {
+                            menu_vertices.push(TextVertex { position: [x, y - char_h], uv: [u0, v1] });
+                            menu_vertices.push(TextVertex { position: [x + char_w, y - char_h], uv: [u1, v1] });
+                            menu_vertices.push(TextVertex { position: [x + char_w, y], uv: [u1, v0] });
+                            menu_vertices.push(TextVertex { position: [x, y - char_h], uv: [u0, v1] });
+                            menu_vertices.push(TextVertex { position: [x + char_w, y], uv: [u1, v0] });
+                            menu_vertices.push(TextVertex { position: [x, y], uv: [u0, v0] });
+                        }
+                        x += char_w;
                     }
-                    x += char_w;
+                    y -= line_height;
                 }
-                y -= line_height;
+            } else {
+                // Settings menu: tabs at top, content below
+
+                // Render tabs at fixed position (top of screen)
+                if let Some(ref tabs_line) = data.tabs_line {
+                    let tabs_y = 0.85; // Fixed near top
+                    let tabs_width = tabs_line.len() as f32 * char_w;
+                    let mut x = -tabs_width / 2.0;
+
+                    for ch in tabs_line.chars() {
+                        if let Some((u0, v0, u1, v1)) = self.char_uvs(ch) {
+                            menu_vertices.push(TextVertex { position: [x, tabs_y - char_h], uv: [u0, v1] });
+                            menu_vertices.push(TextVertex { position: [x + char_w, tabs_y - char_h], uv: [u1, v1] });
+                            menu_vertices.push(TextVertex { position: [x + char_w, tabs_y], uv: [u1, v0] });
+                            menu_vertices.push(TextVertex { position: [x, tabs_y - char_h], uv: [u0, v1] });
+                            menu_vertices.push(TextVertex { position: [x + char_w, tabs_y], uv: [u1, v0] });
+                            menu_vertices.push(TextVertex { position: [x, tabs_y], uv: [u0, v0] });
+                        }
+                        x += char_w;
+                    }
+                }
+
+                // Content starts below tabs
+                let content_start_y = 0.70;
+                let mut y = content_start_y;
+
+                for (line, _is_hovered) in &data.lines {
+                    let line_width = line.len() as f32 * char_w;
+                    let mut x = -line_width / 2.0;
+
+                    for ch in line.chars() {
+                        if let Some((u0, v0, u1, v1)) = self.char_uvs(ch) {
+                            menu_vertices.push(TextVertex { position: [x, y - char_h], uv: [u0, v1] });
+                            menu_vertices.push(TextVertex { position: [x + char_w, y - char_h], uv: [u1, v1] });
+                            menu_vertices.push(TextVertex { position: [x + char_w, y], uv: [u1, v0] });
+                            menu_vertices.push(TextVertex { position: [x, y - char_h], uv: [u0, v1] });
+                            menu_vertices.push(TextVertex { position: [x + char_w, y], uv: [u1, v0] });
+                            menu_vertices.push(TextVertex { position: [x, y], uv: [u0, v0] });
+                        }
+                        x += char_w;
+                    }
+                    y -= line_height;
+                }
             }
 
             if !menu_vertices.is_empty() {

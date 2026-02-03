@@ -1,9 +1,52 @@
 //! Settings menu with tabbed categories and appropriate controls
 //!
-//! Press ESC to open/close the menu. Click tabs to switch categories.
-//! Controls: Toggle, Dropdown, Slider, Cycle arrows.
+//! Press ESC to open main menu. Click Settings to access tabbed settings.
+//! Controls: Toggle, Slider, Cycle arrows.
 
 use crate::renderer::Renderer;
+
+/// Menu mode - main menu vs settings
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MenuMode {
+    /// Main menu with buttons (Settings, Quit)
+    Main,
+    /// Settings with tabs
+    Settings,
+}
+
+/// Main menu button types
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MainMenuButton {
+    Settings,
+    SaveAndQuit,
+}
+
+impl MainMenuButton {
+    pub fn label(&self) -> &'static str {
+        match self {
+            MainMenuButton::Settings => "SETTINGS",
+            MainMenuButton::SaveAndQuit => "SAVE & QUIT",
+        }
+    }
+
+    pub fn all() -> &'static [MainMenuButton] {
+        &[MainMenuButton::Settings, MainMenuButton::SaveAndQuit]
+    }
+}
+
+/// Data returned by generate_lines for rendering
+pub struct MenuRenderData {
+    /// Lines to render (text, is_hovered)
+    pub lines: Vec<(String, bool)>,
+    /// True if this is main menu (different layout)
+    pub is_main_menu: bool,
+    /// Tab line for settings menu (rendered separately at top)
+    pub tabs_line: Option<String>,
+    /// Whether up scroll arrow should show
+    pub scroll_up: bool,
+    /// Whether down scroll arrow should show
+    pub scroll_down: bool,
+}
 
 /// Menu categories (tabs)
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -71,21 +114,23 @@ pub struct MenuItem {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClickRegion {
     None,
+    Button(usize),      // main menu button index
     Tab(usize),
     LeftArrow(usize),   // item index
-    Center(usize),      // item index - for dropdown toggle or simple click
+    Center(usize),      // item index - for toggle or simple click
     RightArrow(usize),  // item index
     SliderBar(usize, f32), // item index, normalized position 0.0-1.0
-    DropdownOption(usize), // option index within dropdown
     Outside,
 }
 
 /// Settings menu state
 pub struct SettingsMenu {
     pub is_open: bool,
+    pub menu_mode: MenuMode,
     pub active_tab: MenuTab,
     pub hovered_tab: Option<usize>,
     pub hovered_index: Option<usize>,
+    pub hovered_button: Option<usize>,
     pub control_state: ControlState,
     pub items: Vec<MenuItem>,
     // Screen and mouse state
@@ -99,6 +144,11 @@ pub struct SettingsMenu {
     menu_width: f32,
     tab_positions: Vec<(f32, f32, f32)>, // (x, width, tab_idx as f32)
     items_start_y: f32,
+    // Scrolling
+    scroll_offset: usize,
+    max_visible_items: usize,
+    // Button positions for main menu
+    button_positions: Vec<(f32, f32, f32, f32)>, // (x, y, width, height)
 }
 
 impl SettingsMenu {
@@ -111,9 +161,7 @@ impl SettingsMenu {
     // debug_overlay uses line_height = char_h * 1.4, so in pixels:
     pub const LINE_HEIGHT_PX: f32 = 28.0; // 20 * 1.4 = 28
 
-    // Layout constants
-    const TITLE: &'static str = "SETTINGS";
-    const FOOTER: &'static str = "ESC TO CLOSE";
+    // Layout constants (FOOTER now dynamic per mode)
 
     // Two-column layout (in characters)
     const LABEL_WIDTH: usize = 18;     // left column for labels
@@ -127,9 +175,11 @@ impl SettingsMenu {
 
         Self {
             is_open: false,
+            menu_mode: MenuMode::Main,
             active_tab: MenuTab::Graphics, // Start on Graphics since it has the most items
             hovered_tab: None,
             hovered_index: None,
+            hovered_button: None,
             control_state: ControlState::Idle,
             items,
             screen_width: 1280.0,
@@ -141,6 +191,9 @@ impl SettingsMenu {
             menu_width: 0.0,
             tab_positions: Vec::new(),
             items_start_y: 0.0,
+            scroll_offset: 0,
+            max_visible_items: 10,
+            button_positions: Vec::new(),
         }
     }
 
@@ -566,34 +619,99 @@ impl SettingsMenu {
         self.menu_width = Self::TOTAL_WIDTH as f32 * Self::CHAR_WIDTH_PX;
         self.menu_left = (self.screen_width - self.menu_width) / 2.0;
 
-        // Count total lines that will be rendered (must match generate_lines output)
-        // Title, spacing, tab line, spacing, items..., spacing, footer
-        let visible_count = self.visible_items().count();
-        let total_lines = 2 + 1 + 1 + visible_count + 1 + 1; // title+space, tabs, space, items, space, footer
+        match self.menu_mode {
+            MenuMode::Main => {
+                self.recalculate_main_menu_layout();
+            }
+            MenuMode::Settings => {
+                self.recalculate_settings_layout();
+            }
+        }
+    }
 
-        // Total height matches debug_overlay: lines * line_height
-        let total_height = total_lines as f32 * Self::LINE_HEIGHT_PX;
+    /// Convert NDC Y coordinate to screen pixel Y
+    /// NDC: Y=1.0 is top, Y=-1.0 is bottom
+    /// Screen: Y=0 is top, Y=screen_height is bottom
+    fn ndc_y_to_pixel(&self, ndc_y: f32) -> f32 {
+        self.screen_height * (1.0 - ndc_y) / 2.0
+    }
 
-        // Menu is centered vertically - top of first line
-        self.menu_top = (self.screen_height - total_height) / 2.0;
+    /// Layout for main menu (buttons centered on screen)
+    fn recalculate_main_menu_layout(&mut self) {
+        self.button_positions.clear();
 
-        // Calculate tab positions - tabs are rendered as a centered line
-        // Tab format: "[DISPLAY] [GRAPHICS] [AUDIO] [DEBUG]" - each 10 chars, 1 space gap
+        let buttons = MainMenuButton::all();
+        let button_width = 18.0 * Self::CHAR_WIDTH_PX; // Match render width
+        let button_height = Self::LINE_HEIGHT_PX * 1.4; // Match line_height in render
+        let button_gap = Self::LINE_HEIGHT_PX * 1.4;
+
+        // Main menu renders centered - title + space + buttons
+        // In debug_overlay: total_height = lines.len() * line_height, start y = total_height/2
+        // We have: title, space, button1, button2 = 4 lines
+        let line_height_ndc = (Self::CHAR_HEIGHT_PX * 2.0 * 1.4) / self.screen_height * 2.0;
+        let num_lines = 4.0; // title, space, 2 buttons
+        let total_height_ndc = num_lines * line_height_ndc;
+
+        // Start Y in NDC is total_height/2 - char_h/2, then decreases
+        // Button 1 is at line 2 (after title, space), button 2 at line 3
+        let char_h_ndc = (Self::CHAR_HEIGHT_PX * 2.0) / self.screen_height * 2.0;
+        let start_y_ndc = total_height_ndc / 2.0 - char_h_ndc / 2.0;
+
+        let start_x = (self.screen_width - button_width) / 2.0;
+
+        for i in 0..buttons.len() {
+            // Button i is at line (2 + i) from top
+            let line_idx = 2 + i;
+            let button_y_ndc = start_y_ndc - line_idx as f32 * line_height_ndc;
+            let button_y_pixel = self.ndc_y_to_pixel(button_y_ndc + char_h_ndc); // top of button
+            self.button_positions.push((start_x, button_y_pixel, button_width, button_height));
+        }
+    }
+
+    /// Layout for settings menu (fixed tabs at top, scrollable content)
+    fn recalculate_settings_layout(&mut self) {
+        // Tabs rendered at NDC Y = 0.85, content at NDC Y = 0.70
+        // Convert to pixel coordinates
+        let tabs_y_ndc = 0.85;
+        let content_start_y_ndc = 0.70;
+
+        let char_h_ndc = (Self::CHAR_HEIGHT_PX * 2.0) / self.screen_height * 2.0;
+        let line_height_ndc = char_h_ndc * 1.4;
+
+        // Tabs position in pixels (top of tab line)
+        let tabs_y_pixel = self.ndc_y_to_pixel(tabs_y_ndc);
+        self.menu_top = tabs_y_pixel;
+
+        // Calculate tab positions
         self.tab_positions.clear();
         let tabs = MenuTab::all();
-        let tab_width = 10.0 * Self::CHAR_WIDTH_PX;  // Each tab is 10 chars: "[GRAPHICS]"
-        let gap_width = 1.0 * Self::CHAR_WIDTH_PX;   // 1 space between tabs
+        let tab_width = 10.0 * Self::CHAR_WIDTH_PX;
+        let gap_width = 1.0 * Self::CHAR_WIDTH_PX;
         let total_tabs_width = tabs.len() as f32 * tab_width + (tabs.len() - 1) as f32 * gap_width;
-
-        // Tabs are in a line that's centered on screen
         let tabs_start_x = (self.screen_width - total_tabs_width) / 2.0;
+
         for i in 0..tabs.len() {
             let x = tabs_start_x + i as f32 * (tab_width + gap_width);
             self.tab_positions.push((x, tab_width, i as f32));
         }
 
-        // Items start at line index 4 (title, space, tabs, space, then items)
-        self.items_start_y = self.menu_top + 4.0 * Self::LINE_HEIGHT_PX;
+        // Content area starts at NDC 0.70
+        self.items_start_y = self.ndc_y_to_pixel(content_start_y_ndc);
+
+        // Calculate how many items can fit in the content area
+        // Content goes from items_start_y down to near bottom
+        let content_bottom = self.screen_height - Self::LINE_HEIGHT_PX * 2.0;
+        let content_height = content_bottom - self.items_start_y;
+        self.max_visible_items = (content_height / Self::LINE_HEIGHT_PX).floor() as usize;
+        self.max_visible_items = self.max_visible_items.max(1); // At least 1
+
+        // Clamp scroll offset
+        let visible_count = self.visible_items().count();
+        if visible_count <= self.max_visible_items {
+            self.scroll_offset = 0;
+        } else if self.scroll_offset > visible_count - self.max_visible_items {
+            self.scroll_offset = visible_count - self.max_visible_items;
+        }
     }
 
     /// Get items visible in the current tab
@@ -606,13 +724,45 @@ impl SettingsMenu {
         if !self.is_open {
             self.hovered_index = None;
             self.hovered_tab = None;
+            self.hovered_button = None;
             return;
         }
 
-        // Check tab hover - tab line is at index 2
+        match self.menu_mode {
+            MenuMode::Main => {
+                self.update_hover_main_menu();
+            }
+            MenuMode::Settings => {
+                self.update_hover_settings();
+            }
+        }
+    }
+
+    /// Update hover state for main menu
+    fn update_hover_main_menu(&mut self) {
+        self.hovered_button = None;
         self.hovered_tab = None;
-        let tab_y = self.menu_top + 2.0 * Self::LINE_HEIGHT_PX;
-        if self.mouse_y >= tab_y && self.mouse_y < tab_y + Self::LINE_HEIGHT_PX {
+        self.hovered_index = None;
+
+        for (i, &(x, y, w, h)) in self.button_positions.iter().enumerate() {
+            if self.mouse_x >= x && self.mouse_x < x + w
+                && self.mouse_y >= y && self.mouse_y < y + h
+            {
+                self.hovered_button = Some(i);
+                break;
+            }
+        }
+    }
+
+    /// Update hover state for settings menu
+    fn update_hover_settings(&mut self) {
+        self.hovered_button = None;
+
+        // Check tab hover - tabs are at fixed position (menu_top is pixel Y of tabs)
+        self.hovered_tab = None;
+        let tab_y_top = self.menu_top;
+        let tab_y_bottom = tab_y_top + Self::LINE_HEIGHT_PX;
+        if self.mouse_y >= tab_y_top && self.mouse_y < tab_y_bottom {
             for (i, &(x, width, _)) in self.tab_positions.iter().enumerate() {
                 if self.mouse_x >= x && self.mouse_x < x + width {
                     self.hovered_tab = Some(i);
@@ -621,17 +771,29 @@ impl SettingsMenu {
             }
         }
 
-        // Check item hover
+        // Check item hover (only visible items after scroll)
         self.hovered_index = None;
         let visible: Vec<_> = self.visible_items().collect();
-        for (vis_idx, (global_idx, _)) in visible.iter().enumerate() {
-            let item_top = self.items_start_y + vis_idx as f32 * Self::LINE_HEIGHT_PX;
+        let visible_count = visible.len();
+
+        // Account for scroll arrow if present
+        let scroll_up_offset = if self.can_scroll_up() { 1 } else { 0 };
+
+        for vis_idx in 0..self.max_visible_items.min(visible_count.saturating_sub(self.scroll_offset)) {
+            let actual_idx = vis_idx + self.scroll_offset;
+            if actual_idx >= visible_count {
+                break;
+            }
+
+            let (global_idx, _) = visible[actual_idx];
+            // Items start after potential scroll-up arrow
+            let item_top = self.items_start_y + (vis_idx + scroll_up_offset) as f32 * Self::LINE_HEIGHT_PX;
             let item_bottom = item_top + Self::LINE_HEIGHT_PX;
 
             if self.mouse_y >= item_top && self.mouse_y < item_bottom
                 && self.mouse_x >= self.menu_left && self.mouse_x < self.menu_left + self.menu_width
             {
-                self.hovered_index = Some(*global_idx);
+                self.hovered_index = Some(global_idx);
                 break;
             }
         }
@@ -639,9 +801,28 @@ impl SettingsMenu {
 
     /// Determine what region was clicked
     fn hit_test(&self, x: f32, y: f32) -> ClickRegion {
-        // Check tabs first - tab line is at index 2
-        let tab_y = self.menu_top + 2.0 * Self::LINE_HEIGHT_PX;
-        if y >= tab_y && y < tab_y + Self::LINE_HEIGHT_PX {
+        match self.menu_mode {
+            MenuMode::Main => self.hit_test_main_menu(x, y),
+            MenuMode::Settings => self.hit_test_settings(x, y),
+        }
+    }
+
+    /// Hit test for main menu buttons
+    fn hit_test_main_menu(&self, x: f32, y: f32) -> ClickRegion {
+        for (i, &(bx, by, bw, bh)) in self.button_positions.iter().enumerate() {
+            if x >= bx && x < bx + bw && y >= by && y < by + bh {
+                return ClickRegion::Button(i);
+            }
+        }
+        ClickRegion::None
+    }
+
+    /// Hit test for settings menu
+    fn hit_test_settings(&self, x: f32, y: f32) -> ClickRegion {
+        // Check tabs first - tabs are at fixed position
+        let tab_y_top = self.menu_top;
+        let tab_y_bottom = tab_y_top + Self::LINE_HEIGHT_PX;
+        if y >= tab_y_top && y < tab_y_bottom {
             for (i, &(tx, width, _)) in self.tab_positions.iter().enumerate() {
                 if x >= tx && x < tx + width {
                     return ClickRegion::Tab(i);
@@ -649,12 +830,23 @@ impl SettingsMenu {
             }
         }
 
-        // Check items - control column is right-side of the two-column layout
+        // Check items - only visible items after scroll
         let visible: Vec<_> = self.visible_items().collect();
+        let visible_count = visible.len();
         let control_col_start = self.menu_left + (Self::LABEL_WIDTH + Self::COLUMN_GAP) as f32 * Self::CHAR_WIDTH_PX;
 
-        for (vis_idx, (global_idx, item)) in visible.iter().enumerate() {
-            let item_top = self.items_start_y + vis_idx as f32 * Self::LINE_HEIGHT_PX;
+        // Account for scroll arrow if present
+        let scroll_up_offset = if self.can_scroll_up() { 1 } else { 0 };
+
+        for vis_idx in 0..self.max_visible_items.min(visible_count.saturating_sub(self.scroll_offset)) {
+            let actual_idx = vis_idx + self.scroll_offset;
+            if actual_idx >= visible_count {
+                break;
+            }
+
+            let (global_idx, item) = &visible[actual_idx];
+            // Items start after potential scroll-up arrow
+            let item_top = self.items_start_y + (vis_idx + scroll_up_offset) as f32 * Self::LINE_HEIGHT_PX;
             let item_bottom = item_top + Self::LINE_HEIGHT_PX;
 
             if y >= item_top && y < item_bottom {
@@ -691,6 +883,7 @@ impl SettingsMenu {
                         let bar_end = bar_start + Self::SLIDER_BAR_WIDTH as f32 * Self::CHAR_WIDTH_PX;
 
                         if x >= bar_start && x < bar_end {
+                            // Continuous value - no snapping
                             let normalized = ((x - bar_start) / (bar_end - bar_start)).clamp(0.0, 1.0);
                             return ClickRegion::SliderBar(*global_idx, normalized);
                         } else if x >= control_col_start && x < control_col_start + slider_width {
@@ -704,15 +897,30 @@ impl SettingsMenu {
         ClickRegion::None
     }
 
-    /// Handle a click event
-    pub fn click(&mut self, renderer: &mut Renderer) {
+    /// Handle a click event. Returns true if quit was requested.
+    pub fn click(&mut self, renderer: &mut Renderer) -> bool {
         let region = self.hit_test(self.mouse_x, self.mouse_y);
 
         match region {
+            ClickRegion::Button(idx) => {
+                let buttons = MainMenuButton::all();
+                if idx < buttons.len() {
+                    match buttons[idx] {
+                        MainMenuButton::Settings => {
+                            self.menu_mode = MenuMode::Settings;
+                            self.recalculate_layout();
+                        }
+                        MainMenuButton::SaveAndQuit => {
+                            return true; // Signal quit
+                        }
+                    }
+                }
+            }
             ClickRegion::Tab(idx) => {
                 let tabs = MenuTab::all();
                 if idx < tabs.len() {
                     self.active_tab = tabs[idx];
+                    self.scroll_offset = 0; // Reset scroll when changing tabs
                     self.control_state = ControlState::Idle;
                     self.recalculate_layout();
                 }
@@ -741,13 +949,50 @@ impl SettingsMenu {
             }
             ClickRegion::SliderBar(item_idx, normalized) => {
                 if let Some(item) = self.items.get(item_idx) {
-                    // Snap to 10% increments
-                    let snapped = (normalized * 10.0).round() / 10.0;
-                    (item.set_float)(renderer, snapped);
+                    // Continuous value - no snapping for accurate clicking
+                    (item.set_float)(renderer, normalized);
                 }
             }
-            ClickRegion::Outside | ClickRegion::DropdownOption(_) | ClickRegion::None => {}
+            ClickRegion::Outside | ClickRegion::None => {}
         }
+        false
+    }
+
+    /// Handle scroll wheel input. Returns true if scroll was consumed.
+    pub fn scroll(&mut self, delta: f32) -> bool {
+        if self.menu_mode != MenuMode::Settings {
+            return false;
+        }
+
+        let visible_count = self.visible_items().count();
+        if visible_count <= self.max_visible_items {
+            return false; // No scrolling needed
+        }
+
+        let max_scroll = visible_count - self.max_visible_items;
+
+        if delta > 0.0 && self.scroll_offset > 0 {
+            self.scroll_offset = self.scroll_offset.saturating_sub(1);
+            return true;
+        } else if delta < 0.0 && self.scroll_offset < max_scroll {
+            self.scroll_offset = (self.scroll_offset + 1).min(max_scroll);
+            return true;
+        }
+        false
+    }
+
+    /// Check if we can scroll up
+    pub fn can_scroll_up(&self) -> bool {
+        self.menu_mode == MenuMode::Settings && self.scroll_offset > 0
+    }
+
+    /// Check if we can scroll down
+    pub fn can_scroll_down(&self) -> bool {
+        if self.menu_mode != MenuMode::Settings {
+            return false;
+        }
+        let visible_count = self.visible_items().count();
+        visible_count > self.max_visible_items && self.scroll_offset < visible_count - self.max_visible_items
     }
 
     /// Get the maximum item width in characters (for rendering)
@@ -768,46 +1013,82 @@ impl SettingsMenu {
     }
 
     /// Generate display lines for the menu (for rendering)
-    pub fn generate_lines(&self, renderer: &Renderer) -> Vec<(String, bool)> {
-        // Returns (line, is_hovered)
-        // All lines padded to TOTAL_WIDTH for consistent centering
+    /// Returns (lines, is_main_menu) - main menu has different rendering
+    pub fn generate_lines(&self, renderer: &Renderer) -> MenuRenderData {
+        match self.menu_mode {
+            MenuMode::Main => self.generate_main_menu_lines(),
+            MenuMode::Settings => self.generate_settings_lines(renderer),
+        }
+    }
+
+    /// Generate lines for main menu
+    fn generate_main_menu_lines(&self) -> MenuRenderData {
         let mut lines = Vec::new();
 
-        // Title (centered, padded to full width)
-        lines.push((Self::center_pad(Self::TITLE, Self::TOTAL_WIDTH), false));
-        lines.push((Self::center_pad("", Self::TOTAL_WIDTH), false)); // Spacing
+        // Title
+        lines.push((Self::center_pad("MOSAIC", 20), false));
+        lines.push((Self::center_pad("", 20), false));
 
-        // Tab bar - fixed 10-char width per tab, NOT constrained to TOTAL_WIDTH
-        // Tab line is 43 chars (4 tabs × 10 chars + 3 gaps), rendered centered independently
-        // Active: [GRAPHICS] (10 chars, bracketed)
-        // Normal:  GRAPHICS  (10 chars, spaces)
+        // Buttons
+        let buttons = MainMenuButton::all();
+        for (i, button) in buttons.iter().enumerate() {
+            let is_hovered = self.hovered_button == Some(i);
+            let label = button.label();
+            // Wider buttons with brackets when hovered
+            let text = if is_hovered {
+                format!("[ {:^14} ]", label)
+            } else {
+                format!("  {:^14}  ", label)
+            };
+            lines.push((text, is_hovered));
+        }
+
+        MenuRenderData {
+            lines,
+            is_main_menu: true,
+            tabs_line: None,
+            scroll_up: false,
+            scroll_down: false,
+        }
+    }
+
+    /// Generate lines for settings menu
+    fn generate_settings_lines(&self, renderer: &Renderer) -> MenuRenderData {
+        let mut lines = Vec::new();
+
+        // Tab bar - fixed 10-char width per tab
         let mut tab_line = String::new();
         for (i, tab) in MenuTab::all().iter().enumerate() {
-            if i > 0 { tab_line.push(' '); } // 1 space gap between tabs
+            if i > 0 { tab_line.push(' '); }
             let name = tab.as_str();
             let is_active = *tab == self.active_tab;
             let is_hovered = self.hovered_tab == Some(i);
 
             if is_active {
-                // Bracketed and centered: "[GRAPHICS]" = 10 chars
                 tab_line.push_str(&format!("[{:^8}]", name));
             } else if is_hovered {
-                // Bracketed but lighter: "[GRAPHICS]" = 10 chars
                 tab_line.push_str(&format!("[{:^8}]", name));
             } else {
-                // Spaces for inactive: " GRAPHICS " = 10 chars
                 tab_line.push_str(&format!(" {:^8} ", name));
             }
         }
-        // Don't pad to TOTAL_WIDTH - let debug_overlay center this 43-char line independently
-        lines.push((tab_line, false));
 
-        // Separator line under tabs
-        lines.push((Self::center_pad("", Self::TOTAL_WIDTH), false));
+        // Scroll indicator (up arrow)
+        if self.can_scroll_up() {
+            lines.push((Self::center_pad("^", Self::TOTAL_WIDTH), false));
+        }
 
-        // Menu items for active tab - two column layout
+        // Menu items for active tab - only visible after scroll
         let visible: Vec<_> = self.visible_items().collect();
-        for (vis_idx, (global_idx, item)) in visible.iter().enumerate() {
+        let visible_count = visible.len();
+
+        for vis_idx in 0..self.max_visible_items.min(visible_count.saturating_sub(self.scroll_offset)) {
+            let actual_idx = vis_idx + self.scroll_offset;
+            if actual_idx >= visible_count {
+                break;
+            }
+
+            let (global_idx, item) = &visible[actual_idx];
             let value = (item.get_value)(renderer);
             let is_hovered = self.hovered_index == Some(*global_idx);
 
@@ -816,13 +1097,12 @@ impl SettingsMenu {
             let label_col = format!("{}{}", prefix, item.label);
             let label_padded = format!("{:width$}", label_col, width = Self::LABEL_WIDTH);
 
-            // Right column: control (left-aligned so hit detection matches)
+            // Right column: control
             let control_str = match &item.control_type {
                 ControlType::Toggle => {
-                    format!("[{:^5}]", value) // "[ ON  ]" or "[ OFF ]"
+                    format!("[{:^5}]", value)
                 }
                 ControlType::EnumCycle => {
-                    // Value pushed more to the right: [<   VALUE   >]
                     format!("[<{:>10} >]", value)
                 }
                 ControlType::PercentSlider => {
@@ -834,19 +1114,28 @@ impl SettingsMenu {
                 }
             };
 
-            // Combine columns with gap
             let gap = " ".repeat(Self::COLUMN_GAP);
             let line = format!("{}{}{}", label_padded, gap, control_str);
-            // Pad to total width
             let line_padded = format!("{:width$}", line, width = Self::TOTAL_WIDTH);
             lines.push((line_padded, is_hovered));
         }
 
+        // Scroll indicator (down arrow)
+        if self.can_scroll_down() {
+            lines.push((Self::center_pad("v", Self::TOTAL_WIDTH), false));
+        }
+
         // Footer
         lines.push((Self::center_pad("", Self::TOTAL_WIDTH), false));
-        lines.push((Self::center_pad(Self::FOOTER, Self::TOTAL_WIDTH), false));
+        lines.push((Self::center_pad("ESC TO GO BACK", Self::TOTAL_WIDTH), false));
 
-        lines
+        MenuRenderData {
+            lines,
+            is_main_menu: false,
+            tabs_line: Some(tab_line),
+            scroll_up: self.can_scroll_up(),
+            scroll_down: self.can_scroll_down(),
+        }
     }
 
     /// Get menu center position in screen coordinates
@@ -856,8 +1145,23 @@ impl SettingsMenu {
 
     /// Called when menu opens to ensure layout is calculated
     pub fn on_open(&mut self) {
+        self.menu_mode = MenuMode::Main; // Always start at main menu
+        self.scroll_offset = 0;
         self.recalculate_layout();
         self.control_state = ControlState::Idle;
+    }
+
+    /// Go back from settings to main menu
+    pub fn go_back(&mut self) {
+        if self.menu_mode == MenuMode::Settings {
+            self.menu_mode = MenuMode::Main;
+            self.recalculate_layout();
+        }
+    }
+
+    /// Check if we're in main menu mode
+    pub fn is_main_menu(&self) -> bool {
+        self.menu_mode == MenuMode::Main
     }
 }
 
