@@ -31,14 +31,14 @@ pub enum GrassQuality {
 }
 
 impl GrassQuality {
-    /// Blades per tile (4x4 block area)
+    /// Blades per tile (4x4 block area) - bunched together
     pub fn blades_per_tile(&self) -> u32 {
         match self {
             GrassQuality::Off => 0,
-            GrassQuality::Low => 2,
-            GrassQuality::Medium => 4,
-            GrassQuality::High => 6,
-            GrassQuality::Ultra => 10,
+            GrassQuality::Low => 6,
+            GrassQuality::Medium => 12,
+            GrassQuality::High => 18,
+            GrassQuality::Ultra => 24,
         }
     }
 
@@ -57,10 +57,10 @@ impl GrassQuality {
     pub fn full_detail_distance(&self) -> f32 {
         match self {
             GrassQuality::Off => 0.0,
-            GrassQuality::Low => 2.0,
-            GrassQuality::Medium => 3.0,
-            GrassQuality::High => 4.0,
-            GrassQuality::Ultra => 5.0,
+            GrassQuality::Low => 4.0,
+            GrassQuality::Medium => 6.0,
+            GrassQuality::High => 8.0,
+            GrassQuality::Ultra => 12.0,
         }
     }
 
@@ -68,10 +68,10 @@ impl GrassQuality {
     pub fn low_lod_distance(&self) -> f32 {
         match self {
             GrassQuality::Off => 0.0,
-            GrassQuality::Low => 3.0,
-            GrassQuality::Medium => 4.0,
-            GrassQuality::High => 5.0,
-            GrassQuality::Ultra => 6.0,
+            GrassQuality::Low => 6.0,
+            GrassQuality::Medium => 10.0,
+            GrassQuality::High => 14.0,
+            GrassQuality::Ultra => 20.0,
         }
     }
 
@@ -79,10 +79,10 @@ impl GrassQuality {
     pub fn cull_distance(&self) -> f32 {
         match self {
             GrassQuality::Off => 0.0,
-            GrassQuality::Low => 4.0,
-            GrassQuality::Medium => 5.0,
-            GrassQuality::High => 6.0,
-            GrassQuality::Ultra => 8.0,
+            GrassQuality::Low => 8.0,
+            GrassQuality::Medium => 12.0,
+            GrassQuality::High => 16.0,
+            GrassQuality::Ultra => 24.0,
         }
     }
 
@@ -279,47 +279,48 @@ pub struct BiomePalette {
 
 impl Default for BiomePalette {
     fn default() -> Self {
+        // Base color: #212900 = RGB(33, 41, 0) = (0.129, 0.161, 0.0)
         Self {
             colors: [
-                // Grasslands - natural green (dark, blends with terrain)
+                // Grasslands - dark olive matching terrain side walls
                 BiomeGrassColor::new(
-                    [0.10, 0.22, 0.06], // Very dark forest green base
-                    [0.16, 0.32, 0.10], // Dark green tip
+                    [0.129, 0.161, 0.0],   // #212900 base
+                    [0.18, 0.22, 0.02],    // Slightly lighter tip
                 ),
-                // Cavernous Highlands - sage green
+                // Cavernous Highlands - similar dark olive
                 BiomeGrassColor::new(
-                    [0.12, 0.24, 0.10], // Dark sage base
-                    [0.18, 0.32, 0.12], // Sage tip
+                    [0.14, 0.17, 0.02],    // Slight variation
+                    [0.19, 0.23, 0.04],
                 ),
-                // Jungle - deep green
+                // Jungle - darker green
                 BiomeGrassColor::new(
-                    [0.06, 0.18, 0.04], // Very dark green base
-                    [0.12, 0.28, 0.08], // Deep green tip
+                    [0.10, 0.14, 0.0],
+                    [0.15, 0.20, 0.02],
                 ),
                 // Tundra - tan/brown dead grass
                 BiomeGrassColor::new(
-                    [0.30, 0.26, 0.16], // Brown base
-                    [0.38, 0.34, 0.20], // Tan tip
+                    [0.25, 0.22, 0.10],
+                    [0.32, 0.28, 0.14],
                 ),
-                // Swamp - murky green
+                // Swamp - murky dark
                 BiomeGrassColor::new(
-                    [0.10, 0.18, 0.08], // Murky dark base
-                    [0.15, 0.26, 0.12], // Murky olive tip
+                    [0.11, 0.14, 0.02],
+                    [0.16, 0.20, 0.04],
                 ),
                 // Desert - sandy sparse grass
                 BiomeGrassColor::new(
-                    [0.42, 0.36, 0.20], // Sandy base
-                    [0.48, 0.42, 0.24], // Light sand tip
+                    [0.35, 0.30, 0.15],
+                    [0.42, 0.36, 0.18],
                 ),
                 // Mountains - gray-green alpine
                 BiomeGrassColor::new(
-                    [0.18, 0.24, 0.16], // Gray-green base
-                    [0.26, 0.32, 0.22], // Silver sage tip
+                    [0.15, 0.18, 0.08],
+                    [0.22, 0.26, 0.12],
                 ),
-                // Ocean (unused, but needs entry)
+                // Ocean (unused)
                 BiomeGrassColor::new(
-                    [0.10, 0.22, 0.06],
-                    [0.16, 0.32, 0.10],
+                    [0.129, 0.161, 0.0],
+                    [0.18, 0.22, 0.02],
                 ),
             ],
         }

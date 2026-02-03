@@ -144,10 +144,12 @@ fn vs_grass(
 
     // Per-blade deterministic values using hash
     let blade_seed = hash(tile_seed * 7919u + blade_idx * 12345u);
-    let offset_x = hash_float_signed(blade_seed) * 1.8;           // -1.8 to 1.8 within tile
-    let offset_z = hash_float_signed(blade_seed + 1u) * 1.8;
+
+    // Bunched grass: tighter clustering within tile (±0.6 instead of ±1.8)
+    let offset_x = hash_float_signed(blade_seed) * 0.6;
+    let offset_z = hash_float_signed(blade_seed + 1u) * 0.6;
     let rotation = hash_float(blade_seed + 2u) * 6.28318;         // 0 to 2PI
-    let height_mult = 0.7 + hash_float(blade_seed + 3u) * 0.6;    // 0.7 to 1.3
+    let height_mult = 0.8 + hash_float(blade_seed + 3u) * 0.4;    // 0.8 to 1.2
     let curve_dir = hash_float_signed(blade_seed + 4u);           // Curve direction
 
     // Blade base position (tile center + offset)
@@ -169,16 +171,15 @@ fn vs_grass(
         return out;
     }
 
-    // Distance-based LOD: reduce height and increase width at distance
+    // Distance-based LOD: increase width at distance for anti-aliasing
     let lod_factor = saturate(dist_to_camera / uniforms.lod_distances.z);
-    let height_scale = mix(1.0, 0.6, lod_factor);   // Shorter at distance
-    let width_scale = mix(1.0, 2.0, lod_factor);    // Wider at distance (anti-aliasing)
+    let width_scale = mix(1.0, 1.5, lod_factor);    // Wider at distance
 
-    // Blade parameters with LOD adjustments
-    let base_height = 0.35 + height_var * 0.35;  // 0.35 to 0.7 blocks
-    let blade_height = base_height * height_mult * height_scale;
-    let blade_width = 0.05 * width_scale;
-    let curve_amount = (0.1 + hash_float(blade_seed + 5u) * 0.15) * height_scale;
+    // Blade parameters: SHORT and THICK grass, minimal curve (not noodly)
+    let base_height = 0.15 + height_var * 0.15;   // 0.15 to 0.30 blocks (much shorter)
+    let blade_height = base_height * height_mult;
+    let blade_width = 0.06 * width_scale;          // Thicker blades
+    let curve_amount = 0.02 + hash_float(blade_seed + 5u) * 0.04; // Very slight curve (0.02-0.06)
 
     // Vertex position along blade
     let segment = vertex_id / 2u;
