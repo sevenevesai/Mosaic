@@ -99,6 +99,20 @@ Sliders use **continuous values** (0.0-1.0) - no snapping:
 | `generate_lines()` | Returns `MenuRenderData` for rendering |
 | `can_scroll_up/down()` | Check if scroll arrows should show |
 
+## Menu Blur Effect
+
+When menu opens, scene is blurred and darkened:
+- **9-tap Gaussian blur** with radius 2 pixels
+- **50% darkening** applied after blur
+- Uses intermediate `menu_blur_texture` (can't read/write same texture)
+- Blur pass runs before UI pass, copies result back to scene_texture
+
+## Crosshair
+
+- Hidden when menu is open (`menu_data.is_none()` check)
+- Hidden when inventory is open
+- Size: 0.015 clip space, thickness: 0.0015 (fine/thin style)
+
 ## Gotchas
 
 - **MenuRenderData type**: Renderer receives struct, not just lines
@@ -106,3 +120,4 @@ Sliders use **continuous values** (0.0-1.0) - no snapping:
 - **Hit detection must match render**: Both use same coordinate calculations
 - **Scroll resets on tab change**: `scroll_offset = 0` when switching tabs
 - **Quit returns bool**: `click()` returns true when Save & Quit pressed
+- **Blur needs COPY_DST**: scene_texture must have COPY_DST usage flag

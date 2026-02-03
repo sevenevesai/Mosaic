@@ -27,7 +27,7 @@ cargo build --release
 src/
 ├── app.rs           # Main loop, input handling
 ├── lib.rs           # Constants: RENDER_DISTANCE, LOD thresholds, physics
-├── settings_menu.rs # Tabbed settings UI with hit detection (~760 LOC)
+├── settings_menu.rs # Main menu + tabbed settings UI (~950 LOC)
 ├── audio/
 │   └── mod.rs       # 3D spatial audio, material sounds, ambient system (~900 LOC)
 ├── inventory/
