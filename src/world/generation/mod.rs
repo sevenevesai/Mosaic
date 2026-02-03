@@ -13,6 +13,7 @@ pub mod formations;
 pub mod ruins;
 pub mod trees;
 pub mod util;
+pub mod vegetation;
 
 use noise::{Fbm, MultiFractal, NoiseFn, Perlin, RidgedMulti};
 
@@ -29,6 +30,7 @@ use formations::{FormationGenerator, FormationNoise};
 use ruins::RuinGenerator;
 use trees::{TreeGenerator, TreeNoise};
 use util::fast_hash_3d;
+use vegetation::{VegetationGenerator, VegetationNoise};
 
 use std::cell::RefCell;
 
@@ -136,6 +138,9 @@ fn generate_chunk_with_generator(pos: ChunkPos, generator: &TerrainGenerator) ->
     // Add trees
     generator.add_trees(&mut chunk, pos);
 
+    // Add vegetation (grass, flowers, rocks)
+    generator.add_vegetation(&mut chunk, pos);
+
     // Generate water heightfield data
     generator.generate_water_heightfield(&mut chunk, pos);
 
@@ -219,6 +224,9 @@ pub struct TerrainGenerator {
 
     // Biome registry
     biome_registry: BiomeRegistry,
+
+    // Vegetation (grass, flowers, rocks)
+    vegetation_noise: VegetationNoise,
 }
 
 impl TerrainGenerator {
@@ -263,6 +271,9 @@ impl TerrainGenerator {
 
             // Biome registry
             biome_registry: BiomeRegistry::new(seed),
+
+            // Vegetation
+            vegetation_noise: VegetationNoise::new(seed),
         }
     }
 
@@ -643,6 +654,18 @@ impl TerrainGenerator {
             |x, z| self.get_cliff_factor(x, z),
             |x, y, z| self.is_ground_stable_for_tree(x, y, z),
             |x, z| self.biome_registry.get_biome(x, z).surface_params().tree_density,
+            |x, z| self.biome_registry.get_biome_id(x, z),
+        );
+    }
+
+    /// Add vegetation (grass, flowers, rocks) to a chunk
+    fn add_vegetation(&self, chunk: &mut Chunk, pos: ChunkPos) {
+        let veg_generator = VegetationGenerator::new(&self.vegetation_noise);
+
+        veg_generator.add_vegetation(
+            chunk,
+            pos,
+            |x, z| self.get_terrain_height(x, z),
             |x, z| self.biome_registry.get_biome_id(x, z),
         );
     }

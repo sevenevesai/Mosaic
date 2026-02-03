@@ -260,6 +260,105 @@ impl Default for ChunkWaterData {
     }
 }
 
+// ============ PROP DATA ============
+
+/// A single prop placement within a chunk
+#[derive(Debug, Clone, Copy)]
+pub struct PropPlacement {
+    /// Prop type identifier (matches PropId from renderer::prop_registry)
+    pub prop_id: u8,
+    /// Local X position within chunk (0.0 - 16.0, sub-block precision)
+    pub local_x: f32,
+    /// Local Y position within chunk (0.0 - 16.0)
+    pub local_y: f32,
+    /// Local Z position within chunk (0.0 - 16.0)
+    pub local_z: f32,
+    /// Rotation around Y axis (radians, 0 - 2π)
+    pub rotation: f32,
+    /// Scale multiplier (typically 0.8 - 1.2)
+    pub scale: f32,
+}
+
+impl PropPlacement {
+    pub fn new(prop_id: u8, x: f32, y: f32, z: f32, rotation: f32, scale: f32) -> Self {
+        Self {
+            prop_id,
+            local_x: x,
+            local_y: y,
+            local_z: z,
+            rotation,
+            scale,
+        }
+    }
+
+    /// Convert to world position given chunk world origin
+    #[inline]
+    pub fn world_position(&self, chunk_origin: Vec3) -> Vec3 {
+        Vec3::new(
+            chunk_origin.x + self.local_x,
+            chunk_origin.y + self.local_y,
+            chunk_origin.z + self.local_z,
+        )
+    }
+}
+
+/// Storage for prop placements within a chunk
+/// Typically contains 0-50 props for surface chunks, 0 for underground
+pub struct ChunkPropData {
+    /// All prop placements in this chunk
+    placements: Vec<PropPlacement>,
+}
+
+impl ChunkPropData {
+    pub fn new() -> Self {
+        Self {
+            placements: Vec::new(),
+        }
+    }
+
+    /// Create with pre-allocated capacity
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            placements: Vec::with_capacity(capacity),
+        }
+    }
+
+    /// Add a prop placement
+    #[inline]
+    pub fn add(&mut self, placement: PropPlacement) {
+        self.placements.push(placement);
+    }
+
+    /// Get number of props in this chunk
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.placements.len()
+    }
+
+    /// Check if empty
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.placements.is_empty()
+    }
+
+    /// Iterate over all placements
+    #[inline]
+    pub fn iter(&self) -> impl Iterator<Item = &PropPlacement> {
+        self.placements.iter()
+    }
+
+    /// Clear all placements
+    pub fn clear(&mut self) {
+        self.placements.clear();
+    }
+}
+
+impl Default for ChunkPropData {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Position of a chunk in chunk coordinates
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ChunkPos {
@@ -723,6 +822,8 @@ pub struct Chunk {
     light: Box<[u8; CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE]>,
     /// Optional water heightfield data - only allocated if chunk contains water
     water: Option<Box<ChunkWaterData>>,
+    /// Optional prop placement data - only allocated if chunk has surface vegetation
+    props: Option<Box<ChunkPropData>>,
     /// Count of solid blocks for fast empty/full detection
     /// Used to skip meshing for air-only chunks (solid_count == 0)
     solid_count: u16,
@@ -734,6 +835,7 @@ impl Chunk {
             blocks: Box::new([Block::Air; CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE]),
             light: Box::new([0u8; CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE]),
             water: None,
+            props: None,
             solid_count: 0,
         }
     }
@@ -981,6 +1083,69 @@ impl Chunk {
     /// Sample water height with interpolation
     pub fn sample_water_height(&self, local_x: f32, local_z: f32) -> Option<f32> {
         self.water.as_ref().and_then(|w| w.sample_height(local_x, local_z))
+    }
+
+    // ============ PROP ACCESS METHODS ============
+
+    /// Check if this chunk has prop data allocated
+    #[inline]
+    pub fn has_prop_data(&self) -> bool {
+        self.props.is_some()
+    }
+
+    /// Check if this chunk has any props
+    #[inline]
+    pub fn has_props(&self) -> bool {
+        self.props.as_ref().map_or(false, |p| !p.is_empty())
+    }
+
+    /// Get number of props in this chunk
+    #[inline]
+    pub fn prop_count(&self) -> usize {
+        self.props.as_ref().map_or(0, |p| p.len())
+    }
+
+    /// Get reference to prop data if present
+    #[inline]
+    pub fn prop_data(&self) -> Option<&ChunkPropData> {
+        self.props.as_deref()
+    }
+
+    /// Get mutable reference to prop data if present
+    #[inline]
+    pub fn prop_data_mut(&mut self) -> Option<&mut ChunkPropData> {
+        self.props.as_deref_mut()
+    }
+
+    /// Ensure prop data is allocated and return mutable reference
+    pub fn ensure_prop_data(&mut self) -> &mut ChunkPropData {
+        if self.props.is_none() {
+            self.props = Some(Box::new(ChunkPropData::new()));
+        }
+        self.props.as_deref_mut().unwrap()
+    }
+
+    /// Ensure prop data with capacity hint
+    pub fn ensure_prop_data_with_capacity(&mut self, capacity: usize) -> &mut ChunkPropData {
+        if self.props.is_none() {
+            self.props = Some(Box::new(ChunkPropData::with_capacity(capacity)));
+        }
+        self.props.as_deref_mut().unwrap()
+    }
+
+    /// Add a prop placement (allocates prop data if needed)
+    pub fn add_prop(&mut self, placement: PropPlacement) {
+        self.ensure_prop_data().add(placement);
+    }
+
+    /// Clear all prop data from this chunk
+    pub fn clear_props(&mut self) {
+        self.props = None;
+    }
+
+    /// Iterate over all prop placements (empty iterator if no props)
+    pub fn iter_props(&self) -> impl Iterator<Item = &PropPlacement> {
+        self.props.iter().flat_map(|p| p.iter())
     }
 }
 

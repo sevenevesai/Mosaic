@@ -50,6 +50,10 @@ pub struct Settings {
     /// Whether cloud shadows are enabled
     pub cloud_shadows: bool,
 
+    // === SCENERY SETTINGS ===
+    /// Scenery quality preset: OFF, LOW, MEDIUM, HIGH, ULTRA
+    pub scenery_quality: String,
+
     // === AUDIO SETTINGS ===
     /// Master volume (0.0 - 1.0)
     pub audio_master: f32,
@@ -87,6 +91,8 @@ impl Default for Settings {
             cloud_coverage: 0.5,                   // 50% coverage
             cloud_speed: 0.3,                      // 30% animation speed
             cloud_shadows: true,                   // Cloud shadows on by default
+            // Scenery defaults
+            scenery_quality: "MEDIUM".to_string(),  // Default scenery quality
             // Audio defaults
             audio_master: 0.8,   // 80% master volume
             audio_sfx: 1.0,      // 100% SFX
@@ -228,6 +234,10 @@ impl Settings {
                     }
                     "cloud_shadows" => {
                         settings.cloud_shadows = value == "true";
+                    }
+                    // Scenery settings
+                    "scenery_quality" => {
+                        settings.scenery_quality = value.to_string();
                     }
                     // Audio settings
                     "audio_master" => {

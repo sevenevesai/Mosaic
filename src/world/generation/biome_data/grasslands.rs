@@ -2,7 +2,7 @@
 
 use crate::world::chunk::Block;
 use crate::world::generation::biome::{
-    Biome, BiomeId, CaveParams, SurfaceParams, TerrainParams,
+    Biome, BiomeId, CaveParams, SurfaceParams, TerrainParams, VegetationParams,
 };
 use crate::world::generation::caves::CaveNoise;
 
@@ -46,6 +46,10 @@ impl Biome for GrasslandsBiome {
             surface_block: Block::Grass,
             subsurface_block: Block::Dirt,
         }
+    }
+
+    fn vegetation_params(&self) -> VegetationParams {
+        VegetationParams::grassland()
     }
 
     fn is_cave(

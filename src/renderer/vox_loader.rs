@@ -178,14 +178,21 @@ pub struct VoxMesh {
 
 impl VoxMesh {
     /// Create a mesh from a voxel model
+    /// Note: MagicaVoxel uses Z-up, our game uses Y-up, so we swap Y<->Z
+    /// Mesh is centered horizontally (X, Z) with base at Y=0
     pub fn from_model(device: &wgpu::Device, model: &VoxModel, scale: f32) -> Self {
         let (vertices, indices) = Self::generate_mesh(model, scale);
 
-        // Calculate center offset
+        // Calculate actual height from voxel bounds (not model.size which may have empty space)
+        let min_z = model.voxels.iter().map(|v| v.z).min().unwrap_or(0);
+        let max_z = model.voxels.iter().map(|v| v.z).max().unwrap_or(0);
+        let actual_height = (max_z - min_z + 1) as f32 * scale;
+
+        // Center is at (0, half_height, 0) since mesh is centered horizontally with base at Y=0
         let center = Vec3::new(
-            model.size_x as f32 * scale * 0.5,
-            model.size_y as f32 * scale * 0.5,
-            model.size_z as f32 * scale * 0.5,
+            0.0,                    // Horizontally centered
+            actual_height * 0.5,   // Half of actual height (for bounds)
+            0.0,                    // Horizontally centered
         );
 
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -209,21 +216,49 @@ impl VoxMesh {
     }
 
     /// Generate mesh vertices and indices from voxel model
+    /// Applies coordinate transform: MagicaVoxel Z-up -> Game Y-up
+    /// Vox (X, Y, Z) -> Game (X, Z, Y) i.e. swap Y and Z
+    /// Also centers the mesh horizontally (X, Z) and places base at Y=0
+    /// Auto-detects the lowest voxel to ensure models sit on the ground
     fn generate_mesh(model: &VoxModel, scale: f32) -> (Vec<VoxVertex>, Vec<u32>) {
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
 
-        // Build a lookup set for fast neighbor checking
+        if model.voxels.is_empty() {
+            return (vertices, indices);
+        }
+
+        // Build a lookup set for fast neighbor checking (in vox coords)
         let mut voxel_set: HashMap<(u8, u8, u8), u8> = HashMap::new();
         for voxel in &model.voxels {
             voxel_set.insert((voxel.x, voxel.y, voxel.z), voxel.color_index);
         }
 
+        // Find min/max bounds for proper centering and base detection
+        let min_x = model.voxels.iter().map(|v| v.x).min().unwrap_or(0);
+        let max_x = model.voxels.iter().map(|v| v.x).max().unwrap_or(0);
+        let min_y = model.voxels.iter().map(|v| v.y).min().unwrap_or(0);
+        let max_y = model.voxels.iter().map(|v| v.y).max().unwrap_or(0);
+        let min_z = model.voxels.iter().map(|v| v.z).min().unwrap_or(0);  // Lowest voxel (game Y base)
+        let max_z = model.voxels.iter().map(|v| v.z).max().unwrap_or(0);
+
+        // Calculate center offsets using actual voxel bounds (not model.size)
+        // Vox X -> Game X, Vox Y -> Game Z, Vox Z -> Game Y
+        let center_x = (min_x as f32 + max_x as f32 + 1.0) * scale * 0.5;
+        let center_z = (min_y as f32 + max_y as f32 + 1.0) * scale * 0.5;  // Vox Y becomes game Z
+        let base_y = min_z as f32 * scale;  // Offset to put lowest voxel at Y=0
+
         // For each voxel, add faces where there's no neighbor
         for voxel in &model.voxels {
-            let x = voxel.x;
-            let y = voxel.y;
-            let z = voxel.z;
+            let vox_x = voxel.x;
+            let vox_y = voxel.y;
+            let vox_z = voxel.z;
+
+            // Transform to game coords, center horizontally, and put base at Y=0
+            let game_x = vox_x as f32 * scale - center_x;       // Centered
+            let game_y = vox_z as f32 * scale - base_y;         // Vox Z -> game Y, offset so min is at 0
+            let game_z = vox_y as f32 * scale - center_z;       // Vox Y -> game Z, centered
+
             let color = model.get_color(voxel.color_index);
             let color_f = [
                 color[0] as f32 / 255.0,
@@ -232,14 +267,26 @@ impl VoxMesh {
                 color[3] as f32 / 255.0,
             ];
 
-            // Check each face
+            // Check each face in vox coords, but emit faces with transformed normals
+            // Vox +Z (up) -> Game +Y (up)
+            // Vox -Z (down) -> Game -Y (down)
+            // Vox +Y (forward) -> Game +Z (forward)
+            // Vox -Y (back) -> Game -Z (back)
+            // Vox +X (right) -> Game +X (right)
+            // Vox -X (left) -> Game -X (left)
             let faces = [
-                ([0, 1, 0], y.checked_add(1).map(|ny| voxel_set.contains_key(&(x, ny, z))).unwrap_or(false)), // +Y
-                ([0, -1, 0], y.checked_sub(1).map(|ny| voxel_set.contains_key(&(x, ny, z))).unwrap_or(false)), // -Y
-                ([1, 0, 0], x.checked_add(1).map(|nx| voxel_set.contains_key(&(nx, y, z))).unwrap_or(false)), // +X
-                ([-1, 0, 0], x.checked_sub(1).map(|nx| voxel_set.contains_key(&(nx, y, z))).unwrap_or(false)), // -X
-                ([0, 0, 1], z.checked_add(1).map(|nz| voxel_set.contains_key(&(x, y, nz))).unwrap_or(false)), // +Z
-                ([0, 0, -1], z.checked_sub(1).map(|nz| voxel_set.contains_key(&(x, y, nz))).unwrap_or(false)), // -Z
+                // Vox +Z (up) -> Game +Y, check vox z+1
+                ([0, 1, 0], vox_z.checked_add(1).map(|nz| voxel_set.contains_key(&(vox_x, vox_y, nz))).unwrap_or(false)),
+                // Vox -Z (down) -> Game -Y, check vox z-1
+                ([0, -1, 0], vox_z.checked_sub(1).map(|nz| voxel_set.contains_key(&(vox_x, vox_y, nz))).unwrap_or(false)),
+                // Vox +X (right) -> Game +X
+                ([1, 0, 0], vox_x.checked_add(1).map(|nx| voxel_set.contains_key(&(nx, vox_y, vox_z))).unwrap_or(false)),
+                // Vox -X (left) -> Game -X
+                ([-1, 0, 0], vox_x.checked_sub(1).map(|nx| voxel_set.contains_key(&(nx, vox_y, vox_z))).unwrap_or(false)),
+                // Vox +Y (forward) -> Game +Z, check vox y+1
+                ([0, 0, 1], vox_y.checked_add(1).map(|ny| voxel_set.contains_key(&(vox_x, ny, vox_z))).unwrap_or(false)),
+                // Vox -Y (back) -> Game -Z, check vox y-1
+                ([0, 0, -1], vox_y.checked_sub(1).map(|ny| voxel_set.contains_key(&(vox_x, ny, vox_z))).unwrap_or(false)),
             ];
 
             for (normal, has_neighbor) in faces {
@@ -247,9 +294,9 @@ impl VoxMesh {
                     Self::add_face(
                         &mut vertices,
                         &mut indices,
-                        x as f32 * scale,
-                        y as f32 * scale,
-                        z as f32 * scale,
+                        game_x,
+                        game_y,
+                        game_z,
                         scale,
                         normal,
                         color_f,

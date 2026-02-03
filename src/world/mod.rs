@@ -14,7 +14,7 @@ mod water_meshing;
 pub mod water_flow;
 
 pub use chest::{ChestManager, ChestData, Container, SavedChest, SavedChestItem, CHEST_SLOTS};
-pub use chunk::{Block, Chunk, ChunkPos, ChunkWaterData, WaterColumn};
+pub use chunk::{Block, Chunk, ChunkPos, ChunkWaterData, WaterColumn, PropPlacement, ChunkPropData};
 pub use generation::{generate_chunk, generate_chunk_with_seed};
 pub use item_entity::{ItemEntity, ItemEntityManager, SavedItemEntity};
 pub use item_persistence::{save_items, load_items};

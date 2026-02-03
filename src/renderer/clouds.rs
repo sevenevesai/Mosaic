@@ -815,36 +815,48 @@ impl Clouds {
         // Grid world size
         let voxel_scale = self.quality.voxel_scale() as f32;
         let grid_world_size = self.grid.size_x as f32 * voxel_scale;
+        let half_grid = grid_world_size / 2.0;
 
-        // The grid is large (640 blocks at scale 4), so we only regenerate when
-        // the player has moved a significant distance from the grid center
-        // This prevents the "hard flip" - grid is always larger than visible area
-        let regen_distance = grid_world_size * 0.25; // Regenerate when 25% off-center
-
+        // === REGENERATION TRIGGERS ===
+        // 1. Player moved far from grid center
         let dx = camera_pos.x - self.grid_origin_x;
         let dz = camera_pos.z - self.grid_origin_z;
         let dist_from_center = (dx * dx + dz * dz).sqrt();
+        let player_moved_far = dist_from_center > grid_world_size * 0.2;
 
-        let player_moved_far = dist_from_center > regen_distance;
+        // 2. Wind has blown clouds far enough that we need new ones
+        // Regenerate when wind offset exceeds ~1/3 of grid (new clouds needed on upwind side)
+        let wind_regen_threshold = grid_world_size * 0.3;
+        let wind_moved_far = self.wind_offset_x.abs() > wind_regen_threshold
+            || self.wind_offset_z.abs() > wind_regen_threshold;
 
-        if self.needs_regenerate || player_moved_far {
-            // Center grid on player
-            self.grid_origin_x = camera_pos.x;
-            self.grid_origin_z = camera_pos.z;
-            self.regenerate_mesh(queue, camera_pos.x, camera_pos.z);
+        if self.needs_regenerate || player_moved_far || wind_moved_far {
+            // When regenerating due to wind, bake wind offset into grid origin
+            // This makes clouds "appear" continuously from upwind direction
+            let effective_x = camera_pos.x - self.wind_offset_x;
+            let effective_z = camera_pos.z - self.wind_offset_z;
+
+            self.grid_origin_x = effective_x;
+            self.grid_origin_z = effective_z;
+            self.regenerate_mesh(queue, effective_x, effective_z);
+
+            // Reset wind offset since it's now baked into position
+            self.wind_offset_x = 0.0;
+            self.wind_offset_z = 0.0;
             self.needs_regenerate = false;
         }
 
-        // Wind offset doesn't cause regeneration - it just moves the mesh
-        // The mesh is large enough that wind can blow for a long time
-        // before clouds exit the visible area
-
-        // Update uniforms
+        // Update uniforms - pass grid info for edge fading
         self.uniforms.view_proj = view_proj.to_cols_array_2d();
-        self.uniforms.camera_pos = [camera_pos.x, camera_pos.y, camera_pos.z, 0.0];
+        self.uniforms.camera_pos = [camera_pos.x, camera_pos.y, camera_pos.z, half_grid];
         self.uniforms.sun_direction = [sun_direction.x, sun_direction.y, sun_direction.z, sun_intensity];
         self.uniforms.sun_color = [sun_color.x, sun_color.y, sun_color.z, 1.0];
-        self.uniforms.ambient_color = [ambient.x, ambient.y, ambient.z, 1.0];
+        self.uniforms.ambient_color = [
+            self.grid_origin_x + self.wind_offset_x, // Pass grid center for edge fade
+            self.grid_origin_z + self.wind_offset_z,
+            ambient.z,
+            1.0
+        ];
         self.uniforms.wind_offset = [
             self.wind_offset_x,
             self.wind_offset_z,
@@ -1096,15 +1108,34 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Sun color influence during day
     color = mix(color, color * u.sun_color.rgb, sun_intensity * 0.15);
 
-    // === DISTANCE FADE ===
-    // Extended range for clouds visible far into distance
+    // === DISTANCE FADE (from camera) ===
     let dist = length(u.camera_pos.xyz - in.world_position);
-    let fade_start = 450.0;  // Start fading at 450 blocks
-    let fade_end = 600.0;    // Fully faded at 600 blocks
+    let fade_start = 400.0;
+    let fade_end = 550.0;
     let distance_alpha = 1.0 - smoothstep(fade_start, fade_end, dist);
 
+    // === EDGE FADE (grid boundaries) ===
+    // Soft fade at all edges of the cloud grid so no hard cutoff
+    // Grid center is passed through ambient_color.xy, half_size through camera_pos.w
+    let grid_center_x = u.ambient_color.x;
+    let grid_center_z = u.ambient_color.y;
+    let half_grid = u.camera_pos.w;
+
+    // Distance from grid center in XZ
+    let edge_dx = abs(in.world_position.x - grid_center_x);
+    let edge_dz = abs(in.world_position.z - grid_center_z);
+    let max_edge_dist = max(edge_dx, edge_dz);
+
+    // Fade starts at 70% of half_grid, full fade at 95%
+    let edge_fade_start = half_grid * 0.70;
+    let edge_fade_end = half_grid * 0.95;
+    let edge_alpha = 1.0 - smoothstep(edge_fade_start, edge_fade_end, max_edge_dist);
+
+    // Combine fades
+    let combined_alpha = distance_alpha * edge_alpha;
+
     // Final alpha
-    let alpha = u.wind_offset.w * distance_alpha;
+    let alpha = u.wind_offset.w * combined_alpha;
 
     return vec4<f32>(color, alpha);
 }

@@ -102,6 +102,114 @@ impl Default for SurfaceParams {
     }
 }
 
+/// Parameters controlling vegetation (grass, flowers, rocks) placement
+#[derive(Debug, Clone)]
+pub struct VegetationParams {
+    /// Grass density multiplier (0.0 = none, 1.0 = normal, 2.0 = dense)
+    pub grass_density: f32,
+    /// Flower density multiplier
+    pub flower_density: f32,
+    /// Rock density multiplier
+    pub rock_density: f32,
+    /// Grass prop IDs to use (indices into PropId)
+    pub grass_props: &'static [u8],
+    /// Flower prop IDs to use
+    pub flower_props: &'static [u8],
+    /// Rock prop IDs to use
+    pub rock_props: &'static [u8],
+    /// Maximum props per chunk (performance limit)
+    pub max_props_per_chunk: usize,
+    /// Whether flowers cluster together
+    pub flowers_cluster: bool,
+    /// Base height offset for grass (sink into ground slightly)
+    pub grass_sink: f32,
+}
+
+impl Default for VegetationParams {
+    fn default() -> Self {
+        Self {
+            grass_density: 1.0,
+            flower_density: 0.3,
+            rock_density: 0.1,
+            // PropId values: Grass01=0, Grass02=1
+            grass_props: &[0, 1],
+            // PropId values: Flower01-03=10-12, SmallFlowers=16-19
+            flower_props: &[10, 11, 12, 16, 17, 18, 19],
+            // PropId values: Stone01-03=30-32
+            rock_props: &[30, 31, 32],
+            max_props_per_chunk: 40,
+            flowers_cluster: true,
+            grass_sink: 0.05,
+        }
+    }
+}
+
+impl VegetationParams {
+    /// No vegetation at all
+    pub fn none() -> Self {
+        Self {
+            grass_density: 0.0,
+            flower_density: 0.0,
+            rock_density: 0.0,
+            grass_props: &[],
+            flower_props: &[],
+            rock_props: &[],
+            max_props_per_chunk: 0,
+            flowers_cluster: false,
+            grass_sink: 0.0,
+        }
+    }
+
+    /// Sparse dead vegetation (for tundra, desert edges)
+    pub fn sparse_dead() -> Self {
+        Self {
+            grass_density: 0.15,
+            flower_density: 0.02,
+            rock_density: 0.2,
+            // DeadGrass=4, DeadFlower=13
+            grass_props: &[4],
+            flower_props: &[13],
+            rock_props: &[30, 31, 32],
+            max_props_per_chunk: 15,
+            flowers_cluster: false,
+            grass_sink: 0.03,
+        }
+    }
+
+    /// Lush forest undergrowth
+    pub fn forest() -> Self {
+        Self {
+            grass_density: 1.5,
+            flower_density: 0.2,
+            rock_density: 0.15,
+            // ForestGrass01-02=2-3
+            grass_props: &[2, 3],
+            // Fewer flowers in forest
+            flower_props: &[16, 17, 18, 19],
+            // ForestStone01-03=33-35
+            rock_props: &[33, 34, 35],
+            max_props_per_chunk: 50,
+            flowers_cluster: true,
+            grass_sink: 0.04,
+        }
+    }
+
+    /// Open grassland meadow
+    pub fn grassland() -> Self {
+        Self {
+            grass_density: 1.2,
+            flower_density: 0.4,
+            rock_density: 0.08,
+            grass_props: &[0, 1],
+            flower_props: &[10, 11, 12, 16, 17, 18, 19],
+            rock_props: &[30, 31, 32],
+            max_props_per_chunk: 45,
+            flowers_cluster: true,
+            grass_sink: 0.05,
+        }
+    }
+}
+
 /// Core biome trait - defines terrain generation behavior
 pub trait Biome: Send + Sync {
     /// Get the biome identifier
@@ -118,6 +226,12 @@ pub trait Biome: Send + Sync {
 
     /// Get surface decoration parameters
     fn surface_params(&self) -> SurfaceParams;
+
+    /// Get vegetation parameters (grass, flowers, rocks)
+    /// Default implementation returns standard grassland vegetation
+    fn vegetation_params(&self) -> VegetationParams {
+        VegetationParams::grassland()
+    }
 
     /// Check if a position is a cave in this biome
     /// Default implementation uses CaveNoise with biome-specific params

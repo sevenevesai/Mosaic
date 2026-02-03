@@ -12,7 +12,9 @@ mod inventory_ui;
 mod item_renderer;
 mod pipeline;
 mod prop_renderer;
+pub mod prop_registry;
 mod refraction;
+mod scenery_renderer;
 mod ssao;
 mod dof;
 mod texture;
@@ -29,6 +31,8 @@ pub use debug_overlay::{DebugOverlay, DebugMetrics};
 pub use impostor::{ImpostorRenderer, ImpostorInstance, ImpostorRange};
 pub use item_renderer::{ItemRenderer, ItemInstanceData};
 pub use prop_renderer::{PropRenderer, PropInstance};
+pub use prop_registry::{PropRegistry, PropDefinition, PropId, CollisionType};
+pub use scenery_renderer::{SceneryRenderer, SceneryQuality, SceneryInstance};
 pub use refraction::{RefractionQuality, RefractionParams};
 pub use ssao::{Ssao, SsaoQuality, SsaoParams};
 pub use dof::{Dof, DofQuality, DofParams, FocusMode, NearBlur, BokehShape};
@@ -235,6 +239,10 @@ pub struct Renderer {
 
     // Prop rendering (voxel models like chests)
     prop_renderer: PropRenderer,
+
+    // Scenery rendering (grass, flowers, rocks - thousands of instances)
+    prop_registry: Arc<PropRegistry>,
+    scenery_renderer: scenery_renderer::SceneryRenderer,
 
     // Impostor rendering for distant chunks
     impostor_renderer: ImpostorRenderer,
@@ -683,6 +691,15 @@ impl Renderer {
             tracing::warn!("Failed to load chest prop: {}", e);
         }
 
+        // Create prop registry and scenery renderer for vegetation (grass, flowers, rocks)
+        let prop_registry = Arc::new(PropRegistry::new(&device));
+        let scenery_renderer = scenery_renderer::SceneryRenderer::new(
+            &device,
+            surface_format,
+            &camera_bind_group_layout,
+            Arc::clone(&prop_registry),
+        );
+
         // Create impostor renderer for distant chunks
         let impostor_renderer = ImpostorRenderer::new(&device, surface_format);
 
@@ -749,6 +766,8 @@ impl Renderer {
             inventory_ui,
             item_renderer,
             prop_renderer,
+            prop_registry,
+            scenery_renderer,
             impostor_renderer,
         }
     }
@@ -2127,6 +2146,31 @@ impl Renderer {
         );
         let voxel_gi_elapsed = voxel_gi_start.elapsed();
 
+        // === SCENERY INSTANCE COLLECTION ===
+        // Collect vegetation instances from visible chunks
+        {
+            let chunks_read = chunks.read();
+            let visible_chunks: Vec<(crate::world::ChunkPos, &crate::world::Chunk)> = chunks_read
+                .iter()
+                .filter(|(pos, chunk)| {
+                    if !chunk.has_props() {
+                        return false;
+                    }
+                    let origin = pos.world_origin();
+                    let min = origin;
+                    let max = origin + glam::Vec3::splat(16.0);
+                    frustum.test_aabb(min, max)
+                })
+                .map(|(pos, chunk)| (*pos, chunk.as_ref()))
+                .collect();
+
+            self.scenery_renderer.collect_instances(&visible_chunks, camera.position);
+        }
+
+        // Upload scenery instances and uniforms
+        let wind_dir = glam::Vec3::new(1.0, 0.0, 0.3).normalize();
+        self.scenery_renderer.upload(&self.queue, current_time, wind_dir, 1.0);
+
         // GPU per-pass timing with double-buffered staging buffers
         self.gpu_profiler.begin_frame();
 
@@ -2401,6 +2445,14 @@ impl Renderer {
                 &self.camera_bind_group,
                 &self.texture_bind_group,
             );
+
+            // === SCENERY RENDER PASS ===
+            // Render vegetation (grass, flowers, rocks)
+            let scenery_count = self.scenery_renderer.render(
+                &mut render_pass,
+                &self.camera_bind_group,
+            );
+            triangles += scenery_count * 10; // Rough estimate of triangles per instance
 
             // === PROP RENDER PASS ===
             // Render voxel props (chests, etc.)
