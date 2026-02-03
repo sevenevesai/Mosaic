@@ -2,6 +2,7 @@
 //!
 //! Handles GPU initialization, pipeline management, and frame rendering.
 
+mod aa;
 mod bloom;
 mod camera;
 mod chunk_pool;
@@ -25,6 +26,7 @@ mod volumetrics;
 pub mod vox_loader;
 mod water;
 
+pub use aa::{AntiAlias, AaQuality, AaParams};
 pub use bloom::Bloom;
 pub use camera::{Camera, Frustum};
 pub use chunk_pool::ChunkPool;
@@ -227,6 +229,9 @@ pub struct Renderer {
 
     // Depth of Field post-processing
     dof: Dof,
+
+    // Anti-aliasing (Hybrid Morphological-Temporal)
+    aa: AntiAlias,
 
     // Procedural cloud rendering
     clouds: Clouds,
@@ -688,6 +693,9 @@ impl Renderer {
         // Upload noise texture data
         dof.upload_noise_texture(&queue);
 
+        // Create Anti-aliasing system (Hybrid Morphological-Temporal)
+        let aa = AntiAlias::new(&device, size.width, size.height, surface_format);
+
         // Create ray-marched water system
         let water_system = Water::new(&device, surface_format, &camera_bind_group_layout);
 
@@ -816,6 +824,7 @@ impl Renderer {
             volumetric_uniform_buffer,
             ssao,
             dof,
+            aa,
             clouds,
             dimmer_pipeline,
             menu_blur_pipeline,
@@ -906,6 +915,9 @@ impl Renderer {
 
             // Resize DoF textures
             self.dof.resize(&self.device, new_size.width, new_size.height);
+
+            // Resize Anti-aliasing textures
+            self.aa.resize(&self.device, new_size.width, new_size.height);
 
             // Resize refraction source texture
             self.refraction_source_texture = self.device.create_texture(&wgpu::TextureDescriptor {
@@ -1339,6 +1351,54 @@ impl Renderer {
     /// Get mutable access to SSAO params for advanced settings
     pub fn ssao_params_mut(&mut self) -> &mut SsaoParams {
         &mut self.ssao.params
+    }
+
+    // === ANTI-ALIASING METHODS ===
+
+    /// Check if AA is enabled
+    pub fn is_aa_enabled(&self) -> bool {
+        self.aa.is_enabled()
+    }
+
+    /// Get current AA quality
+    pub fn aa_quality(&self) -> AaQuality {
+        self.aa.quality
+    }
+
+    /// Cycle AA quality: Off -> Low -> Medium -> High -> Ultra -> Off
+    pub fn cycle_aa_quality(&mut self) -> AaQuality {
+        let new_quality = self.aa.cycle_quality();
+        tracing::info!("AA: {}", new_quality.as_str());
+        new_quality
+    }
+
+    /// Set AA quality directly
+    pub fn set_aa_quality(&mut self, quality: AaQuality) {
+        self.aa.set_quality(quality);
+    }
+
+    /// Set AA quality by index (0=Off, 1=Low, 2=Medium, 3=High, 4=Ultra)
+    pub fn set_aa_quality_index(&mut self, index: usize) {
+        let quality = match index {
+            0 => AaQuality::Off,
+            1 => AaQuality::Low,
+            2 => AaQuality::Medium,
+            3 => AaQuality::High,
+            _ => AaQuality::Ultra,
+        };
+        self.set_aa_quality(quality);
+    }
+
+    /// Cycle AA quality backwards
+    pub fn cycle_aa_quality_prev(&mut self) -> AaQuality {
+        let new_quality = self.aa.cycle_quality_prev();
+        self.aa.set_quality(new_quality);
+        new_quality
+    }
+
+    /// Get mutable access to AA params for advanced settings
+    pub fn aa_params_mut(&mut self) -> &mut AaParams {
+        &mut self.aa.params
     }
 
     /// Check if DoF is enabled
@@ -1985,6 +2045,17 @@ impl Renderer {
         self.dof.params.aperture = settings.dof_blur_strength;
         self.dof.params.focus_transition = settings.dof_focus_range;
 
+        // Apply Anti-aliasing quality setting
+        let aa_quality = match settings.aa_quality.to_uppercase().as_str() {
+            "OFF" => AaQuality::Off,
+            "LOW" => AaQuality::Low,
+            "MEDIUM" => AaQuality::Medium,
+            "HIGH" => AaQuality::High,
+            "ULTRA" => AaQuality::Ultra,
+            _ => AaQuality::Medium,
+        };
+        self.aa.set_quality(aa_quality);
+
         // Apply water refraction quality setting
         let refraction_quality = match settings.refraction_quality.to_uppercase().as_str() {
             "OFF" => RefractionQuality::Off,
@@ -2073,6 +2144,7 @@ impl Renderer {
             audio_ambient: self.audio_ambient,
             ssao_quality: self.ssao.quality.as_str().to_string(),
             dof_quality: self.dof.quality.as_str().to_string(),
+            aa_quality: self.aa.quality.as_str().to_string(),
             dof_focus_distance: self.dof.params.manual_focus_distance,
             dof_blur_strength: self.dof.params.aperture,
             dof_focus_range: self.dof.params.focus_transition,
@@ -2351,6 +2423,13 @@ impl Renderer {
             camera.projection_matrix().inverse(),
             0.1,   // near plane
             1000.0, // far plane
+        );
+
+        // Update Anti-aliasing uniforms
+        self.aa.update_uniforms(
+            &self.queue,
+            camera.view_projection_matrix(),
+            camera.position,
         );
 
         let uniforms_elapsed = uniforms_start.elapsed();
@@ -3046,6 +3125,20 @@ impl Renderer {
         self.dof.create_bind_groups(&self.device, &self.depth_texture, &self.scene_texture_view);
         self.dof.render(&mut encoder, &self.scene_texture_view);
         // GPU timestamp: end DoF
+        if let Some(idx) = self.gpu_profiler.end_pass() {
+            self.gpu_profiler.write_timestamp(&mut encoder, idx);
+        }
+
+        // === ANTI-ALIASING ===
+        // Apply hybrid morphological-temporal AA (HMTAA)
+        // Runs after DoF to avoid blurring AA'd edges
+        // GPU timestamp: start AA
+        if let Some(idx) = self.gpu_profiler.begin_pass("AA") {
+            self.gpu_profiler.write_timestamp(&mut encoder, idx);
+        }
+        self.aa.create_bind_groups(&self.device, &self.scene_texture_view, &self.depth_texture);
+        self.aa.render(&mut encoder, &self.scene_texture_view, &self.scene_texture);
+        // GPU timestamp: end AA
         if let Some(idx) = self.gpu_profiler.end_pass() {
             self.gpu_profiler.write_timestamp(&mut encoder, idx);
         }

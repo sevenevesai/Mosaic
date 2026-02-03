@@ -29,6 +29,8 @@ pub struct Settings {
     pub ssao_quality: String,
     /// DoF quality preset: OFF, LOW, MEDIUM, HIGH, ULTRA
     pub dof_quality: String,
+    /// Anti-aliasing quality preset: OFF, LOW, MEDIUM, HIGH, ULTRA
+    pub aa_quality: String,
     /// DoF focus distance in blocks
     pub dof_focus_distance: f32,
     /// DoF blur strength (0.0-1.0)
@@ -89,6 +91,7 @@ impl Default for Settings {
             torch_shadows: false,    // Default OFF for performance
             ssao_quality: "MEDIUM".to_string(), // Default SSAO quality
             dof_quality: "LOW".to_string(),     // Default DoF quality
+            aa_quality: "MEDIUM".to_string(),   // Default AA quality
             dof_focus_distance: 20.0,           // Default focus distance in blocks
             dof_blur_strength: 0.5,             // Default aperture (0.0-1.0)
             dof_focus_range: 10.0,              // Default focus range in blocks
@@ -209,6 +212,9 @@ impl Settings {
                     "dof_quality" => {
                         settings.dof_quality = value.to_string();
                     }
+                    "aa_quality" => {
+                        settings.aa_quality = value.to_string();
+                    }
                     "dof_focus_distance" => {
                         if let Ok(v) = value.parse() {
                             settings.dof_focus_distance = v;
@@ -305,6 +311,7 @@ impl Settings {
              torch_shadows={}\n\
              ssao_quality={}\n\
              dof_quality={}\n\
+             aa_quality={}\n\
              dof_focus_distance={}\n\
              dof_blur_strength={}\n\
              dof_focus_range={}\n\
@@ -340,6 +347,7 @@ impl Settings {
             self.torch_shadows,
             self.ssao_quality,
             self.dof_quality,
+            self.aa_quality,
             self.dof_focus_distance,
             self.dof_blur_strength,
             self.dof_focus_range,

@@ -44,6 +44,7 @@ src/
 │   ├── gpu_culling.rs # GPU frustum culling + visibility cache (88% hit rate)
 │   ├── voxel_gi.rs  # Voxel GI: 256³ volume, DDA shadows, VCT
 │   ├── ssao.rs      # Screen-space ambient occlusion
+│   ├── aa.rs        # Hybrid Morphological-Temporal AA (~1K LOC)
 │   ├── volumetrics.rs # Volumetric light shafts (god rays)
 │   └── chunk_pool.rs # MDI mega-buffers
 ├── world/
@@ -169,6 +170,23 @@ Post-process effect for soft contact shadows (`renderer/ssao.rs`):
 - `radius`: World-space sample radius (default 2.0 blocks)
 - `intensity`: AO strength multiplier (default 0.55)
 - `bias`: Surface bias to prevent self-occlusion (default 0.025)
+
+## Anti-Aliasing (HMTAA)
+
+Hybrid Morphological-Temporal AA designed for voxel worlds (`renderer/aa.rs`):
+- **Depth-based edge detection**: Detects hard block boundaries via depth discontinuities
+- **Morphological blending**: Direction-aware blending along detected edges
+- **Temporal accumulation**: Camera reprojection with variance clipping (no motion vectors needed)
+- **Adaptive sharpening**: CAS-style detail recovery
+
+**Quality Presets** (ESC menu → ANTI-ALIASING):
+| Preset | Features | Performance |
+|--------|----------|-------------|
+| Off | None | 0ms |
+| Low | Morphological only | ~0.1ms |
+| Medium | + Light temporal | ~0.3ms |
+| High | + Full temporal | ~0.5ms |
+| Ultra | + Aggressive sharpening | ~0.7ms |
 
 ## Water Rendering
 
