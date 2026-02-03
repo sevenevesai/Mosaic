@@ -293,6 +293,8 @@ impl Settings {
              cloud_coverage={}\n\
              cloud_speed={}\n\
              cloud_shadows={}\n\
+             # Scenery Settings\n\
+             scenery_quality={}\n\
              # Audio Settings\n\
              audio_master={}\n\
              audio_sfx={}\n\
@@ -321,6 +323,7 @@ impl Settings {
             self.cloud_coverage,
             self.cloud_speed,
             self.cloud_shadows,
+            self.scenery_quality,
             self.audio_master,
             self.audio_sfx,
             self.audio_ambient,

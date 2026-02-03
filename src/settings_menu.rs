@@ -382,6 +382,18 @@ impl SettingsMenu {
                 set_float: |_, _| {},
             },
             MenuItem {
+                label: "SCENERY",
+                tab: MenuTab::Graphics,
+                control_type: ControlType::EnumCycle,
+                get_value: |r| r.scenery_quality().as_str().to_string(),
+                get_index: |r| r.scenery_quality() as usize,
+                get_float: |_| 0.0,
+                cycle_next: |r| { r.cycle_scenery_quality(); },
+                cycle_prev: |r| { r.cycle_scenery_quality_prev(); },
+                set_index: |r, i| { r.set_scenery_quality_index(i); },
+                set_float: |_, _| {},
+            },
+            MenuItem {
                 label: "EXTENDED VIEW",
                 tab: MenuTab::Graphics,
                 control_type: ControlType::EnumCycle,

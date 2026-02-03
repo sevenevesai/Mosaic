@@ -1618,6 +1618,45 @@ impl Renderer {
         self.clouds.shadows_enabled
     }
 
+    // === Scenery Settings ===
+
+    /// Get current scenery quality
+    pub fn scenery_quality(&self) -> scenery_renderer::SceneryQuality {
+        self.scenery_renderer.quality()
+    }
+
+    /// Cycle scenery quality: Off -> Low -> Medium -> High -> Ultra -> Off
+    pub fn cycle_scenery_quality(&mut self) -> scenery_renderer::SceneryQuality {
+        let new_quality = self.scenery_renderer.quality().next();
+        self.scenery_renderer.set_quality(new_quality);
+        tracing::info!("Scenery Quality: {}", new_quality.as_str());
+        new_quality
+    }
+
+    /// Cycle scenery quality backwards
+    pub fn cycle_scenery_quality_prev(&mut self) -> scenery_renderer::SceneryQuality {
+        let new_quality = self.scenery_renderer.quality().prev();
+        self.scenery_renderer.set_quality(new_quality);
+        new_quality
+    }
+
+    /// Set scenery quality directly
+    pub fn set_scenery_quality(&mut self, quality: scenery_renderer::SceneryQuality) {
+        self.scenery_renderer.set_quality(quality);
+    }
+
+    /// Set scenery quality by index (0=Off, 1=Low, 2=Medium, 3=High, 4=Ultra)
+    pub fn set_scenery_quality_index(&mut self, index: usize) {
+        let quality = match index {
+            0 => scenery_renderer::SceneryQuality::Off,
+            1 => scenery_renderer::SceneryQuality::Low,
+            2 => scenery_renderer::SceneryQuality::Medium,
+            3 => scenery_renderer::SceneryQuality::High,
+            _ => scenery_renderer::SceneryQuality::Ultra,
+        };
+        self.scenery_renderer.set_quality(quality);
+    }
+
     /// Check if water refraction is enabled
     pub fn is_refraction_enabled(&self) -> bool {
         self.water_system.quality() != WaterQuality::Off
@@ -1783,6 +1822,17 @@ impl Renderer {
         self.clouds.set_speed(settings.cloud_speed);
         self.clouds.set_shadows_enabled(settings.cloud_shadows);
 
+        // Apply scenery settings
+        let scenery_quality = match settings.scenery_quality.to_uppercase().as_str() {
+            "OFF" => scenery_renderer::SceneryQuality::Off,
+            "LOW" => scenery_renderer::SceneryQuality::Low,
+            "MEDIUM" => scenery_renderer::SceneryQuality::Medium,
+            "HIGH" => scenery_renderer::SceneryQuality::High,
+            "ULTRA" => scenery_renderer::SceneryQuality::Ultra,
+            _ => scenery_renderer::SceneryQuality::Medium,
+        };
+        self.scenery_renderer.set_quality(scenery_quality);
+
         // Apply audio settings
         self.audio_master = settings.audio_master;
         self.audio_sfx = settings.audio_sfx;
@@ -1821,6 +1871,8 @@ impl Renderer {
             cloud_coverage: self.clouds.coverage,
             cloud_speed: self.clouds.speed,
             cloud_shadows: self.clouds.shadows_enabled,
+            // Scenery settings
+            scenery_quality: self.scenery_renderer.quality().as_str().to_string(),
         }
     }
 
