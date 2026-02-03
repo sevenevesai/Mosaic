@@ -57,6 +57,10 @@ pub struct Settings {
     // === GRASS SETTINGS ===
     /// Grass quality preset: OFF, LOW, MEDIUM, HIGH, ULTRA
     pub grass_quality: String,
+    /// Grass render distance: NEAR, MEDIUM, FAR, ULTRA
+    pub grass_distance: String,
+    /// Grass shadow mode: OFF, SIMPLE
+    pub grass_shadow: String,
 
     // === AUDIO SETTINGS ===
     /// Master volume (0.0 - 1.0)
@@ -99,6 +103,8 @@ impl Default for Settings {
             scenery_quality: "MEDIUM".to_string(),  // Default scenery quality
             // Grass defaults
             grass_quality: "MEDIUM".to_string(),    // Default grass quality
+            grass_distance: "MEDIUM".to_string(),   // Default grass distance
+            grass_shadow: "OFF".to_string(),        // Default grass shadow off
             // Audio defaults
             audio_master: 0.8,   // 80% master volume
             audio_sfx: 1.0,      // 100% SFX
@@ -249,6 +255,12 @@ impl Settings {
                     "grass_quality" => {
                         settings.grass_quality = value.to_string();
                     }
+                    "grass_distance" => {
+                        settings.grass_distance = value.to_string();
+                    }
+                    "grass_shadow" => {
+                        settings.grass_shadow = value.to_string();
+                    }
                     // Audio settings
                     "audio_master" => {
                         if let Ok(v) = value.parse() {
@@ -307,6 +319,8 @@ impl Settings {
              scenery_quality={}\n\
              # Grass Settings\n\
              grass_quality={}\n\
+             grass_distance={}\n\
+             grass_shadow={}\n\
              # Audio Settings\n\
              audio_master={}\n\
              audio_sfx={}\n\
@@ -337,6 +351,8 @@ impl Settings {
             self.cloud_shadows,
             self.scenery_quality,
             self.grass_quality,
+            self.grass_distance,
+            self.grass_shadow,
             self.audio_master,
             self.audio_sfx,
             self.audio_ambient,

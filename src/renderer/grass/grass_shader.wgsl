@@ -1,5 +1,6 @@
 // Procedural Grass Rendering Shader
 // Tile-based placement with vertex-pulling blade generation
+// Includes voxel-based shadow sampling for terrain occlusion
 
 // ============================================================================
 // STRUCTURES
@@ -10,7 +11,10 @@ struct GrassUniforms {
     wind: vec4<f32>,           // xy = direction, z = strength, w = time
     camera_pos: vec4<f32>,     // xyz = position
     lod_distances: vec4<f32>,  // x = full_detail, y = low_lod, z = cull, w = chunk_size
-    quality: vec4<u32>,        // x = blades_per_tile, y = blade_segments, z = max_tiles
+    quality: vec4<u32>,        // x = blades_per_tile, y = blade_segments, z = max_tiles, w = min_blade_threshold
+    sun_direction: vec4<f32>,  // xyz = direction, w = intensity
+    sun_color: vec4<f32>,      // rgb = color, a = unused
+    ambient_color: vec4<f32>,  // rgb = ambient, a = shadow_mode (0=off, 1=simple)
 }
 
 struct GrassTile {
@@ -24,13 +28,33 @@ struct BiomeColor {
     tip: vec4<f32>,
 }
 
+// Voxel GI uniform (matches VoxelVolumeUniform in voxel_gi.rs)
+struct VoxelVolumeUniform {
+    volume_center: vec4<f32>,
+    volume_size: vec4<f32>,
+    inv_volume_size: vec4<f32>,
+    sun_direction: vec4<f32>,
+    sun_color: vec4<f32>,
+    ambient_color: vec4<f32>,
+    time_of_day: vec4<f32>,    // x = time, y = shadow_mode, z = shadow_debug, w = shadow_blend
+    player_light: vec4<f32>,   // xyz = position, w = intensity
+    volume_origin: vec4<i32>,  // xyz = world position of voxel [0,0,0]
+}
+
 // ============================================================================
 // BINDINGS
 // ============================================================================
 
+// Grass-specific bindings
 @group(0) @binding(0) var<uniform> uniforms: GrassUniforms;
 @group(0) @binding(1) var<storage, read> tiles: array<GrassTile>;
 @group(0) @binding(2) var<uniform> biome_colors: array<BiomeColor, 8>;
+
+// Voxel GI bindings (shared with terrain for shadow sampling)
+@group(1) @binding(0) var<uniform> voxel_volume: VoxelVolumeUniform;
+@group(1) @binding(1) var t_voxel: texture_3d<f32>;
+@group(1) @binding(2) var t_radiance: texture_3d<f32>;
+@group(1) @binding(3) var s_voxel: sampler;
 
 // ============================================================================
 // UTILITY FUNCTIONS
@@ -98,6 +122,61 @@ fn rotate_y(p: vec3<f32>, angle: f32) -> vec3<f32> {
 }
 
 // ============================================================================
+// VOXEL SHADOW SAMPLING
+// ============================================================================
+
+// Convert world position to voxel UV using toroidal wrapping
+fn world_to_voxel_uv(world_pos: vec3<f32>) -> vec3<f32> {
+    let origin = vec3<f32>(voxel_volume.volume_origin.xyz);
+    let local = world_pos - origin;
+
+    // Toroidal wrap using floating-point modulo
+    let wrapped = ((local % 256.0) + 256.0) % 256.0;
+
+    // Convert to UV (0-1 range)
+    return wrapped / 256.0;
+}
+
+// Sample sky occlusion by checking for solid blocks above grass position
+// Returns 0.0 = fully in shadow, 1.0 = fully lit
+fn sample_grass_shadow(world_pos: vec3<f32>, sun_dir: vec3<f32>) -> f32 {
+    // Ray march toward sun, checking for occlusion
+    let max_steps = 16;
+    let step_size = 1.5;  // Sample every 1.5 blocks
+
+    var accumulated_opacity = 0.0;
+    var pos = world_pos + vec3<f32>(0.0, 0.5, 0.0);  // Start slightly above grass
+
+    // Check if we're within valid voxel volume range
+    let center_dist = length(pos - voxel_volume.volume_center.xyz);
+    if (center_dist > 120.0) {
+        return 1.0;  // Outside volume, assume lit
+    }
+
+    for (var i = 0; i < max_steps; i++) {
+        pos += sun_dir * step_size;
+
+        // Check distance from volume center
+        let dist = length(pos - voxel_volume.volume_center.xyz);
+        if (dist > 120.0) { break; }
+
+        let uv = world_to_voxel_uv(pos);
+        let voxel = textureSampleLevel(t_voxel, s_voxel, uv, 0.0);
+
+        // Accumulate opacity (R channel = solid blocks)
+        accumulated_opacity += voxel.r * 0.8;
+
+        // Early exit if mostly shadowed
+        if (accumulated_opacity > 0.9) {
+            return 0.1;  // In deep shadow
+        }
+    }
+
+    // Convert opacity to shadow factor (0 = dark, 1 = lit)
+    return 1.0 - saturate(accumulated_opacity);
+}
+
+// ============================================================================
 // VERTEX SHADER - GRASS BLADE GENERATION
 // ============================================================================
 
@@ -143,7 +222,21 @@ fn vs_grass(
     let tile_seed = unpack_seed(tile.density_seed);
     let height_var = unpack_height_var(tile.density_seed);
 
-    // Skip blades beyond actual count for this tile (noise-driven density)
+    // Quality-based density threshold from uniforms (quality.w = min_blade_threshold)
+    // Lower quality = higher threshold = only show denser patches
+    let min_density_blades = uniforms.quality.w;
+
+    // Skip sparse tiles at lower quality
+    if (actual_blade_count < min_density_blades) {
+        out.position = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+        out.color = vec3<f32>(0.0);
+        out.world_pos = vec3<f32>(0.0);
+        out.normal = vec3<f32>(0.0, 1.0, 0.0);
+        out.height_factor = 0.0;
+        return out;
+    }
+
+    // Skip blades beyond actual count for this tile
     if (blade_idx >= actual_blade_count) {
         out.position = vec4<f32>(0.0, 0.0, 0.0, 1.0);
         out.color = vec3<f32>(0.0);
@@ -202,15 +295,34 @@ fn vs_grass(
     let p1 = vec3<f32>(curve_amount * curve_dir, blade_height * 0.5, 0.0);
     let p2 = vec3<f32>(curve_amount * curve_dir * 2.0, blade_height, 0.0);
 
-    // Wind effect - world position based for coherent waves
-    let wind_freq = 0.15;
-    let wind_phase = (base_pos.x * uniforms.wind.x + base_pos.z * uniforms.wind.y) * wind_freq;
-    let wind_time = uniforms.wind.w * 2.5;
+    // Wind effect - multi-octave with per-blade variation for natural movement
+    let wind_time = uniforms.wind.w;
     let wind_strength = uniforms.wind.z;
 
-    // Primary wind wave + secondary faster wave for variation
-    let wind_wave = sin(wind_phase + wind_time) * 0.7 + sin(wind_phase * 1.7 + wind_time * 1.3) * 0.3;
-    let wind_offset = wind_wave * t * t * wind_strength * 0.25;
+    // Per-blade phase offset for desynchronization (0 to 2π)
+    let blade_phase = hash_float(blade_seed + 7u) * 6.28318;
+
+    // Spatial frequency - lower = larger waves traveling across landscape
+    let spatial_freq = 0.08;
+    let wind_phase = (base_pos.x * uniforms.wind.x + base_pos.z * uniforms.wind.y) * spatial_freq;
+
+    // Gust variation - slow-moving areas of stronger/weaker wind
+    let gust_phase = base_pos.x * 0.03 + base_pos.z * 0.04;
+    let gust = sin(gust_phase + wind_time * 0.4) * 0.3 + 0.7;  // 0.4 to 1.0
+
+    // Multi-octave wind waves at different speeds and scales
+    // Primary: slow, large-scale swaying
+    let wind1 = sin(wind_phase + wind_time * 1.2 + blade_phase) * 0.6;
+    // Secondary: medium turbulence
+    let wind2 = sin(wind_phase * 2.3 + wind_time * 2.0 + blade_phase * 1.3) * 0.25;
+    // Tertiary: fast flutter (small amplitude)
+    let wind3 = sin(wind_phase * 4.1 + wind_time * 3.5 + blade_phase * 0.7) * 0.15;
+
+    // Combine with gust modulation - creates traveling waves effect
+    let wind_wave = (wind1 + wind2 + wind3) * gust;
+
+    // Apply wind: stronger at blade tip (t*t curve), scaled by strength
+    let wind_offset = wind_wave * t * t * wind_strength * 0.20;
 
     // Evaluate curve
     var curve_pos = bezier(p0, p1, p2, t);
@@ -256,26 +368,55 @@ fn vs_grass(
 
 @fragment
 fn fs_grass(in: VertexOutput) -> @location(0) vec4<f32> {
-    // Simple directional lighting matching main scene
-    let sun_dir = normalize(vec3<f32>(0.3, 0.8, 0.5));
+    // Day/night aware lighting from scene uniforms
+    let sun_dir = normalize(uniforms.sun_direction.xyz);
+    let sun_intensity = uniforms.sun_direction.w;
+    let sun_color = uniforms.sun_color.rgb;
+    let ambient_base = uniforms.ambient_color.rgb;
+    let shadow_mode = uniforms.ambient_color.a;  // 0=off, 1=simple
+
     let normal = normalize(in.normal);
+
+    // === SHADOW SAMPLING ===
+    // When shadow_mode > 0, sample voxel volume for occlusion
+    var shadow = 1.0;
+    if (shadow_mode > 0.5 && sun_intensity > 0.1) {
+        shadow = sample_grass_shadow(in.world_pos, sun_dir);
+        // Blend shadow based on sun intensity (less shadow at dawn/dusk)
+        shadow = mix(1.0, shadow, sun_intensity);
+    }
+
+    // Directional sun lighting (only when sun is up)
     let ndotl = max(dot(normal, sun_dir), 0.0);
+    let sun_contrib = sun_color * ndotl * sun_intensity * 0.4 * shadow;
 
-    // Ambient + diffuse lighting (darker than before)
-    let ambient = 0.35;
-    let diffuse = 0.45;
-    let lighting = ambient + diffuse * ndotl;
+    // Face-based shading for grass blades
+    // Upward-facing parts brighter, sides darker
+    let face_brightness = mix(0.6, 0.9, max(normal.y, 0.0));
 
-    // Reduced subsurface scattering (less glow)
+    // Ambient light (provides base illumination, especially at night)
+    // Shadow affects ambient more strongly to darken shadowed areas
+    let ambient_shadow = mix(0.5, 1.0, shadow);  // Stronger shadow on ambient
+    let ambient = ambient_base * 0.45 * ambient_shadow;
+
+    // Combine lighting
+    let lighting = (ambient + sun_contrib) * face_brightness;
+
+    // Subtle subsurface scattering for grass (reduced at night and in shadow)
     let view_dir = normalize(uniforms.camera_pos.xyz - in.world_pos);
     let back_light = max(dot(-view_dir, sun_dir), 0.0);
-    let sss = back_light * 0.06 * in.height_factor;
+    let sss = back_light * sun_intensity * shadow * 0.04 * in.height_factor;
 
-    let final_color = in.color * (lighting + sss);
+    // Apply lighting to grass color
+    var final_color = in.color * (lighting + sss);
 
-    // Stronger distance fade starting earlier
+    // Ensure grass doesn't go completely black at night (minimum visibility)
+    let min_brightness = 0.03;
+    final_color = max(final_color, vec3<f32>(min_brightness));
+
+    // Distance fade
     let dist = distance(in.world_pos.xz, uniforms.camera_pos.xz);
-    let fade_start = uniforms.lod_distances.z * 0.5;  // Start fade at 50%
+    let fade_start = uniforms.lod_distances.z * 0.5;
     let fade = 1.0 - smoothstep(fade_start, uniforms.lod_distances.z, dist);
 
     return vec4<f32>(final_color, fade);

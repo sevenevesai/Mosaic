@@ -18,7 +18,7 @@ use crate::world::generation::biome::BiomeId;
 // QUALITY PRESETS
 // ============================================================================
 
-/// Grass rendering quality levels
+/// Grass rendering quality levels (controls density)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(u8)]
 pub enum GrassQuality {
@@ -28,6 +28,17 @@ pub enum GrassQuality {
     Medium = 2,
     High = 3,
     Ultra = 4,
+}
+
+/// Grass render distance levels (separate from quality)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u8)]
+pub enum GrassDistance {
+    Near = 0,
+    #[default]
+    Medium = 1,
+    Far = 2,
+    Ultra = 3,
 }
 
 impl GrassQuality {
@@ -53,47 +64,25 @@ impl GrassQuality {
         }
     }
 
-    /// Distance (in chunks) for full detail rendering
-    pub fn full_detail_distance(&self) -> f32 {
+    /// Minimum blade count threshold (lower quality = only show dense patches)
+    pub fn min_blade_threshold(&self) -> u32 {
         match self {
-            GrassQuality::Off => 0.0,
-            GrassQuality::Low => 4.0,
-            GrassQuality::Medium => 6.0,
-            GrassQuality::High => 8.0,
-            GrassQuality::Ultra => 12.0,
+            GrassQuality::Off => 99,  // Show nothing
+            GrassQuality::Low => 5,   // Only densest patches
+            GrassQuality::Medium => 3, // Medium density
+            GrassQuality::High => 2,   // Most patches
+            GrassQuality::Ultra => 1,  // All grass
         }
     }
 
-    /// Distance (in chunks) for low LOD rendering
-    pub fn low_lod_distance(&self) -> f32 {
-        match self {
-            GrassQuality::Off => 0.0,
-            GrassQuality::Low => 6.0,
-            GrassQuality::Medium => 10.0,
-            GrassQuality::High => 14.0,
-            GrassQuality::Ultra => 20.0,
-        }
-    }
-
-    /// Distance (in chunks) beyond which grass is culled
-    pub fn cull_distance(&self) -> f32 {
-        match self {
-            GrassQuality::Off => 0.0,
-            GrassQuality::Low => 8.0,
-            GrassQuality::Medium => 12.0,
-            GrassQuality::High => 16.0,
-            GrassQuality::Ultra => 24.0,
-        }
-    }
-
-    /// Maximum tiles that can be rendered (per-block placement needs more)
+    /// Maximum tiles that can be rendered
     pub fn max_tiles(&self) -> u32 {
         match self {
             GrassQuality::Off => 0,
-            GrassQuality::Low => 32_000,
-            GrassQuality::Medium => 96_000,
-            GrassQuality::High => 192_000,
-            GrassQuality::Ultra => 384_000,
+            GrassQuality::Low => 64_000,
+            GrassQuality::Medium => 192_000,
+            GrassQuality::High => 384_000,
+            GrassQuality::Ultra => 512_000,
         }
     }
 
@@ -156,6 +145,78 @@ impl GrassQuality {
     /// Convert to index (for settings)
     pub fn to_index(&self) -> usize {
         *self as usize
+    }
+}
+
+impl GrassDistance {
+    /// Distance (in chunks) for full detail rendering
+    pub fn full_detail_distance(&self) -> f32 {
+        match self {
+            GrassDistance::Near => 3.0,
+            GrassDistance::Medium => 6.0,
+            GrassDistance::Far => 10.0,
+            GrassDistance::Ultra => 14.0,
+        }
+    }
+
+    /// Distance (in chunks) for low LOD rendering
+    pub fn low_lod_distance(&self) -> f32 {
+        match self {
+            GrassDistance::Near => 5.0,
+            GrassDistance::Medium => 10.0,
+            GrassDistance::Far => 16.0,
+            GrassDistance::Ultra => 22.0,
+        }
+    }
+
+    /// Distance (in chunks) beyond which grass is culled
+    pub fn cull_distance(&self) -> f32 {
+        match self {
+            GrassDistance::Near => 6.0,
+            GrassDistance::Medium => 12.0,
+            GrassDistance::Far => 18.0,
+            GrassDistance::Ultra => 26.0,
+        }
+    }
+
+    /// Cycle to next distance level
+    pub fn next(&self) -> Self {
+        match self {
+            GrassDistance::Near => GrassDistance::Medium,
+            GrassDistance::Medium => GrassDistance::Far,
+            GrassDistance::Far => GrassDistance::Ultra,
+            GrassDistance::Ultra => GrassDistance::Near,
+        }
+    }
+
+    /// Cycle to previous distance level
+    pub fn prev(&self) -> Self {
+        match self {
+            GrassDistance::Near => GrassDistance::Ultra,
+            GrassDistance::Medium => GrassDistance::Near,
+            GrassDistance::Far => GrassDistance::Medium,
+            GrassDistance::Ultra => GrassDistance::Far,
+        }
+    }
+
+    /// Get display name
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            GrassDistance::Near => "NEAR",
+            GrassDistance::Medium => "MEDIUM",
+            GrassDistance::Far => "FAR",
+            GrassDistance::Ultra => "ULTRA",
+        }
+    }
+
+    /// Convert from index
+    pub fn from_index(index: usize) -> Self {
+        match index {
+            0 => GrassDistance::Near,
+            1 => GrassDistance::Medium,
+            2 => GrassDistance::Far,
+            _ => GrassDistance::Ultra,
+        }
     }
 }
 
@@ -223,6 +284,46 @@ impl GrassTile {
     }
 }
 
+/// Grass shadow quality levels
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u8)]
+pub enum GrassShadow {
+    #[default]
+    Off = 0,
+    Simple = 1,
+}
+
+impl GrassShadow {
+    pub fn cycle_next(&self) -> Self {
+        match self {
+            GrassShadow::Off => GrassShadow::Simple,
+            GrassShadow::Simple => GrassShadow::Off,
+        }
+    }
+
+    pub fn cycle_prev(&self) -> Self {
+        self.cycle_next() // Only 2 options, same as next
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            GrassShadow::Off => "OFF",
+            GrassShadow::Simple => "SIMPLE",
+        }
+    }
+
+    pub fn from_index(index: usize) -> Self {
+        match index {
+            0 => GrassShadow::Off,
+            _ => GrassShadow::Simple,
+        }
+    }
+
+    pub fn to_index(&self) -> usize {
+        *self as usize
+    }
+}
+
 /// Per-frame uniforms for grass rendering
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -235,8 +336,14 @@ pub struct GrassUniforms {
     pub camera_pos: [f32; 4],
     /// LOD distances: full_detail, low_lod, cull, chunk_size
     pub lod_distances: [f32; 4],
-    /// Quality params: blades_per_tile, blade_segments, max_tiles, padding
+    /// Quality params: blades_per_tile, blade_segments, max_tiles, min_blade_threshold
     pub quality: [u32; 4],
+    /// Sun direction (xyz) + intensity (w)
+    pub sun_direction: [f32; 4],
+    /// Sun color (rgb) + unused (a)
+    pub sun_color: [f32; 4],
+    /// Ambient color (rgb) + shadow_mode (a)
+    pub ambient_color: [f32; 4],
 }
 
 impl Default for GrassUniforms {
@@ -247,6 +354,9 @@ impl Default for GrassUniforms {
             camera_pos: [0.0; 4],
             lod_distances: [96.0, 160.0, 192.0, 16.0], // In blocks (6, 10, 12 chunks)
             quality: [4, 3, 24000, 0], // Medium preset
+            sun_direction: [0.5, 0.8, 0.3, 1.0], // Default sun up
+            sun_color: [1.0, 0.95, 0.85, 0.0],   // Warm white
+            ambient_color: [0.3, 0.35, 0.4, 0.0], // Cool ambient
         }
     }
 }
@@ -279,48 +389,49 @@ pub struct BiomePalette {
 
 impl Default for BiomePalette {
     fn default() -> Self {
-        // Base color: #212900 = RGB(33, 41, 0) = (0.129, 0.161, 0.0)
+        // Terrain grass surface color: #2F441A = RGB(47, 68, 26) = (0.184, 0.267, 0.102)
+        // Grass blades darker at base, tips match terrain - overall darker than before
         Self {
             colors: [
-                // Grasslands - dark olive matching terrain side walls
+                // Grasslands - darker to match terrain better
                 BiomeGrassColor::new(
-                    [0.129, 0.161, 0.0],   // #212900 base
-                    [0.18, 0.22, 0.02],    // Slightly lighter tip
+                    [0.12, 0.18, 0.06],    // Base: darker
+                    [0.16, 0.23, 0.09],    // Tip: slightly darker than terrain
                 ),
-                // Cavernous Highlands - similar dark olive
+                // Cavernous Highlands - similar green
                 BiomeGrassColor::new(
-                    [0.14, 0.17, 0.02],    // Slight variation
-                    [0.19, 0.23, 0.04],
+                    [0.13, 0.19, 0.07],
+                    [0.16, 0.24, 0.09],
                 ),
-                // Jungle - darker green
+                // Jungle - darker, more saturated green
                 BiomeGrassColor::new(
-                    [0.10, 0.14, 0.0],
-                    [0.15, 0.20, 0.02],
+                    [0.09, 0.16, 0.04],
+                    [0.12, 0.20, 0.06],
                 ),
                 // Tundra - tan/brown dead grass
                 BiomeGrassColor::new(
-                    [0.25, 0.22, 0.10],
-                    [0.32, 0.28, 0.14],
+                    [0.18, 0.16, 0.08],
+                    [0.24, 0.21, 0.11],
                 ),
-                // Swamp - murky dark
+                // Swamp - murky dark green
                 BiomeGrassColor::new(
-                    [0.11, 0.14, 0.02],
-                    [0.16, 0.20, 0.04],
+                    [0.10, 0.14, 0.05],
+                    [0.13, 0.18, 0.06],
                 ),
                 // Desert - sandy sparse grass
                 BiomeGrassColor::new(
-                    [0.35, 0.30, 0.15],
-                    [0.42, 0.36, 0.18],
+                    [0.26, 0.22, 0.12],
+                    [0.30, 0.26, 0.14],
                 ),
                 // Mountains - gray-green alpine
                 BiomeGrassColor::new(
-                    [0.15, 0.18, 0.08],
-                    [0.22, 0.26, 0.12],
+                    [0.11, 0.15, 0.07],
+                    [0.15, 0.19, 0.09],
                 ),
-                // Ocean (unused)
+                // Ocean (unused) - same as grasslands
                 BiomeGrassColor::new(
-                    [0.129, 0.161, 0.0],
-                    [0.18, 0.22, 0.02],
+                    [0.12, 0.18, 0.06],
+                    [0.16, 0.23, 0.09],
                 ),
             ],
         }
@@ -509,6 +620,16 @@ impl GrassTileBuffer {
             self.remove_chunk(pos);
         }
     }
+
+    /// Clear all tiles (used when quality changes)
+    pub fn clear(&mut self) {
+        self.chunk_tiles.clear();
+        self.free_ranges.clear();
+        self.free_ranges.push((0, self.max_tiles));
+        self.tile_count = 0;
+        self.dirty = true;
+        tracing::debug!("Grass tile buffer cleared");
+    }
 }
 
 // ============================================================================
@@ -527,8 +648,12 @@ pub struct GrassBladeVertex {
 
 /// Main grass rendering system
 pub struct GrassSystem {
-    /// Current quality setting
+    /// Current quality setting (density)
     pub quality: GrassQuality,
+    /// Current distance setting
+    pub distance: GrassDistance,
+    /// Current shadow setting
+    pub shadow: GrassShadow,
     /// Tile buffer
     pub tile_buffer: GrassTileBuffer,
     /// Uniform buffer
@@ -559,8 +684,10 @@ impl GrassSystem {
     pub fn new(
         device: &wgpu::Device,
         quality: GrassQuality,
+        distance: GrassDistance,
         surface_format: wgpu::TextureFormat,
         depth_format: wgpu::TextureFormat,
+        voxel_bind_group_layout: &wgpu::BindGroupLayout,
     ) -> Self {
         let max_tiles = quality.max_tiles().max(24_000); // At least medium capacity
 
@@ -667,10 +794,10 @@ impl GrassSystem {
             source: wgpu::ShaderSource::Wgsl(include_str!("grass_shader.wgsl").into()),
         });
 
-        // Pipeline layout
+        // Pipeline layout (includes voxel GI for shadow sampling)
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Grass Pipeline Layout"),
-            bind_group_layouts: &[&bind_group_layout],
+            bind_group_layouts: &[&bind_group_layout, voxel_bind_group_layout],
             push_constant_ranges: &[],
         });
 
@@ -723,6 +850,8 @@ impl GrassSystem {
 
         Self {
             quality,
+            distance,
+            shadow: GrassShadow::default(),
             tile_buffer,
             uniform_buffer,
             palette_buffer,
@@ -793,6 +922,10 @@ impl GrassSystem {
         view_proj: glam::Mat4,
         camera_pos: Vec3,
         delta_time: f32,
+        sun_direction: Vec3,
+        sun_intensity: f32,
+        sun_color: Vec3,
+        ambient_color: Vec3,
     ) {
         if self.quality == GrassQuality::Off {
             return;
@@ -806,20 +939,25 @@ impl GrassSystem {
         self.uniforms.camera_pos = [camera_pos.x, camera_pos.y, camera_pos.z, 0.0];
         self.uniforms.wind[3] = self.wind_time;
 
-        // Update quality-dependent params
+        // Update distance-dependent params (separate from quality/density)
         self.uniforms.lod_distances = [
-            self.quality.full_detail_distance() * CHUNK_SIZE,
-            self.quality.low_lod_distance() * CHUNK_SIZE,
-            self.quality.cull_distance() * CHUNK_SIZE,
+            self.distance.full_detail_distance() * CHUNK_SIZE,
+            self.distance.low_lod_distance() * CHUNK_SIZE,
+            self.distance.cull_distance() * CHUNK_SIZE,
             CHUNK_SIZE,
         ];
         self.uniforms.quality = [
             self.quality.blades_per_tile(),
             self.quality.blade_segments(),
             self.quality.max_tiles(),
-            0,
+            self.quality.min_blade_threshold(),  // Pass threshold to shader
         ];
         self.uniforms.wind[2] = self.quality.wind_strength();
+
+        // Day/night lighting
+        self.uniforms.sun_direction = [sun_direction.x, sun_direction.y, sun_direction.z, sun_intensity];
+        self.uniforms.sun_color = [sun_color.x, sun_color.y, sun_color.z, 0.0];
+        self.uniforms.ambient_color = [ambient_color.x, ambient_color.y, ambient_color.z, self.shadow as u8 as f32];
 
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&self.uniforms));
     }
@@ -840,8 +978,34 @@ impl GrassSystem {
 
     /// Set quality level
     pub fn set_quality(&mut self, quality: GrassQuality) {
-        self.quality = quality;
-        tracing::info!("Grass quality set to {:?}", quality);
+        if self.quality != quality {
+            self.quality = quality;
+            // Clear tile buffer to force re-upload with new quality parameters
+            self.tile_buffer.clear();
+            tracing::info!("Grass quality set to {:?}, buffer cleared", quality);
+        }
+    }
+
+    /// Get current distance setting
+    pub fn distance(&self) -> GrassDistance {
+        self.distance
+    }
+
+    /// Set distance setting
+    pub fn set_distance(&mut self, distance: GrassDistance) {
+        self.distance = distance;
+        tracing::info!("Grass distance set to {:?}", distance);
+    }
+
+    /// Get current shadow setting
+    pub fn shadow(&self) -> GrassShadow {
+        self.shadow
+    }
+
+    /// Set shadow setting
+    pub fn set_shadow(&mut self, shadow: GrassShadow) {
+        self.shadow = shadow;
+        tracing::info!("Grass shadow set to {:?}", shadow);
     }
 
     /// Get bind group layout for pipeline creation
@@ -868,7 +1032,9 @@ impl GrassSystem {
     ///
     /// Call this during the opaque rendering pass, after terrain but before transparent objects.
     /// Uses instancing: each instance is a blade, derived from tile data in the shader.
-    pub fn render<'a>(&'a self, render_pass: &mut wgpu::RenderPass<'a>) {
+    ///
+    /// voxel_bind_group: The voxel GI bind group for shadow sampling
+    pub fn render<'a>(&'a self, render_pass: &mut wgpu::RenderPass<'a>, voxel_bind_group: &'a wgpu::BindGroup) {
         if self.quality == GrassQuality::Off {
             return;
         }
@@ -894,6 +1060,7 @@ impl GrassSystem {
 
         render_pass.set_pipeline(&self.render_pipeline);
         render_pass.set_bind_group(0, &self.bind_group, &[]);
+        render_pass.set_bind_group(1, voxel_bind_group, &[]);
 
         // Draw using vertex pulling - no vertex buffer needed
         // instance_id encodes: tile_index * blades_per_tile + blade_index

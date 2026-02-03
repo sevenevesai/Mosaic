@@ -43,7 +43,7 @@ pub use vox_loader::{VoxModel, VoxMesh};
 pub use volumetrics::VolumetricLighting;
 pub use water::{Water, WaterQuality};
 pub use clouds::{Clouds, CloudQuality};
-pub use grass::{GrassSystem, GrassQuality, GrassTile, BiomePalette, GrassStats};
+pub use grass::{GrassSystem, GrassQuality, GrassDistance, GrassShadow, GrassTile, BiomePalette, GrassStats};
 
 /// Display mode for the window
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -708,12 +708,14 @@ impl Renderer {
         // Create impostor renderer for distant chunks
         let impostor_renderer = ImpostorRenderer::new(&device, surface_format);
 
-        // Create procedural grass system
+        // Create procedural grass system (uses voxel GI for shadow sampling)
         let grass_system = GrassSystem::new(
             &device,
-            GrassQuality::Medium,
+            grass::GrassQuality::Medium,
+            grass::GrassDistance::Medium,
             surface_format,
             wgpu::TextureFormat::Depth32Float,
+            voxel_gi.bind_group_layout(),
         );
 
         Self {
@@ -1706,6 +1708,71 @@ impl Renderer {
         self.grass_system.set_quality(quality);
     }
 
+    // ========================================================================
+    // GRASS DISTANCE SETTINGS
+    // ========================================================================
+
+    /// Get current grass distance
+    pub fn grass_distance(&self) -> grass::GrassDistance {
+        self.grass_system.distance()
+    }
+
+    /// Cycle grass distance: Near -> Medium -> Far -> Ultra -> Near
+    pub fn cycle_grass_distance(&mut self) -> grass::GrassDistance {
+        let new_distance = self.grass_system.distance().next();
+        self.grass_system.set_distance(new_distance);
+        tracing::info!("Grass Distance: {}", new_distance.as_str());
+        new_distance
+    }
+
+    /// Cycle grass distance backwards
+    pub fn cycle_grass_distance_prev(&mut self) -> grass::GrassDistance {
+        let new_distance = self.grass_system.distance().prev();
+        self.grass_system.set_distance(new_distance);
+        new_distance
+    }
+
+    /// Set grass distance directly
+    pub fn set_grass_distance(&mut self, distance: grass::GrassDistance) {
+        self.grass_system.set_distance(distance);
+    }
+
+    /// Set grass distance by index (0=Near, 1=Medium, 2=Far, 3=Ultra)
+    pub fn set_grass_distance_index(&mut self, index: usize) {
+        let distance = grass::GrassDistance::from_index(index);
+        self.grass_system.set_distance(distance);
+    }
+
+    /// Get current grass shadow setting
+    pub fn grass_shadow(&self) -> grass::GrassShadow {
+        self.grass_system.shadow()
+    }
+
+    /// Cycle grass shadow setting forward
+    pub fn cycle_grass_shadow(&mut self) -> grass::GrassShadow {
+        let shadow = self.grass_system.shadow().cycle_next();
+        self.grass_system.set_shadow(shadow);
+        shadow
+    }
+
+    /// Cycle grass shadow setting backward
+    pub fn cycle_grass_shadow_prev(&mut self) -> grass::GrassShadow {
+        let shadow = self.grass_system.shadow().cycle_prev();
+        self.grass_system.set_shadow(shadow);
+        shadow
+    }
+
+    /// Set grass shadow setting
+    pub fn set_grass_shadow(&mut self, shadow: grass::GrassShadow) {
+        self.grass_system.set_shadow(shadow);
+    }
+
+    /// Set grass shadow by index (0=Off, 1=Simple)
+    pub fn set_grass_shadow_index(&mut self, index: usize) {
+        let shadow = grass::GrassShadow::from_index(index);
+        self.grass_system.set_shadow(shadow);
+    }
+
     /// Check if water refraction is enabled
     pub fn is_refraction_enabled(&self) -> bool {
         self.water_system.quality() != WaterQuality::Off
@@ -1893,6 +1960,22 @@ impl Renderer {
         };
         self.grass_system.set_quality(grass_quality);
 
+        let grass_distance = match settings.grass_distance.to_uppercase().as_str() {
+            "NEAR" => grass::GrassDistance::Near,
+            "MEDIUM" => grass::GrassDistance::Medium,
+            "FAR" => grass::GrassDistance::Far,
+            "ULTRA" => grass::GrassDistance::Ultra,
+            _ => grass::GrassDistance::Medium,
+        };
+        self.grass_system.set_distance(grass_distance);
+
+        let grass_shadow = match settings.grass_shadow.to_uppercase().as_str() {
+            "OFF" => grass::GrassShadow::Off,
+            "SIMPLE" => grass::GrassShadow::Simple,
+            _ => grass::GrassShadow::Off,
+        };
+        self.grass_system.set_shadow(grass_shadow);
+
         // Apply audio settings
         self.audio_master = settings.audio_master;
         self.audio_sfx = settings.audio_sfx;
@@ -1935,6 +2018,8 @@ impl Renderer {
             scenery_quality: self.scenery_renderer.quality().as_str().to_string(),
             // Grass settings
             grass_quality: self.grass_system.quality().as_str().to_string(),
+            grass_distance: self.grass_system.distance().as_str().to_string(),
+            grass_shadow: self.grass_system.shadow().as_str().to_string(),
         }
     }
 
@@ -2291,7 +2376,7 @@ impl Renderer {
             {
                 let chunks_read = chunks.read();
                 // Collect chunks with grass within grass cull distance
-                let grass_cull_dist = self.grass_system.quality.cull_distance() * crate::constants::CHUNK_SIZE_F32;
+                let grass_cull_dist = self.grass_system.distance.cull_distance() * crate::constants::CHUNK_SIZE_F32;
                 let camera_chunk = crate::world::ChunkPos::from_world_pos(camera.position);
 
                 // Collect visible grass chunks for retention
@@ -2326,12 +2411,16 @@ impl Renderer {
                 self.grass_system.tile_buffer.retain_chunks(&visible_grass_chunks);
             }
 
-            // Update grass uniforms
+            // Update grass uniforms with day/night lighting
             self.grass_system.update(
                 &self.queue,
                 camera.view_projection_matrix(),
                 camera.position,
                 delta_time,
+                cycle.sun_direction,
+                cycle.sun_intensity,
+                cycle.sun_color,
+                cycle.ambient,
             );
         }
 
@@ -2619,9 +2708,9 @@ impl Renderer {
             triangles += scenery_count * 10; // Rough estimate of triangles per instance
 
             // === PROCEDURAL GRASS RENDER PASS ===
-            // Render procedurally generated grass blades
+            // Render procedurally generated grass blades (with voxel shadow sampling)
             if self.grass_system.quality != GrassQuality::Off {
-                self.grass_system.render(&mut render_pass);
+                self.grass_system.render(&mut render_pass, self.voxel_gi.bind_group());
                 let grass_stats = self.grass_system.get_stats();
                 triangles += grass_stats.triangle_count;
             }

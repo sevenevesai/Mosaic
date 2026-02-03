@@ -39,6 +39,7 @@ src/
 │   ├── pipeline.rs  # WGSL shaders (chunk, sky, UI)
 │   ├── water.rs     # Ray-marched water system (~900 LOC)
 │   ├── clouds.rs    # Procedural cloud system (~600 LOC)
+│   ├── grass/       # Procedural grass rendering (~950 LOC)
 │   ├── inventory_ui.rs # Hotbar/inventory UI rendering
 │   ├── gpu_culling.rs # GPU frustum culling + visibility cache (88% hit rate)
 │   ├── voxel_gi.rs  # Voxel GI: 256³ volume, DDA shadows, VCT
