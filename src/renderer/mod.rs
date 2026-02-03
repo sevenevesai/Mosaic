@@ -537,8 +537,8 @@ impl Renderer {
         let ui_pipeline = pipeline::create_ui_pipeline(&device, surface_format);
 
         // Create crosshair vertex buffer (two thin rectangles forming a +)
-        let crosshair_size = 0.02; // Size in clip space
-        let crosshair_thickness = 0.003;
+        let crosshair_size = 0.015; // Size in clip space (smaller)
+        let crosshair_thickness = 0.0015; // Finer/thinner crosshair
         let crosshair_vertices = [
             // Horizontal bar
             UiVertex { position: [-crosshair_size, -crosshair_thickness] },
@@ -3121,8 +3121,8 @@ impl Renderer {
                 occlusion_query_set: None,
             });
 
-            // Render crosshair (UI, no depth) - hide when inventory is open
-            if !inventory.is_open {
+            // Render crosshair (UI, no depth) - hide when inventory or menu is open
+            if !inventory.is_open && menu_data.is_none() {
                 render_pass.set_pipeline(&self.ui_pipeline);
                 render_pass.set_vertex_buffer(0, self.crosshair_vertex_buffer.slice(..));
                 render_pass.draw(0..12, 0..1);
