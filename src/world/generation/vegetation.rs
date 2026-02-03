@@ -463,8 +463,8 @@ impl<'a> VegetationGenerator<'a> {
         1
     }
 
-    /// Generate grass tiles for procedural grass rendering
-    /// Each tile covers a 4x4 block area and contains placement data for GPU generation
+    /// Generate grass tiles using "grass bomb" system
+    /// Drops density points that create radial falloff patterns
     pub fn generate_grass_tiles<F, B>(
         &self,
         chunk: &mut Chunk,
@@ -489,98 +489,128 @@ impl<'a> VegetationGenerator<'a> {
             get_height(world_x + 15, world_z + 15),
         ];
 
-        let min_height = *sample_heights.iter().min().unwrap();
-        let max_height = *sample_heights.iter().max().unwrap();
+        let min_sample = *sample_heights.iter().min().unwrap();
+        let max_sample = *sample_heights.iter().max().unwrap();
 
         // Skip if chunk is entirely above or below terrain
-        if world_y > max_height + 2 || chunk_top < min_height - 2 {
+        if world_y > max_sample + 2 || chunk_top < min_sample - 2 {
             return;
         }
 
-        // Tile size is 4x4 blocks, so 4 tiles per chunk edge = 16 tiles max
-        const TILE_SIZE: i32 = 4;
-        const TILES_PER_EDGE: i32 = CHUNK_SIZE_I32 / TILE_SIZE;
+        // Pre-allocate for per-block tiles
+        chunk.ensure_grass_data_with_capacity(180);
 
-        // Pre-allocate for up to 16 tiles
-        chunk.ensure_grass_data_with_capacity(16);
+        // === GRASS BOMB PARAMETERS ===
+        // Bomb grid spacing (lower = more bombs = denser grass)
+        let bomb_spacing = 6; // One potential bomb per 6x6 area
+        let bomb_radius = 5.0f32; // Max influence radius in blocks
+        let bomb_probability = 0.7f32; // Chance a grid cell has a bomb
 
-        for tz in 0..TILES_PER_EDGE {
-            for tx in 0..TILES_PER_EDGE {
-                // Tile center in world coordinates
-                let tile_center_x = world_x + tx * TILE_SIZE + TILE_SIZE / 2;
-                let tile_center_z = world_z + tz * TILE_SIZE + TILE_SIZE / 2;
+        // Scan nearby bomb grid cells that could affect this chunk
+        let bomb_search_radius = (bomb_radius / bomb_spacing as f32).ceil() as i32 + 1;
+        let chunk_bomb_x = world_x / bomb_spacing;
+        let chunk_bomb_z = world_z / bomb_spacing;
 
-                // Sample multiple points in the tile to determine grass coverage
-                let mut grass_blocks = 0;
-                let mut min_height = f32::MAX;
-                let mut max_height = f32::MIN;
+        // Collect bomb centers that could affect this chunk
+        let mut bombs: Vec<(f32, f32, f32)> = Vec::with_capacity(32); // (x, z, strength)
 
-                for dz in 0..TILE_SIZE {
-                    for dx in 0..TILE_SIZE {
-                        let wx = world_x + tx * TILE_SIZE + dx;
-                        let wz = world_z + tz * TILE_SIZE + dz;
-
-                        let terrain_height = get_height(wx, wz);
-
-                        // Check if surface is in this chunk
-                        if terrain_height < world_y || terrain_height >= chunk_top {
-                            continue;
-                        }
-
-                        // Local Y of surface
-                        let surface_ly = (terrain_height - world_y) as usize;
-
-                        // Check surface block
-                        let lx = (tx * TILE_SIZE + dx) as usize;
-                        let lz = (tz * TILE_SIZE + dz) as usize;
-                        let surface_block = chunk.get_block(lx, surface_ly, lz);
-
-                        if self.is_grass_surface(surface_block) {
-                            grass_blocks += 1;
-                            min_height = min_height.min(terrain_height as f32);
-                            max_height = max_height.max(terrain_height as f32);
-                        }
-                    }
-                }
-
-                // Need at least 4 grass blocks (25% coverage) to place a tile
-                if grass_blocks < 4 {
+        for bz in (chunk_bomb_z - bomb_search_radius)..=(chunk_bomb_z + bomb_search_radius + 2) {
+            for bx in (chunk_bomb_x - bomb_search_radius)..=(chunk_bomb_x + bomb_search_radius + 2) {
+                // Deterministic check if this grid cell has a bomb
+                let cell_hash = fast_hash_3d(bx, bz, 99999);
+                if (cell_hash % 1000) as f32 / 1000.0 > bomb_probability {
                     continue;
                 }
 
-                // Skip steep slopes (height difference > 2 blocks) - grass looks bad there
-                let height_diff = max_height - min_height;
-                if height_diff > 2.0 {
+                // Bomb position with jitter within grid cell
+                let jitter_x = ((fast_hash_3d(bx, bz, 11111) % 1000) as f32 / 1000.0 - 0.5) * (bomb_spacing as f32 * 0.8);
+                let jitter_z = ((fast_hash_3d(bx, bz, 22222) % 1000) as f32 / 1000.0 - 0.5) * (bomb_spacing as f32 * 0.8);
+
+                let bomb_x = (bx * bomb_spacing) as f32 + bomb_spacing as f32 * 0.5 + jitter_x;
+                let bomb_z = (bz * bomb_spacing) as f32 + bomb_spacing as f32 * 0.5 + jitter_z;
+
+                // Strength variation (0.6 to 1.0)
+                let strength = 0.6 + ((fast_hash_3d(bx, bz, 33333) % 400) as f32 / 1000.0);
+
+                bombs.push((bomb_x, bomb_z, strength));
+            }
+        }
+
+        // Per-block iteration for exact height placement
+        for lz in 0..CHUNK_SIZE_I32 {
+            for lx in 0..CHUNK_SIZE_I32 {
+                let wx = world_x + lx;
+                let wz = world_z + lz;
+                let block_x = wx as f32 + 0.5;
+                let block_z = wz as f32 + 0.5;
+
+                let terrain_height = get_height(wx, wz);
+
+                // Check if surface is in this chunk
+                if terrain_height < world_y || terrain_height >= chunk_top {
                     continue;
                 }
 
-                // Use minimum height so grass never floats above terrain
-                let surface_height = min_height;
+                // Local Y of surface
+                let surface_ly = (terrain_height - world_y) as usize;
 
-                // Get biome at tile center
-                let biome = get_biome(tile_center_x, tile_center_z);
+                // Check surface block is grass-capable
+                let surface_block = chunk.get_block(lx as usize, surface_ly, lz as usize);
+                if !self.is_grass_surface(surface_block) {
+                    continue;
+                }
 
-                // Skip biomes without grass
+                // Get biome
+                let biome = get_biome(wx, wz);
                 if !self.biome_has_grass(biome) {
                     continue;
                 }
 
-                // Density modulation based on noise
-                let density_mult = self.noise.get_density(tile_center_x, tile_center_z);
+                // === GRASS BOMB DENSITY CALCULATION ===
+                // Calculate density from all nearby bombs using radial falloff
+                let mut total_density = 0.0f32;
 
-                // Blade count based on coverage and density (1-10 blades)
-                let base_blades = (grass_blocks as f32 / 16.0 * 6.0 * density_mult) as u8;
-                let blade_count = base_blades.clamp(1, 10);
+                for (bomb_x, bomb_z, bomb_strength) in &bombs {
+                    let dx = block_x - bomb_x;
+                    let dz = block_z - bomb_z;
+                    let dist = (dx * dx + dz * dz).sqrt();
+
+                    if dist < bomb_radius {
+                        // Smooth falloff: 1.0 at center, 0.0 at radius
+                        // Using smoothstep-like curve for natural fade
+                        let t = dist / bomb_radius;
+                        let falloff = 1.0 - t * t * (3.0 - 2.0 * t); // Smoothstep
+                        total_density += falloff * bomb_strength;
+                    }
+                }
+
+                // Add subtle base noise for fine detail variation
+                let detail_noise = self.noise.density_noise.get([
+                    wx as f64 * 0.3 + 100.0,
+                    wz as f64 * 0.3 + 100.0,
+                ]) as f32;
+                let detail_factor = (detail_noise + 1.0) * 0.15; // Small 0-0.3 contribution
+                total_density += detail_factor;
+
+                // Clamp density
+                let density = total_density.clamp(0.0, 1.5);
+
+                // Skip very sparse areas
+                if density < 0.15 {
+                    continue;
+                }
+
+                // Blade count scales with density: 1-8 blades per block
+                let blade_count = (density * 6.0).clamp(1.0, 8.0) as u8;
 
                 // Seed for deterministic placement
-                let seed = fast_hash_3d(tile_center_x, tile_center_z, world_y) as u16;
+                let seed = fast_hash_3d(wx, wz, terrain_height) as u16;
 
-                // Create grass tile
-                // Surface height is the Y of the surface block, grass grows on TOP of it
+                // Create grass tile at exact block position
                 let tile = crate::renderer::grass::GrassTile::new(
-                    tile_center_x as f32,
-                    tile_center_z as f32,
-                    surface_height + 1.0, // +1 to place grass on top of surface block
+                    block_x,
+                    block_z,
+                    terrain_height as f32 + 1.0, // +1 to place grass on top of surface block
                     blade_count,
                     biome,
                     seed,

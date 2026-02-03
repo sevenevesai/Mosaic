@@ -31,14 +31,14 @@ pub enum GrassQuality {
 }
 
 impl GrassQuality {
-    /// Blades per tile (4x4 block area) - bunched together
+    /// Max blades per block (per-block placement, noise determines actual count 1-8)
     pub fn blades_per_tile(&self) -> u32 {
         match self {
             GrassQuality::Off => 0,
-            GrassQuality::Low => 6,
-            GrassQuality::Medium => 12,
-            GrassQuality::High => 18,
-            GrassQuality::Ultra => 24,
+            GrassQuality::Low => 4,     // Max 4 blades per block
+            GrassQuality::Medium => 6,  // Max 6 blades per block
+            GrassQuality::High => 8,    // Max 8 blades per block
+            GrassQuality::Ultra => 8,   // Max 8 blades per block (noise caps at 8)
         }
     }
 
@@ -86,14 +86,14 @@ impl GrassQuality {
         }
     }
 
-    /// Maximum tiles that can be rendered
+    /// Maximum tiles that can be rendered (per-block placement needs more)
     pub fn max_tiles(&self) -> u32 {
         match self {
             GrassQuality::Off => 0,
-            GrassQuality::Low => 8_000,
-            GrassQuality::Medium => 24_000,
-            GrassQuality::High => 48_000,
-            GrassQuality::Ultra => 96_000,
+            GrassQuality::Low => 32_000,
+            GrassQuality::Medium => 96_000,
+            GrassQuality::High => 192_000,
+            GrassQuality::Ultra => 384_000,
         }
     }
 

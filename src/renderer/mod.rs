@@ -2294,12 +2294,10 @@ impl Renderer {
                 let grass_cull_dist = self.grass_system.quality.cull_distance() * crate::constants::CHUNK_SIZE_F32;
                 let camera_chunk = crate::world::ChunkPos::from_world_pos(camera.position);
 
-                for (pos, chunk) in chunks_read.iter() {
-                    // Skip if chunk doesn't have grass
-                    if !chunk.has_grass() {
-                        continue;
-                    }
+                // Collect visible grass chunks for retention
+                let mut visible_grass_chunks = Vec::new();
 
+                for (pos, chunk) in chunks_read.iter() {
                     // Distance check (in chunks)
                     let dx = (pos.x - camera_chunk.x).abs() as f32;
                     let dz = (pos.z - camera_chunk.z).abs() as f32;
@@ -2307,6 +2305,13 @@ impl Renderer {
                     if chunk_dist > grass_cull_dist {
                         continue;
                     }
+
+                    // Skip if chunk doesn't have grass
+                    if !chunk.has_grass() {
+                        continue;
+                    }
+
+                    visible_grass_chunks.push(*pos);
 
                     // Upload grass tiles if not already present
                     if !self.grass_system.tile_buffer.has_chunk(pos) {
@@ -2316,6 +2321,9 @@ impl Renderer {
                         }
                     }
                 }
+
+                // Remove grass from chunks no longer visible
+                self.grass_system.tile_buffer.retain_chunks(&visible_grass_chunks);
             }
 
             // Update grass uniforms

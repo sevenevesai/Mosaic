@@ -137,22 +137,33 @@ fn vs_grass(
     let tile = tiles[tile_idx];
 
     // Unpack tile data
+    let actual_blade_count = unpack_blade_count(tile.density_seed);
     let surface_y = unpack_surface_y(tile.biome_height);
     let biome_id = unpack_biome(tile.biome_height);
     let tile_seed = unpack_seed(tile.density_seed);
     let height_var = unpack_height_var(tile.density_seed);
 
+    // Skip blades beyond actual count for this tile (noise-driven density)
+    if (blade_idx >= actual_blade_count) {
+        out.position = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+        out.color = vec3<f32>(0.0);
+        out.world_pos = vec3<f32>(0.0);
+        out.normal = vec3<f32>(0.0, 1.0, 0.0);
+        out.height_factor = 0.0;
+        return out;
+    }
+
     // Per-blade deterministic values using hash
     let blade_seed = hash(tile_seed * 7919u + blade_idx * 12345u);
 
-    // Bunched grass: tighter clustering within tile (±0.6 instead of ±1.8)
-    let offset_x = hash_float_signed(blade_seed) * 0.6;
-    let offset_z = hash_float_signed(blade_seed + 1u) * 0.6;
+    // Per-block placement: spread blades within the single block (±0.4 from center)
+    let offset_x = hash_float_signed(blade_seed) * 0.4;
+    let offset_z = hash_float_signed(blade_seed + 1u) * 0.4;
     let rotation = hash_float(blade_seed + 2u) * 6.28318;         // 0 to 2PI
-    let height_mult = 0.8 + hash_float(blade_seed + 3u) * 0.4;    // 0.8 to 1.2
+    let height_mult = 0.85 + hash_float(blade_seed + 3u) * 0.3;   // 0.85 to 1.15
     let curve_dir = hash_float_signed(blade_seed + 4u);           // Curve direction
 
-    // Blade base position (tile center + offset)
+    // Blade base position (block center + offset)
     let base_pos = vec3<f32>(
         tile.position.x + offset_x,
         surface_y,
