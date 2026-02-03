@@ -382,6 +382,74 @@ impl Default for ChunkPropData {
     }
 }
 
+// ============ GRASS TILE DATA ============
+
+/// A grass tile for procedural grass rendering (16 bytes)
+/// Re-exported from renderer::grass for storage in chunks
+pub use crate::renderer::grass::GrassTile;
+
+/// Storage for grass tiles within a chunk
+/// Typically 0-16 tiles per surface chunk (4x4 tile grid)
+pub struct ChunkGrassData {
+    /// Grass tiles in this chunk
+    tiles: Vec<GrassTile>,
+}
+
+impl ChunkGrassData {
+    pub fn new() -> Self {
+        Self {
+            tiles: Vec::new(),
+        }
+    }
+
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            tiles: Vec::with_capacity(capacity),
+        }
+    }
+
+    /// Add a grass tile
+    #[inline]
+    pub fn add(&mut self, tile: GrassTile) {
+        self.tiles.push(tile);
+    }
+
+    /// Get number of tiles
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.tiles.len()
+    }
+
+    /// Check if empty
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.tiles.is_empty()
+    }
+
+    /// Iterate over tiles
+    #[inline]
+    pub fn iter(&self) -> impl Iterator<Item = &GrassTile> {
+        self.tiles.iter()
+    }
+
+    /// Get tiles as slice
+    #[inline]
+    pub fn tiles(&self) -> &[GrassTile] {
+        &self.tiles
+    }
+
+    /// Clear all tiles
+    pub fn clear(&mut self) {
+        self.tiles.clear();
+    }
+}
+
+impl Default for ChunkGrassData {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Position of a chunk in chunk coordinates
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ChunkPos {
@@ -847,6 +915,8 @@ pub struct Chunk {
     water: Option<Box<ChunkWaterData>>,
     /// Optional prop placement data - only allocated if chunk has surface vegetation
     props: Option<Box<ChunkPropData>>,
+    /// Optional grass tile data - only allocated if chunk has grass-capable surface
+    grass: Option<Box<ChunkGrassData>>,
     /// Count of solid blocks for fast empty/full detection
     /// Used to skip meshing for air-only chunks (solid_count == 0)
     solid_count: u16,
@@ -859,6 +929,7 @@ impl Chunk {
             light: Box::new([0u8; CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE]),
             water: None,
             props: None,
+            grass: None,
             solid_count: 0,
         }
     }
@@ -1179,6 +1250,61 @@ impl Chunk {
             }
         }
         None
+    }
+
+    // ============ GRASS TILE METHODS ============
+
+    /// Get reference to grass data if present
+    #[inline]
+    pub fn grass_data(&self) -> Option<&ChunkGrassData> {
+        self.grass.as_deref()
+    }
+
+    /// Get mutable reference to grass data if present
+    #[inline]
+    pub fn grass_data_mut(&mut self) -> Option<&mut ChunkGrassData> {
+        self.grass.as_deref_mut()
+    }
+
+    /// Ensure grass data is allocated and return mutable reference
+    pub fn ensure_grass_data(&mut self) -> &mut ChunkGrassData {
+        if self.grass.is_none() {
+            self.grass = Some(Box::new(ChunkGrassData::new()));
+        }
+        self.grass.as_deref_mut().unwrap()
+    }
+
+    /// Ensure grass data with capacity hint
+    pub fn ensure_grass_data_with_capacity(&mut self, capacity: usize) -> &mut ChunkGrassData {
+        if self.grass.is_none() {
+            self.grass = Some(Box::new(ChunkGrassData::with_capacity(capacity)));
+        }
+        self.grass.as_deref_mut().unwrap()
+    }
+
+    /// Add a grass tile (allocates grass data if needed)
+    pub fn add_grass_tile(&mut self, tile: GrassTile) {
+        self.ensure_grass_data().add(tile);
+    }
+
+    /// Clear all grass data from this chunk
+    pub fn clear_grass(&mut self) {
+        self.grass = None;
+    }
+
+    /// Iterate over all grass tiles (empty iterator if no grass)
+    pub fn iter_grass_tiles(&self) -> impl Iterator<Item = &GrassTile> {
+        self.grass.iter().flat_map(|g| g.iter())
+    }
+
+    /// Get grass tiles as slice (empty slice if no grass)
+    pub fn grass_tiles(&self) -> &[GrassTile] {
+        self.grass.as_ref().map(|g| g.tiles()).unwrap_or(&[])
+    }
+
+    /// Check if chunk has any grass tiles
+    pub fn has_grass(&self) -> bool {
+        self.grass.as_ref().map(|g| !g.is_empty()).unwrap_or(false)
     }
 }
 

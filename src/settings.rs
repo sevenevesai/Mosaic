@@ -54,6 +54,10 @@ pub struct Settings {
     /// Scenery quality preset: OFF, LOW, MEDIUM, HIGH, ULTRA
     pub scenery_quality: String,
 
+    // === GRASS SETTINGS ===
+    /// Grass quality preset: OFF, LOW, MEDIUM, HIGH, ULTRA
+    pub grass_quality: String,
+
     // === AUDIO SETTINGS ===
     /// Master volume (0.0 - 1.0)
     pub audio_master: f32,
@@ -93,6 +97,8 @@ impl Default for Settings {
             cloud_shadows: true,                   // Cloud shadows on by default
             // Scenery defaults
             scenery_quality: "MEDIUM".to_string(),  // Default scenery quality
+            // Grass defaults
+            grass_quality: "MEDIUM".to_string(),    // Default grass quality
             // Audio defaults
             audio_master: 0.8,   // 80% master volume
             audio_sfx: 1.0,      // 100% SFX
@@ -239,6 +245,10 @@ impl Settings {
                     "scenery_quality" => {
                         settings.scenery_quality = value.to_string();
                     }
+                    // Grass settings
+                    "grass_quality" => {
+                        settings.grass_quality = value.to_string();
+                    }
                     // Audio settings
                     "audio_master" => {
                         if let Ok(v) = value.parse() {
@@ -295,6 +305,8 @@ impl Settings {
              cloud_shadows={}\n\
              # Scenery Settings\n\
              scenery_quality={}\n\
+             # Grass Settings\n\
+             grass_quality={}\n\
              # Audio Settings\n\
              audio_master={}\n\
              audio_sfx={}\n\
@@ -324,6 +336,7 @@ impl Settings {
             self.cloud_speed,
             self.cloud_shadows,
             self.scenery_quality,
+            self.grass_quality,
             self.audio_master,
             self.audio_sfx,
             self.audio_ambient,

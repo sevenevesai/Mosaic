@@ -394,6 +394,18 @@ impl SettingsMenu {
                 set_float: |_, _| {},
             },
             MenuItem {
+                label: "GRASS",
+                tab: MenuTab::Graphics,
+                control_type: ControlType::EnumCycle,
+                get_value: |r| r.grass_quality().as_str().to_string(),
+                get_index: |r| r.grass_quality() as usize,
+                get_float: |_| 0.0,
+                cycle_next: |r| { r.cycle_grass_quality(); },
+                cycle_prev: |r| { r.cycle_grass_quality_prev(); },
+                set_index: |r, i| { r.set_grass_quality_index(i); },
+                set_float: |_, _| {},
+            },
+            MenuItem {
                 label: "EXTENDED VIEW",
                 tab: MenuTab::Graphics,
                 control_type: ControlType::EnumCycle,

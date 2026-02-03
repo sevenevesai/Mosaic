@@ -141,6 +141,9 @@ fn generate_chunk_with_generator(pos: ChunkPos, generator: &TerrainGenerator) ->
     // Add vegetation (grass, flowers, rocks)
     generator.add_vegetation(&mut chunk, pos);
 
+    // Generate grass tiles for procedural grass rendering
+    generator.add_grass_tiles(&mut chunk, pos);
+
     // Generate water heightfield data
     generator.generate_water_heightfield(&mut chunk, pos);
 
@@ -663,6 +666,18 @@ impl TerrainGenerator {
         let veg_generator = VegetationGenerator::new(&self.vegetation_noise);
 
         veg_generator.add_vegetation(
+            chunk,
+            pos,
+            |x, z| self.get_terrain_height(x, z),
+            |x, z| self.biome_registry.get_biome_id(x, z),
+        );
+    }
+
+    /// Generate grass tiles for procedural grass rendering
+    fn add_grass_tiles(&self, chunk: &mut Chunk, pos: ChunkPos) {
+        let veg_generator = VegetationGenerator::new(&self.vegetation_noise);
+
+        veg_generator.generate_grass_tiles(
             chunk,
             pos,
             |x, z| self.get_terrain_height(x, z),

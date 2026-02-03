@@ -21,6 +21,23 @@ pub enum BiomeId {
     Ocean = 7,
 }
 
+impl BiomeId {
+    /// Convert from u8, defaulting to Grasslands for invalid values
+    pub fn from_u8(value: u8) -> Self {
+        match value {
+            0 => BiomeId::Grasslands,
+            1 => BiomeId::CavernousHighlands,
+            2 => BiomeId::Desert,
+            3 => BiomeId::Tundra,
+            4 => BiomeId::Jungle,
+            5 => BiomeId::Swamp,
+            6 => BiomeId::Mountains,
+            7 => BiomeId::Ocean,
+            _ => BiomeId::Grasslands,
+        }
+    }
+}
+
 /// Parameters controlling terrain shape for a biome
 #[derive(Debug, Clone)]
 pub struct TerrainParams {

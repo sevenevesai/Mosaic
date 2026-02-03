@@ -462,6 +462,149 @@ impl<'a> VegetationGenerator<'a> {
 
         1
     }
+
+    /// Generate grass tiles for procedural grass rendering
+    /// Each tile covers a 4x4 block area and contains placement data for GPU generation
+    pub fn generate_grass_tiles<F, B>(
+        &self,
+        chunk: &mut Chunk,
+        pos: ChunkPos,
+        get_height: F,
+        get_biome: B,
+    ) where
+        F: Fn(i32, i32) -> i32,
+        B: Fn(i32, i32) -> BiomeId,
+    {
+        let world_x = pos.x * CHUNK_SIZE_I32;
+        let world_y = pos.y * CHUNK_SIZE_I32;
+        let world_z = pos.z * CHUNK_SIZE_I32;
+        let chunk_top = world_y + CHUNK_SIZE_I32;
+
+        // Sample heights to check if any surface is in this chunk
+        let sample_heights = [
+            get_height(world_x, world_z),
+            get_height(world_x + 8, world_z),
+            get_height(world_x, world_z + 8),
+            get_height(world_x + 8, world_z + 8),
+            get_height(world_x + 15, world_z + 15),
+        ];
+
+        let min_height = *sample_heights.iter().min().unwrap();
+        let max_height = *sample_heights.iter().max().unwrap();
+
+        // Skip if chunk is entirely above or below terrain
+        if world_y > max_height + 2 || chunk_top < min_height - 2 {
+            return;
+        }
+
+        // Tile size is 4x4 blocks, so 4 tiles per chunk edge = 16 tiles max
+        const TILE_SIZE: i32 = 4;
+        const TILES_PER_EDGE: i32 = CHUNK_SIZE_I32 / TILE_SIZE;
+
+        // Pre-allocate for up to 16 tiles
+        chunk.ensure_grass_data_with_capacity(16);
+
+        for tz in 0..TILES_PER_EDGE {
+            for tx in 0..TILES_PER_EDGE {
+                // Tile center in world coordinates
+                let tile_center_x = world_x + tx * TILE_SIZE + TILE_SIZE / 2;
+                let tile_center_z = world_z + tz * TILE_SIZE + TILE_SIZE / 2;
+
+                // Sample multiple points in the tile to determine grass coverage
+                let mut grass_blocks = 0;
+                let mut min_height = f32::MAX;
+                let mut max_height = f32::MIN;
+
+                for dz in 0..TILE_SIZE {
+                    for dx in 0..TILE_SIZE {
+                        let wx = world_x + tx * TILE_SIZE + dx;
+                        let wz = world_z + tz * TILE_SIZE + dz;
+
+                        let terrain_height = get_height(wx, wz);
+
+                        // Check if surface is in this chunk
+                        if terrain_height < world_y || terrain_height >= chunk_top {
+                            continue;
+                        }
+
+                        // Local Y of surface
+                        let surface_ly = (terrain_height - world_y) as usize;
+
+                        // Check surface block
+                        let lx = (tx * TILE_SIZE + dx) as usize;
+                        let lz = (tz * TILE_SIZE + dz) as usize;
+                        let surface_block = chunk.get_block(lx, surface_ly, lz);
+
+                        if self.is_grass_surface(surface_block) {
+                            grass_blocks += 1;
+                            min_height = min_height.min(terrain_height as f32);
+                            max_height = max_height.max(terrain_height as f32);
+                        }
+                    }
+                }
+
+                // Need at least 4 grass blocks (25% coverage) to place a tile
+                if grass_blocks < 4 {
+                    continue;
+                }
+
+                // Skip steep slopes (height difference > 2 blocks) - grass looks bad there
+                let height_diff = max_height - min_height;
+                if height_diff > 2.0 {
+                    continue;
+                }
+
+                // Use minimum height so grass never floats above terrain
+                let surface_height = min_height;
+
+                // Get biome at tile center
+                let biome = get_biome(tile_center_x, tile_center_z);
+
+                // Skip biomes without grass
+                if !self.biome_has_grass(biome) {
+                    continue;
+                }
+
+                // Density modulation based on noise
+                let density_mult = self.noise.get_density(tile_center_x, tile_center_z);
+
+                // Blade count based on coverage and density (1-10 blades)
+                let base_blades = (grass_blocks as f32 / 16.0 * 6.0 * density_mult) as u8;
+                let blade_count = base_blades.clamp(1, 10);
+
+                // Seed for deterministic placement
+                let seed = fast_hash_3d(tile_center_x, tile_center_z, world_y) as u16;
+
+                // Create grass tile
+                // Surface height is the Y of the surface block, grass grows on TOP of it
+                let tile = crate::renderer::grass::GrassTile::new(
+                    tile_center_x as f32,
+                    tile_center_z as f32,
+                    surface_height + 1.0, // +1 to place grass on top of surface block
+                    blade_count,
+                    biome,
+                    seed,
+                );
+
+                chunk.add_grass_tile(tile);
+            }
+        }
+    }
+
+    /// Check if a block supports grass growth (for tile generation)
+    #[inline]
+    fn is_grass_surface(&self, block: Block) -> bool {
+        matches!(
+            block,
+            Block::Grass | Block::Dirt | Block::JungleGrass | Block::SnowGrass
+        )
+    }
+
+    /// Check if a biome supports grass
+    #[inline]
+    fn biome_has_grass(&self, biome: BiomeId) -> bool {
+        !matches!(biome, BiomeId::Desert | BiomeId::Ocean)
+    }
 }
 
 #[cfg(test)]

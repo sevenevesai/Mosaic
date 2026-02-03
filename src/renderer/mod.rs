@@ -5,7 +5,10 @@
 mod bloom;
 mod camera;
 mod chunk_pool;
+mod clouds;
 mod debug_overlay;
+mod dof;
+pub mod grass;
 mod gpu_culling;
 mod impostor;
 mod inventory_ui;
@@ -16,13 +19,11 @@ pub mod prop_registry;
 mod refraction;
 mod scenery_renderer;
 mod ssao;
-mod dof;
 mod texture;
 pub mod voxel_gi;
 mod volumetrics;
 pub mod vox_loader;
 mod water;
-mod clouds;
 
 pub use bloom::Bloom;
 pub use camera::{Camera, Frustum};
@@ -42,6 +43,7 @@ pub use vox_loader::{VoxModel, VoxMesh};
 pub use volumetrics::VolumetricLighting;
 pub use water::{Water, WaterQuality};
 pub use clouds::{Clouds, CloudQuality};
+pub use grass::{GrassSystem, GrassQuality, GrassTile, BiomePalette, GrassStats};
 
 /// Display mode for the window
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -246,6 +248,9 @@ pub struct Renderer {
 
     // Impostor rendering for distant chunks
     impostor_renderer: ImpostorRenderer,
+
+    // Procedural grass rendering
+    grass_system: GrassSystem,
 }
 
 impl Renderer {
@@ -703,6 +708,14 @@ impl Renderer {
         // Create impostor renderer for distant chunks
         let impostor_renderer = ImpostorRenderer::new(&device, surface_format);
 
+        // Create procedural grass system
+        let grass_system = GrassSystem::new(
+            &device,
+            GrassQuality::Medium,
+            surface_format,
+            wgpu::TextureFormat::Depth32Float,
+        );
+
         Self {
             surface,
             device,
@@ -769,6 +782,7 @@ impl Renderer {
             prop_registry,
             scenery_renderer,
             impostor_renderer,
+            grass_system,
         }
     }
 
@@ -1657,6 +1671,41 @@ impl Renderer {
         self.scenery_renderer.set_quality(quality);
     }
 
+    // ========================================================================
+    // GRASS QUALITY SETTINGS
+    // ========================================================================
+
+    /// Get current grass quality
+    pub fn grass_quality(&self) -> grass::GrassQuality {
+        self.grass_system.quality()
+    }
+
+    /// Cycle grass quality: Off -> Low -> Medium -> High -> Ultra -> Off
+    pub fn cycle_grass_quality(&mut self) -> grass::GrassQuality {
+        let new_quality = self.grass_system.quality().cycle_next();
+        self.grass_system.set_quality(new_quality);
+        tracing::info!("Grass Quality: {}", new_quality.as_str());
+        new_quality
+    }
+
+    /// Cycle grass quality backwards
+    pub fn cycle_grass_quality_prev(&mut self) -> grass::GrassQuality {
+        let new_quality = self.grass_system.quality().cycle_prev();
+        self.grass_system.set_quality(new_quality);
+        new_quality
+    }
+
+    /// Set grass quality directly
+    pub fn set_grass_quality(&mut self, quality: grass::GrassQuality) {
+        self.grass_system.set_quality(quality);
+    }
+
+    /// Set grass quality by index (0=Off, 1=Low, 2=Medium, 3=High, 4=Ultra)
+    pub fn set_grass_quality_index(&mut self, index: usize) {
+        let quality = grass::GrassQuality::from_index(index);
+        self.grass_system.set_quality(quality);
+    }
+
     /// Check if water refraction is enabled
     pub fn is_refraction_enabled(&self) -> bool {
         self.water_system.quality() != WaterQuality::Off
@@ -1833,6 +1882,17 @@ impl Renderer {
         };
         self.scenery_renderer.set_quality(scenery_quality);
 
+        // Apply grass settings
+        let grass_quality = match settings.grass_quality.to_uppercase().as_str() {
+            "OFF" => grass::GrassQuality::Off,
+            "LOW" => grass::GrassQuality::Low,
+            "MEDIUM" => grass::GrassQuality::Medium,
+            "HIGH" => grass::GrassQuality::High,
+            "ULTRA" => grass::GrassQuality::Ultra,
+            _ => grass::GrassQuality::Medium,
+        };
+        self.grass_system.set_quality(grass_quality);
+
         // Apply audio settings
         self.audio_master = settings.audio_master;
         self.audio_sfx = settings.audio_sfx;
@@ -1873,6 +1933,8 @@ impl Renderer {
             cloud_shadows: self.clouds.shadows_enabled,
             // Scenery settings
             scenery_quality: self.scenery_renderer.quality().as_str().to_string(),
+            // Grass settings
+            grass_quality: self.grass_system.quality().as_str().to_string(),
         }
     }
 
@@ -2223,6 +2285,48 @@ impl Renderer {
         let wind_dir = glam::Vec3::new(1.0, 0.0, 0.3).normalize();
         self.scenery_renderer.upload(&self.queue, current_time, wind_dir, 1.0);
 
+        // === PROCEDURAL GRASS UPDATE ===
+        // Collect grass tiles from visible chunks and update grass system
+        if self.grass_system.quality != GrassQuality::Off {
+            {
+                let chunks_read = chunks.read();
+                // Collect chunks with grass within grass cull distance
+                let grass_cull_dist = self.grass_system.quality.cull_distance() * crate::constants::CHUNK_SIZE_F32;
+                let camera_chunk = crate::world::ChunkPos::from_world_pos(camera.position);
+
+                for (pos, chunk) in chunks_read.iter() {
+                    // Skip if chunk doesn't have grass
+                    if !chunk.has_grass() {
+                        continue;
+                    }
+
+                    // Distance check (in chunks)
+                    let dx = (pos.x - camera_chunk.x).abs() as f32;
+                    let dz = (pos.z - camera_chunk.z).abs() as f32;
+                    let chunk_dist = (dx * dx + dz * dz).sqrt() * crate::constants::CHUNK_SIZE_F32;
+                    if chunk_dist > grass_cull_dist {
+                        continue;
+                    }
+
+                    // Upload grass tiles if not already present
+                    if !self.grass_system.tile_buffer.has_chunk(pos) {
+                        let tiles = chunk.grass_tiles();
+                        if !tiles.is_empty() {
+                            self.grass_system.tile_buffer.upload_chunk(&self.queue, *pos, tiles);
+                        }
+                    }
+                }
+            }
+
+            // Update grass uniforms
+            self.grass_system.update(
+                &self.queue,
+                camera.view_projection_matrix(),
+                camera.position,
+                delta_time,
+            );
+        }
+
         // GPU per-pass timing with double-buffered staging buffers
         self.gpu_profiler.begin_frame();
 
@@ -2505,6 +2609,14 @@ impl Renderer {
                 &self.camera_bind_group,
             );
             triangles += scenery_count * 10; // Rough estimate of triangles per instance
+
+            // === PROCEDURAL GRASS RENDER PASS ===
+            // Render procedurally generated grass blades
+            if self.grass_system.quality != GrassQuality::Off {
+                self.grass_system.render(&mut render_pass);
+                let grass_stats = self.grass_system.get_stats();
+                triangles += grass_stats.triangle_count;
+            }
 
             // === PROP RENDER PASS ===
             // Render voxel props (chests, etc.)
