@@ -146,6 +146,109 @@ pub fn raycast(
     None
 }
 
+/// Result of a prop raycast
+#[derive(Debug, Clone, Copy)]
+pub struct PropHit {
+    /// Chunk containing the prop
+    pub chunk_pos: ChunkPos,
+    /// World position of the prop
+    pub world_pos: [f32; 3],
+    /// Local position within chunk
+    pub local_pos: [f32; 3],
+    /// Prop type ID
+    pub prop_id: u8,
+    /// Distance from ray origin
+    pub distance: f32,
+}
+
+/// Raycast against props in the world
+/// Returns the closest prop hit within max_distance, if any
+pub fn raycast_props(
+    origin: Vec3,
+    direction: Vec3,
+    max_distance: f32,
+    chunks: &AHashMap<ChunkPos, Arc<Chunk>>,
+) -> Option<PropHit> {
+    let dir = direction.normalize();
+    let mut closest_hit: Option<PropHit> = None;
+
+    // Check all loaded chunks within reach
+    // We need to check chunks the ray might pass through
+    let check_radius = (max_distance / 16.0).ceil() as i32 + 1;
+    let origin_chunk = ChunkPos::from_world_pos(origin);
+
+    for dx in -check_radius..=check_radius {
+        for dy in -check_radius..=check_radius {
+            for dz in -check_radius..=check_radius {
+                let chunk_pos = ChunkPos {
+                    x: origin_chunk.x + dx,
+                    y: origin_chunk.y + dy,
+                    z: origin_chunk.z + dz,
+                };
+
+                if let Some(chunk) = chunks.get(&chunk_pos) {
+                    if let Some(props) = chunk.prop_data() {
+                        let chunk_world_x = chunk_pos.x * CHUNK_SIZE_I32;
+                        let chunk_world_y = chunk_pos.y * CHUNK_SIZE_I32;
+                        let chunk_world_z = chunk_pos.z * CHUNK_SIZE_I32;
+
+                        for prop in props.iter() {
+                            let prop_world = Vec3::new(
+                                chunk_world_x as f32 + prop.local_x,
+                                chunk_world_y as f32 + prop.local_y,
+                                chunk_world_z as f32 + prop.local_z,
+                            );
+
+                            // Point-to-line distance check
+                            // Project prop position onto ray
+                            let to_prop = prop_world - origin;
+                            let t = to_prop.dot(dir);
+
+                            // Skip if behind ray origin or too far
+                            if t < 0.0 || t > max_distance {
+                                continue;
+                            }
+
+                            // Skip if we already have a closer hit
+                            if let Some(ref hit) = closest_hit {
+                                if t >= hit.distance {
+                                    continue;
+                                }
+                            }
+
+                            // Find closest point on ray to prop
+                            let closest_point = origin + dir * t;
+                            let distance_to_ray = (prop_world - closest_point).length();
+
+                            // Tolerance based on prop type (grass/flowers smaller, rocks larger)
+                            let tolerance = match prop.prop_id {
+                                // Grass types (0-4)
+                                0..=4 => 0.3,
+                                // Flower types (5-14)
+                                5..=14 => 0.35,
+                                // Rock/stone types (15+)
+                                _ => 0.5,
+                            };
+
+                            if distance_to_ray <= tolerance {
+                                closest_hit = Some(PropHit {
+                                    chunk_pos,
+                                    world_pos: [prop_world.x, prop_world.y, prop_world.z],
+                                    local_pos: [prop.local_x, prop.local_y, prop.local_z],
+                                    prop_id: prop.prop_id,
+                                    distance: t,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    closest_hit
+}
+
 /// Messages for chunk worker threads
 enum ChunkTask {
     Generate(ChunkPos),
@@ -806,6 +909,12 @@ impl WorldManager {
         Arc::clone(&self.chunks)
     }
 
+    /// Get a snapshot of all loaded chunks for read-only operations
+    /// Returns a copy of the chunks hashmap
+    pub fn chunks_read(&self) -> AHashMap<ChunkPos, Arc<Chunk>> {
+        self.chunks.read().clone()
+    }
+
     /// Get a block at world coordinates
     pub fn get_block(&self, x: i32, y: i32, z: i32) -> Option<Block> {
         let chunk_pos = ChunkPos {
@@ -882,6 +991,18 @@ impl WorldManager {
                             new_chunk.set_light(cx, cy, cz, old_chunk.get_light(cx, cy, cz));
                         }
                     }
+                }
+                // Copy prop data from old chunk (scenery: grass, flowers, rocks)
+                if let Some(prop_data) = old_chunk.prop_data() {
+                    let new_prop_data = new_chunk.ensure_prop_data_with_capacity(prop_data.len());
+                    for prop in prop_data.iter() {
+                        new_prop_data.add(*prop);
+                    }
+                }
+                // Copy water data if present
+                if let Some(water_data) = old_chunk.water_data() {
+                    // Water data is already handled by other systems, but ensure it's preserved
+                    let _ = water_data; // water heightfield is regenerated separately
                 }
                 // Set the new block
                 new_chunk.set_block(local_x, local_y, local_z, block);
@@ -996,6 +1117,67 @@ impl WorldManager {
         }
 
         true
+    }
+
+    /// Try to remove a prop at the given world position
+    /// Returns the prop that was removed, if any
+    pub fn try_remove_prop(&mut self, world_x: f32, world_y: f32, world_z: f32, tolerance: f32) -> Option<PropPlacement> {
+        let chunk_pos = ChunkPos {
+            x: (world_x as i32).div_euclid(CHUNK_SIZE_I32),
+            y: (world_y as i32).div_euclid(CHUNK_SIZE_I32),
+            z: (world_z as i32).div_euclid(CHUNK_SIZE_I32),
+        };
+
+        let local_x = world_x - (chunk_pos.x * CHUNK_SIZE_I32) as f32;
+        let local_y = world_y - (chunk_pos.y * CHUNK_SIZE_I32) as f32;
+        let local_z = world_z - (chunk_pos.z * CHUNK_SIZE_I32) as f32;
+
+        // Get the chunk, clone it, modify, and replace (same pattern as set_block)
+        let removed_prop = {
+            let mut chunks = self.chunks.write();
+            if let Some(old_chunk) = chunks.get(&chunk_pos) {
+                let mut new_chunk = Chunk::new();
+                // Copy all blocks and light data
+                for cz in 0..16 {
+                    for cy in 0..16 {
+                        for cx in 0..16 {
+                            new_chunk.set_block(cx, cy, cz, old_chunk.get_block(cx, cy, cz));
+                            new_chunk.set_light(cx, cy, cz, old_chunk.get_light(cx, cy, cz));
+                        }
+                    }
+                }
+                // Copy prop data, but try to remove the target prop
+                let mut removed: Option<PropPlacement> = None;
+                if let Some(prop_data) = old_chunk.prop_data() {
+                    let new_prop_data = new_chunk.ensure_prop_data_with_capacity(prop_data.len());
+                    for prop in prop_data.iter() {
+                        let dx = prop.local_x - local_x;
+                        let dy = prop.local_y - local_y;
+                        let dz = prop.local_z - local_z;
+                        if removed.is_none() && dx * dx + dy * dy + dz * dz < tolerance * tolerance {
+                            removed = Some(*prop);
+                            // Skip adding this prop - it's removed
+                        } else {
+                            new_prop_data.add(*prop);
+                        }
+                    }
+                }
+                chunks.insert(chunk_pos, Arc::new(new_chunk));
+                removed
+            } else {
+                None
+            }
+        };
+
+        if removed_prop.is_some() {
+            tracing::debug!("Removed prop at ({:.2}, {:.2}, {:.2})", world_x, world_y, world_z);
+            // Mark chunk as dirty for saving
+            if let Some(ref storage) = self.storage {
+                storage.lock().mark_dirty(chunk_pos);
+            }
+        }
+
+        removed_prop
     }
 
     #[allow(dead_code)]

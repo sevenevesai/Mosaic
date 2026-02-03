@@ -183,9 +183,18 @@ impl VoxMesh {
     pub fn from_model(device: &wgpu::Device, model: &VoxModel, scale: f32) -> Self {
         let (vertices, indices) = Self::generate_mesh(model, scale);
 
-        // Calculate actual height from voxel bounds (not model.size which may have empty space)
-        let min_z = model.voxels.iter().map(|v| v.z).min().unwrap_or(0);
-        let max_z = model.voxels.iter().map(|v| v.z).max().unwrap_or(0);
+        // Filter to visible voxels only (same logic as generate_mesh)
+        let visible_voxels: Vec<_> = model.voxels.iter()
+            .filter(|v| {
+                let color = model.palette[v.color_index as usize];
+                // Skip transparent or pure white
+                color[3] != 0 && !(color[0] == 255 && color[1] == 255 && color[2] == 255)
+            })
+            .collect();
+
+        // Calculate actual height from visible voxel bounds
+        let min_z = visible_voxels.iter().map(|v| v.z).min().unwrap_or(0);
+        let max_z = visible_voxels.iter().map(|v| v.z).max().unwrap_or(0);
         let actual_height = (max_z - min_z + 1) as f32 * scale;
 
         // Center is at (0, half_height, 0) since mesh is centered horizontally with base at Y=0
@@ -228,19 +237,40 @@ impl VoxMesh {
             return (vertices, indices);
         }
 
-        // Build a lookup set for fast neighbor checking (in vox coords)
+        // Filter out transparent voxels (alpha == 0) and pure white (#FFFFFF) which is used as empty
+        let is_visible_voxel = |color_index: u8| -> bool {
+            let color = model.palette[color_index as usize];
+            // Skip if alpha is 0 (transparent)
+            if color[3] == 0 {
+                return false;
+            }
+            // Skip if pure white (often used as empty/fill in MagicaVoxel exports)
+            if color[0] == 255 && color[1] == 255 && color[2] == 255 {
+                return false;
+            }
+            true
+        };
+
+        // Build a lookup set for fast neighbor checking (only visible voxels)
         let mut voxel_set: HashMap<(u8, u8, u8), u8> = HashMap::new();
         for voxel in &model.voxels {
-            voxel_set.insert((voxel.x, voxel.y, voxel.z), voxel.color_index);
+            if is_visible_voxel(voxel.color_index) {
+                voxel_set.insert((voxel.x, voxel.y, voxel.z), voxel.color_index);
+            }
         }
 
-        // Find min/max bounds for proper centering and base detection
-        let min_x = model.voxels.iter().map(|v| v.x).min().unwrap_or(0);
-        let max_x = model.voxels.iter().map(|v| v.x).max().unwrap_or(0);
-        let min_y = model.voxels.iter().map(|v| v.y).min().unwrap_or(0);
-        let max_y = model.voxels.iter().map(|v| v.y).max().unwrap_or(0);
-        let min_z = model.voxels.iter().map(|v| v.z).min().unwrap_or(0);  // Lowest voxel (game Y base)
-        let max_z = model.voxels.iter().map(|v| v.z).max().unwrap_or(0);
+        if voxel_set.is_empty() {
+            tracing::warn!("Model has no visible voxels after filtering");
+            return (vertices, indices);
+        }
+
+        // Find min/max bounds using only visible voxels
+        let min_x = voxel_set.keys().map(|(x, _, _)| *x).min().unwrap_or(0);
+        let max_x = voxel_set.keys().map(|(x, _, _)| *x).max().unwrap_or(0);
+        let min_y = voxel_set.keys().map(|(_, y, _)| *y).min().unwrap_or(0);
+        let max_y = voxel_set.keys().map(|(_, y, _)| *y).max().unwrap_or(0);
+        let min_z = voxel_set.keys().map(|(_, _, z)| *z).min().unwrap_or(0);  // Lowest voxel (game Y base)
+        let max_z = voxel_set.keys().map(|(_, _, z)| *z).max().unwrap_or(0);
 
         // Calculate center offsets using actual voxel bounds (not model.size)
         // Vox X -> Game X, Vox Y -> Game Z, Vox Z -> Game Y
@@ -248,18 +278,18 @@ impl VoxMesh {
         let center_z = (min_y as f32 + max_y as f32 + 1.0) * scale * 0.5;  // Vox Y becomes game Z
         let base_y = min_z as f32 * scale;  // Offset to put lowest voxel at Y=0
 
-        // For each voxel, add faces where there's no neighbor
-        for voxel in &model.voxels {
-            let vox_x = voxel.x;
-            let vox_y = voxel.y;
-            let vox_z = voxel.z;
+        // For each visible voxel, add faces where there's no neighbor
+        for ((vox_x, vox_y, vox_z), color_index) in &voxel_set {
+            let vox_x = *vox_x;
+            let vox_y = *vox_y;
+            let vox_z = *vox_z;
 
             // Transform to game coords, center horizontally, and put base at Y=0
             let game_x = vox_x as f32 * scale - center_x;       // Centered
             let game_y = vox_z as f32 * scale - base_y;         // Vox Z -> game Y, offset so min is at 0
             let game_z = vox_y as f32 * scale - center_z;       // Vox Y -> game Z, centered
 
-            let color = model.get_color(voxel.color_index);
+            let color = model.get_color(*color_index);
             let color_f = [
                 color[0] as f32 / 255.0,
                 color[1] as f32 / 255.0,

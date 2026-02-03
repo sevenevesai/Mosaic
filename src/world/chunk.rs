@@ -351,6 +351,29 @@ impl ChunkPropData {
     pub fn clear(&mut self) {
         self.placements.clear();
     }
+
+    /// Remove a prop at the given index, returns the removed prop
+    pub fn remove(&mut self, index: usize) -> Option<PropPlacement> {
+        if index < self.placements.len() {
+            Some(self.placements.swap_remove(index))
+        } else {
+            None
+        }
+    }
+
+    /// Find the index of a prop near the given local position (within tolerance)
+    pub fn find_near(&self, local_x: f32, local_y: f32, local_z: f32, tolerance: f32) -> Option<usize> {
+        let tol_sq = tolerance * tolerance;
+        for (i, prop) in self.placements.iter().enumerate() {
+            let dx = prop.local_x - local_x;
+            let dy = prop.local_y - local_y;
+            let dz = prop.local_z - local_z;
+            if dx * dx + dy * dy + dz * dz < tol_sq {
+                return Some(i);
+            }
+        }
+        None
+    }
 }
 
 impl Default for ChunkPropData {
@@ -1146,6 +1169,16 @@ impl Chunk {
     /// Iterate over all prop placements (empty iterator if no props)
     pub fn iter_props(&self) -> impl Iterator<Item = &PropPlacement> {
         self.props.iter().flat_map(|p| p.iter())
+    }
+
+    /// Remove a prop near the given local position, returns the removed prop
+    pub fn remove_prop_near(&mut self, local_x: f32, local_y: f32, local_z: f32, tolerance: f32) -> Option<PropPlacement> {
+        if let Some(prop_data) = self.props.as_deref_mut() {
+            if let Some(idx) = prop_data.find_near(local_x, local_y, local_z, tolerance) {
+                return prop_data.remove(idx);
+            }
+        }
+        None
     }
 }
 

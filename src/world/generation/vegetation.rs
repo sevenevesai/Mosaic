@@ -333,15 +333,16 @@ impl<'a> VegetationGenerator<'a> {
         let variant_idx = (fast_hash_3d(wx, wz, 11111) as usize) % params.grass_props.len();
         let prop_id = params.grass_props[variant_idx];
 
-        // Sub-block offset for natural look
+        // Sub-block offset for natural look (tightened to keep props within block)
         let (ox, oz) = self.noise.hash_offset(wx, wz, 1);
         let rotation = self.noise.hash_rotation(wx, wz);
         let scale = self.noise.hash_scale(wx, wz, 0.9, 1.1);
 
         // Position: on top of surface, slightly sunk
-        let local_x = lx as f32 + 0.5 + ox * 0.6;
+        // Keep offset small (0.2) so props stay within block bounds
+        let local_x = lx as f32 + 0.5 + ox * 0.2;
         let local_y = ly as f32 + 1.0 - params.grass_sink;
-        let local_z = lz as f32 + 0.5 + oz * 0.6;
+        let local_z = lz as f32 + 0.5 + oz * 0.2;
 
         chunk.add_prop(PropPlacement::new(
             prop_id,
@@ -394,9 +395,10 @@ impl<'a> VegetationGenerator<'a> {
         let rotation = self.noise.hash_rotation(wx, wz);
         let scale = self.noise.hash_scale(wx, wz, 0.85, 1.15);
 
-        let local_x = lx as f32 + 0.5 + ox * 0.7;
+        // Keep offset small so props stay within block
+        let local_x = lx as f32 + 0.5 + ox * 0.25;
         let local_y = ly as f32 + 1.0 - 0.02;
-        let local_z = lz as f32 + 0.5 + oz * 0.7;
+        let local_z = lz as f32 + 0.5 + oz * 0.25;
 
         chunk.add_prop(PropPlacement::new(
             prop_id,
@@ -444,9 +446,10 @@ impl<'a> VegetationGenerator<'a> {
         // Rocks have more size variation
         let scale = self.noise.hash_scale(wx, wz, 0.6, 1.4);
 
-        let local_x = lx as f32 + 0.5 + ox * 0.4;
+        // Rocks are larger, keep them more centered
+        let local_x = lx as f32 + 0.5 + ox * 0.15;
         let local_y = ly as f32 + 1.0 - 0.1; // Sink rocks slightly
-        let local_z = lz as f32 + 0.5 + oz * 0.4;
+        let local_z = lz as f32 + 0.5 + oz * 0.15;
 
         chunk.add_prop(PropPlacement::new(
             prop_id,

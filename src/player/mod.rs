@@ -20,7 +20,7 @@ use crate::constants::{
 };
 use crate::inventory::{Inventory, Item};
 use crate::renderer::Camera;
-use crate::world::{Block, WorldManager, raycast};
+use crate::world::{Block, WorldManager, raycast, raycast_props};
 
 /// Result of block interaction processing
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -31,6 +31,8 @@ pub enum BlockInteraction {
     Break { x: i32, y: i32, z: i32, block: Block },
     /// A block was placed at the given world position
     Place { x: i32, y: i32, z: i32, block: Block },
+    /// A prop was harvested at the given world position
+    HarvestProp { x: f32, y: f32, z: f32, prop_id: u8 },
 }
 
 /// Axis-aligned bounding box
@@ -260,13 +262,47 @@ impl Player {
 
     /// Process block interactions (call from main loop with mutable world access)
     ///
-    /// Returns the type of interaction that occurred (Break, Place, or None),
-    /// including the world position of the affected block for voxel GI updates.
+    /// Returns the type of interaction that occurred (Break, Place, HarvestProp, or None),
+    /// including the world position of the affected block/prop for voxel GI updates.
     pub fn process_block_interactions(&mut self, world: &mut WorldManager) -> BlockInteraction {
         if self.break_requested {
             self.break_requested = false;
-            if let Some((x, y, z, block)) = self.try_break_block(world) {
-                return BlockInteraction::Break { x, y, z, block };
+
+            let origin = self.camera.position;
+            let direction = self.camera.forward();
+
+            // Raycast against both props and blocks, take the closest hit
+            let block_hit = raycast(origin, direction, PLAYER_REACH, world);
+            let prop_hit = {
+                let chunks = world.chunks_read();
+                raycast_props(origin, direction, PLAYER_REACH, &chunks)
+            };
+
+            // Determine which is closer
+            let block_dist = block_hit.as_ref().map(|h| h.distance).unwrap_or(f32::MAX);
+            let prop_dist = prop_hit.as_ref().map(|h| h.distance).unwrap_or(f32::MAX);
+
+            // Prop is closer - harvest it
+            if prop_dist < block_dist {
+                if let Some(hit) = prop_hit {
+                    let [x, y, z] = hit.world_pos;
+                    // Remove the prop from the world
+                    if let Some(removed) = world.try_remove_prop(x, y, z, 0.5) {
+                        tracing::debug!("Harvested prop {} at ({:.2}, {:.2}, {:.2})", removed.prop_id, x, y, z);
+                        return BlockInteraction::HarvestProp { x, y, z, prop_id: removed.prop_id };
+                    }
+                }
+            }
+            // Block is closer - break it
+            else if let Some(hit) = block_hit {
+                let [x, y, z] = hit.block_pos;
+                if let Some(block) = world.get_block(x, y, z) {
+                    if block != Block::Bedrock {
+                        world.set_block(x, y, z, Block::Air);
+                        tracing::debug!("Broke {:?} at ({}, {}, {})", block, x, y, z);
+                        return BlockInteraction::Break { x, y, z, block };
+                    }
+                }
             }
         }
 
@@ -303,25 +339,6 @@ impl Player {
     /// Get forward direction for item throwing
     pub fn forward(&self) -> Vec3 {
         self.camera.forward()
-    }
-
-    fn try_break_block(&mut self, world: &mut WorldManager) -> Option<(i32, i32, i32, Block)> {
-        let origin = self.camera.position;
-        let direction = self.camera.forward();
-
-        if let Some(hit) = raycast(origin, direction, PLAYER_REACH, world) {
-            let [x, y, z] = hit.block_pos;
-            // Don't break bedrock
-            if let Some(block) = world.get_block(x, y, z) {
-                if block != Block::Bedrock {
-                    world.set_block(x, y, z, Block::Air);
-                    // Item spawning is handled by App via ItemEntityManager
-                    tracing::debug!("Broke {:?} at ({}, {}, {})", block, x, y, z);
-                    return Some((x, y, z, block));
-                }
-            }
-        }
-        None
     }
 
     fn try_place_block(&mut self, world: &mut WorldManager) -> Option<(i32, i32, i32, Block)> {

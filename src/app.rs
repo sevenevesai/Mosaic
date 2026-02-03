@@ -510,6 +510,29 @@ impl App {
                         );
                     }
                 }
+                BlockInteraction::HarvestProp { x, y, z, prop_id } => {
+                    tracing::debug!("Harvested prop {} at ({:.2}, {:.2}, {:.2})", prop_id, x, y, z);
+                    // Play break sound for foliage/grass
+                    if let Some(ref mut audio) = self.audio {
+                        let prop_pos = glam::Vec3::new(x, y, z);
+                        let player_pos = self.player.position();
+                        let player_dir = self.player.forward();
+                        // Use foliage sound for grass/flowers, stone for rocks
+                        let block = if prop_id < 15 {
+                            Block::Leaves // Foliage sound for grass/flowers
+                        } else {
+                            Block::Stone // Stone sound for rocks
+                        };
+                        audio.play_block_break(
+                            Some(block),
+                            Some(prop_pos),
+                            player_pos,
+                            player_dir,
+                            Some(&self.world),
+                        );
+                    }
+                    // TODO: Spawn item drops based on prop type
+                }
                 BlockInteraction::None => {}
             }
 
