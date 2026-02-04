@@ -125,16 +125,14 @@ fn rotate_y(p: vec3<f32>, angle: f32) -> vec3<f32> {
 // VOXEL SHADOW SAMPLING
 // ============================================================================
 
-// Convert world position to voxel UV using toroidal wrapping
+// Convert world position to voxel UV (no toroidal wrapping)
 fn world_to_voxel_uv(world_pos: vec3<f32>) -> vec3<f32> {
-    let origin = vec3<f32>(voxel_volume.volume_origin.xyz);
-    let local = world_pos - origin;
+    let center = voxel_volume.volume_center.xyz;
+    let half_size = 128.0;
+    let local = world_pos - center + vec3<f32>(half_size);
 
-    // Toroidal wrap using floating-point modulo
-    let wrapped = ((local % 256.0) + 256.0) % 256.0;
-
-    // Convert to UV (0-1 range)
-    return wrapped / 256.0;
+    // Convert to UV (0-1 range) - no wrapping
+    return local / 256.0;
 }
 
 // Sample sky occlusion by checking for solid blocks above grass position

@@ -132,6 +132,8 @@ pub struct SsaoUniform {
     pub ssao_params: [f32; 4],
     /// Fade start (x), fade end (y), sharpness (z), unused (w)
     pub fade_params: [f32; 4],
+    /// AO texture dimensions (xy), frame count for temporal noise (z), unused (w)
+    pub ao_params: [f32; 4],
 }
 
 /// Uniform data for blur shader
@@ -140,14 +142,14 @@ pub struct SsaoUniform {
 pub struct BlurUniform {
     /// Direction: (1,0) for horizontal, (0,1) for vertical
     pub direction: [f32; 2],
-    /// 1.0 / texture_width, 1.0 / texture_height
+    /// 1.0 / texture_width, 1.0 / texture_height (AO texture)
     pub texel_size: [f32; 2],
     /// Sharpness for edge preservation
     pub sharpness: f32,
     /// Blur kernel radius (in texels)
     pub blur_radius: f32,
-    /// Padding
-    pub _padding: [f32; 2],
+    /// Depth texture texel size (may differ from AO if half-res)
+    pub depth_texel_size: [f32; 2],
 }
 
 /// SSAO post-processing system
@@ -199,11 +201,16 @@ pub struct Ssao {
     blur_h_uniform_buffer: wgpu::Buffer,
     blur_v_uniform_buffer: wgpu::Buffer,
 
-    /// Current dimensions
+    /// Current dimensions (AO texture)
     width: u32,
     height: u32,
+    /// Full screen dimensions (for depth sampling)
+    screen_width: u32,
+    screen_height: u32,
     /// Whether using half resolution
     half_res: bool,
+    /// Frame counter for temporal noise variation
+    frame_count: u32,
 }
 
 impl Ssao {
@@ -406,7 +413,7 @@ impl Ssao {
             texel_size: [1.0 / ao_width as f32, 1.0 / ao_height as f32],
             sharpness: params.sharpness,
             blur_radius: (quality.blur_size() / 2) as f32,
-            _padding: [0.0; 2],
+            depth_texel_size: [1.0 / width as f32, 1.0 / height as f32],
         };
         let blur_h_uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("ssao_blur_h_uniform"),
@@ -419,7 +426,7 @@ impl Ssao {
             texel_size: [1.0 / ao_width as f32, 1.0 / ao_height as f32],
             sharpness: params.sharpness,
             blur_radius: (quality.blur_size() / 2) as f32,
-            _padding: [0.0; 2],
+            depth_texel_size: [1.0 / width as f32, 1.0 / height as f32],
         };
         let blur_v_uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("ssao_blur_v_uniform"),
@@ -478,7 +485,10 @@ impl Ssao {
             blur_v_uniform_buffer,
             width: ao_width,
             height: ao_height,
+            screen_width: width,
+            screen_height: height,
             half_res,
+            frame_count: 0,
         }
     }
 
@@ -808,7 +818,7 @@ impl Ssao {
 
     /// Update uniform buffers
     pub fn update_uniforms(
-        &self,
+        &mut self,
         queue: &wgpu::Queue,
         inv_proj: glam::Mat4,
         proj: glam::Mat4,
@@ -817,9 +827,13 @@ impl Ssao {
         screen_width: u32,
         screen_height: u32,
     ) {
+        // Increment frame counter for temporal noise variation
+        self.frame_count = self.frame_count.wrapping_add(1);
+
         let uniform = SsaoUniform {
             inv_proj: inv_proj.to_cols_array_2d(),
             proj: proj.to_cols_array_2d(),
+            // Screen params uses FULL screen dimensions (for depth sampling)
             screen_params: [screen_width as f32, screen_height as f32, near, far],
             ssao_params: [
                 self.params.radius,
@@ -833,8 +847,18 @@ impl Ssao {
                 self.params.sharpness,
                 0.0,
             ],
+            // AO params uses actual AO texture dimensions
+            ao_params: [
+                self.width as f32,
+                self.height as f32,
+                self.frame_count as f32,
+                0.0,
+            ],
         };
         queue.write_buffer(&self.ssao_uniform_buffer, 0, bytemuck::cast_slice(&[uniform]));
+
+        // Depth texel size for proper edge detection when AO is half-res
+        let depth_texel_size = [1.0 / screen_width as f32, 1.0 / screen_height as f32];
 
         // Update blur uniforms
         let blur_h = BlurUniform {
@@ -842,7 +866,7 @@ impl Ssao {
             texel_size: [1.0 / self.width as f32, 1.0 / self.height as f32],
             sharpness: self.params.sharpness,
             blur_radius: (self.quality.blur_size() / 2) as f32,
-            _padding: [0.0; 2],
+            depth_texel_size,
         };
         queue.write_buffer(&self.blur_h_uniform_buffer, 0, bytemuck::cast_slice(&[blur_h]));
 
@@ -851,7 +875,7 @@ impl Ssao {
             texel_size: [1.0 / self.width as f32, 1.0 / self.height as f32],
             sharpness: self.params.sharpness,
             blur_radius: (self.quality.blur_size() / 2) as f32,
-            _padding: [0.0; 2],
+            depth_texel_size,
         };
         queue.write_buffer(&self.blur_v_uniform_buffer, 0, bytemuck::cast_slice(&[blur_v]));
     }
@@ -967,10 +991,18 @@ impl Ssao {
 
     /// Resize textures when window size changes
     pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+        // Store full screen dimensions
+        self.screen_width = width;
+        self.screen_height = height;
+
+        // Calculate AO texture dimensions (ensure minimum size of 1 and even values for half-res)
         let (ao_width, ao_height) = if self.half_res {
-            (width / 2, height / 2)
+            // Use max to avoid zero-sized textures, and round to even to avoid sampling artifacts
+            let w = (width / 2).max(1);
+            let h = (height / 2).max(1);
+            (w, h)
         } else {
-            (width, height)
+            (width.max(1), height.max(1))
         };
 
         if ao_width == self.width && ao_height == self.height {
@@ -1038,9 +1070,10 @@ const SSAO_SHADER: &str = r#"
 struct SsaoUniform {
     inv_proj: mat4x4<f32>,
     proj: mat4x4<f32>,
-    screen_params: vec4<f32>,  // width, height, near, far
+    screen_params: vec4<f32>,  // width, height, near, far (FULL screen for depth)
     ssao_params: vec4<f32>,    // radius, intensity, bias, sample_count
     fade_params: vec4<f32>,    // fade_start, fade_end, sharpness, unused
+    ao_params: vec4<f32>,      // ao_width, ao_height, frame_count, unused
 };
 
 @group(0) @binding(0) var<uniform> uniforms: SsaoUniform;
@@ -1074,6 +1107,7 @@ fn reconstruct_position(uv: vec2<f32>, depth: f32) -> vec3<f32> {
 
 // Reconstruct normal from depth using screen-space derivatives
 fn reconstruct_normal(uv: vec2<f32>, view_pos: vec3<f32>) -> vec3<f32> {
+    // Use FULL screen texel size for depth sampling
     let texel = vec2<f32>(1.0 / uniforms.screen_params.x, 1.0 / uniforms.screen_params.y);
 
     // Clamp UVs to avoid sampling outside screen (prevents edge artifacts)
@@ -1106,23 +1140,31 @@ fn reconstruct_normal(uv: vec2<f32>, view_pos: vec3<f32>) -> vec3<f32> {
     return normalize(cross(dy, dx));
 }
 
-// Hash function for sample generation
-fn hash(n: f32) -> f32 {
-    return fract(sin(n) * 43758.5453);
+// High-quality hash function for per-pixel randomness
+fn hash21(p: vec2<f32>) -> f32 {
+    var p3 = fract(vec3<f32>(p.x, p.y, p.x) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+fn hash22(p: vec2<f32>) -> vec2<f32> {
+    var p3 = fract(vec3<f32>(p.x, p.y, p.x) * vec3<f32>(0.1031, 0.1030, 0.0973));
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.xx + p3.yz) * p3.zy);
 }
 
 // Generate hemisphere sample with cosine weighting
-fn hemisphere_sample(i: u32, random_rot: vec2<f32>) -> vec3<f32> {
+fn hemisphere_sample(i: u32, random_rot: vec2<f32>, extra_jitter: f32) -> vec3<f32> {
     let fi = f32(i);
     let sample_count = uniforms.ssao_params.w;
 
-    // Spiral pattern for better distribution
-    let angle = fi * 2.39996323 + random_rot.x * 6.28318; // Golden angle + rotation
-    let radius = sqrt((fi + 0.5) / sample_count);
+    // Spiral pattern with per-pixel rotation to break up patterns
+    let angle = fi * 2.39996323 + random_rot.x * 6.28318 + extra_jitter * 0.5;
+    let radius = sqrt((fi + 0.5 + extra_jitter * 0.3) / sample_count);
 
     let x = cos(angle) * radius;
     let y = sin(angle) * radius;
-    let z = sqrt(1.0 - x*x - y*y); // Hemisphere
+    let z = sqrt(max(0.0, 1.0 - x*x - y*y)); // Hemisphere (clamped to avoid sqrt of negative)
 
     // Scale radius to vary distance (closer samples more frequent)
     let scale = (fi + 1.0) / sample_count;
@@ -1153,18 +1195,36 @@ fn fs_main(in: VertexOutput) -> @location(0) f32 {
 
     // Edge fade - reduce SSAO at screen edges to avoid normal reconstruction artifacts
     let edge_dist = min(min(in.uv.x, 1.0 - in.uv.x), min(in.uv.y, 1.0 - in.uv.y));
-    let edge_fade = smoothstep(0.0, 0.08, edge_dist); // Fade out within 8% of screen edge
+    let edge_fade = smoothstep(0.0, 0.08, edge_dist);
 
     let fade = dist_fade * edge_fade;
 
     let normal = reconstruct_normal(in.uv, view_pos);
 
-    // Sample noise for kernel rotation
-    let noise_scale = uniforms.screen_params.xy / 4.0;
-    let noise = textureSample(t_noise, s_noise, in.uv * noise_scale).xy * 2.0 - 1.0;
+    // Use AO texture dimensions for noise scaling (not full screen)
+    // This ensures noise tiles correctly at whatever resolution we're rendering at
+    let ao_dims = uniforms.ao_params.xy;
+    let frame = uniforms.ao_params.z;
+
+    // Calculate pixel position in AO texture space
+    let pixel_pos = in.uv * ao_dims;
+
+    // Sample noise texture at correct scale for AO resolution
+    // Each noise texel covers 4 AO pixels
+    let noise_uv = pixel_pos / 4.0;
+    let noise_base = textureSample(t_noise, s_noise, noise_uv).xy * 2.0 - 1.0;
+
+    // Add per-pixel hash for extra variation to break up any remaining banding
+    // Include frame count for temporal variation
+    let pixel_hash = hash22(pixel_pos + vec2<f32>(frame * 0.618, frame * 0.381));
+    let noise = noise_base + (pixel_hash * 2.0 - 1.0) * 0.3;
+
+    // Extra jitter based on pixel position and frame
+    let extra_jitter = hash21(pixel_pos + vec2<f32>(frame));
 
     // Build TBN matrix (tangent-bitangent-normal)
-    let tangent = normalize(vec3<f32>(noise.x, noise.y, 0.0) - normal * dot(vec3<f32>(noise.x, noise.y, 0.0), normal));
+    let tangent_raw = vec3<f32>(noise.x, noise.y, 0.0);
+    let tangent = normalize(tangent_raw - normal * dot(tangent_raw, normal));
     let bitangent = cross(normal, tangent);
     let tbn = mat3x3<f32>(tangent, bitangent, normal);
 
@@ -1178,7 +1238,7 @@ fn fs_main(in: VertexOutput) -> @location(0) f32 {
 
     for (var i = 0u; i < sample_count; i++) {
         // Get sample in tangent space and transform to view space
-        let sample_ts = hemisphere_sample(i, noise);
+        let sample_ts = hemisphere_sample(i, noise, extra_jitter);
         let sample_vs = tbn * sample_ts;
 
         // Offset from fragment position
@@ -1200,7 +1260,7 @@ fn fs_main(in: VertexOutput) -> @location(0) f32 {
         let sample_view_pos = reconstruct_position(sample_uv, sample_depth);
 
         // Range check - only occlude if sample is close enough
-        let range_check = smoothstep(0.0, 1.0, radius / abs(view_pos.z - sample_view_pos.z));
+        let range_check = smoothstep(0.0, 1.0, radius / max(abs(view_pos.z - sample_view_pos.z), 0.001));
 
         // Compare depths (with bias)
         let is_occluded = select(0.0, 1.0, sample_view_pos.z >= sample_pos.z + bias);
@@ -1225,10 +1285,10 @@ fn fs_main(in: VertexOutput) -> @location(0) f32 {
 const BLUR_SHADER: &str = r#"
 struct BlurUniform {
     direction: vec2<f32>,
-    texel_size: vec2<f32>,
+    texel_size: vec2<f32>,         // AO texture texel size
     sharpness: f32,
     blur_radius: f32,
-    _padding: vec2<f32>,
+    depth_texel_size: vec2<f32>,   // Depth texture texel size (may differ if half-res)
 };
 
 @group(0) @binding(0) var<uniform> uniforms: BlurUniform;
@@ -1273,14 +1333,17 @@ fn fs_main(in: VertexOutput) -> @location(0) f32 {
     var weight_sum = 0.0;
 
     for (var i = -blur_radius; i <= blur_radius; i++) {
-        let offset = vec2<f32>(f32(i)) * uniforms.direction * uniforms.texel_size;
-        let sample_uv = in.uv + offset;
+        // Use AO texel size for AO texture sampling
+        let ao_offset = vec2<f32>(f32(i)) * uniforms.direction * uniforms.texel_size;
+        let sample_uv = clamp(in.uv + ao_offset, vec2<f32>(0.0), vec2<f32>(1.0));
 
         let sample_ao = textureSample(t_ao, s_ao, sample_uv).r;
+        // Sample depth at the same UV (linear interpolation handles resolution difference)
         let sample_depth = textureSampleLevel(t_depth, s_depth, sample_uv, 0.0);
 
-        // Spatial weight (Gaussian)
-        let spatial_weight = exp(-f32(i * i) / (2.0 * uniforms.blur_radius * uniforms.blur_radius));
+        // Spatial weight (Gaussian) - use blur_radius for sigma
+        let sigma_sq = max(uniforms.blur_radius * uniforms.blur_radius, 1.0);
+        let spatial_weight = exp(-f32(i * i) / (2.0 * sigma_sq));
 
         // Depth weight (bilateral)
         let depth_diff = abs(center_depth - sample_depth);

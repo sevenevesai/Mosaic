@@ -20,12 +20,13 @@ pub const CLOUD_VOXEL_SCALE: i32 = 4;
 /// Cloud layer base altitude (world Y coordinate)
 pub const CLOUD_BASE_Y: f32 = 115.0;
 
-/// Cloud layer thickness in cloud voxels
-pub const CLOUD_THICKNESS: i32 = 4;
+/// Cloud layer thickness in world blocks (consistent across quality levels)
+pub const CLOUD_THICKNESS_BLOCKS: i32 = 32;
 
 /// Cloud grid size in cloud voxels (covers MORE than render distance for smooth edges)
-/// At scale 4, 160 voxels = 640 blocks = 40 chunks (extends beyond view)
-pub const CLOUD_GRID_SIZE: i32 = 160;
+/// At scale 4, 256 voxels = 1024 blocks = 64 chunks (extends well beyond view)
+/// Larger grid = less frequent regeneration = smoother streaming
+pub const CLOUD_GRID_SIZE: i32 = 256;
 
 /// Maximum vertices for cloud mesh (generous for large grid)
 pub const MAX_CLOUD_VERTICES: usize = 65536;
@@ -114,6 +115,14 @@ impl CloudQuality {
             CloudQuality::Off | CloudQuality::Low => false,
             CloudQuality::Medium | CloudQuality::High | CloudQuality::Ultra => true,
         }
+    }
+
+    /// Cloud thickness in voxels - scaled so world-space height is consistent (~32 blocks)
+    pub fn cloud_thickness(&self) -> i32 {
+        // World thickness = voxels * scale = CLOUD_THICKNESS_BLOCKS
+        // So voxels = CLOUD_THICKNESS_BLOCKS / scale
+        let scale = self.voxel_scale();
+        (CLOUD_THICKNESS_BLOCKS / scale).max(4)
     }
 }
 
@@ -224,7 +233,7 @@ impl CloudGrid {
         }
     }
 
-    /// Generate clouds using cellular noise for guaranteed separation + detail
+    /// Generate clouds using cellular noise with domain warping for organic placement
     pub fn generate(&mut self, center_x: f32, center_z: f32, coverage: f32, seed: u64) {
         // Update world offset to center grid on position
         let half_size_x = (self.size_x * self.voxel_scale) as f32 / 2.0;
@@ -243,9 +252,13 @@ impl CloudGrid {
 
         // Cloud cell size in world blocks - determines cloud spacing
         // Larger cells = bigger, more spaced clouds
-        let cell_size = 80.0; // ~80 block spacing between cloud centers
+        let cell_size = 90.0; // Slightly larger for more spacing
 
-        // Generate using cellular approach - each cell can have ONE cloud
+        // Domain warping strength - how much to displace coordinates (in blocks)
+        let warp_strength = 35.0;
+        let warp_freq = 0.008; // Low frequency for large-scale warping
+
+        // Generate using cellular approach with domain warping
         for y in 0..self.size_y {
             for z in 0..self.size_z {
                 for x in 0..self.size_x {
@@ -254,27 +267,36 @@ impl CloudGrid {
                     let wz = self.world_offset_z + (z * self.voxel_scale) as f32;
                     let wy = y as f32 * self.voxel_scale as f32;
 
-                    // === CELLULAR CLOUD PLACEMENT ===
+                    // === DOMAIN WARPING ===
+                    // Warp coordinates before cell lookup to break grid pattern
+                    // This displaces where we "think" each point is, creating organic boundaries
+                    let warp_x = self.fbm_noise_3d(wx, 0.0, wz, seed_f + 500.0, warp_freq, 2) * 2.0 - 1.0;
+                    let warp_z = self.fbm_noise_3d(wx + 100.0, 0.0, wz + 100.0, seed_f + 600.0, warp_freq, 2) * 2.0 - 1.0;
+                    let warped_x = wx + warp_x * warp_strength;
+                    let warped_z = wz + warp_z * warp_strength;
+
+                    // === CELLULAR CLOUD PLACEMENT (using warped coordinates) ===
                     // Find which cell this voxel belongs to
-                    let cell_x = (wx / cell_size).floor();
-                    let cell_z = (wz / cell_size).floor();
+                    let cell_x = (warped_x / cell_size).floor();
+                    let cell_z = (warped_z / cell_size).floor();
 
                     // Get cell's cloud center (jittered from cell center)
+                    // Increased jitter range: 10-90% into cell for more randomness
                     let cell_hash = self.hash_2d(cell_x as i32, cell_z as i32, seed_f);
-                    let jitter_x = (cell_hash * 0.6 + 0.2) * cell_size; // 20-80% into cell
-                    let jitter_z = (self.hash_2d(cell_x as i32 + 73, cell_z as i32 + 37, seed_f) * 0.6 + 0.2) * cell_size;
+                    let jitter_x = (cell_hash * 0.8 + 0.1) * cell_size;
+                    let jitter_z = (self.hash_2d(cell_x as i32 + 73, cell_z as i32 + 37, seed_f) * 0.8 + 0.1) * cell_size;
 
                     let cloud_center_x = cell_x * cell_size + jitter_x;
                     let cloud_center_z = cell_z * cell_size + jitter_z;
 
-                    // Distance from this voxel to cloud center (in XZ plane)
-                    let dx = wx - cloud_center_x;
-                    let dz = wz - cloud_center_z;
+                    // Distance from this voxel to cloud center (using warped position)
+                    let dx = warped_x - cloud_center_x;
+                    let dz = warped_z - cloud_center_z;
                     let dist_xz = (dx * dx + dz * dz).sqrt();
 
                     // Cloud radius for this cell (varies per cell)
                     let cell_size_var = self.hash_2d(cell_x as i32 + 100, cell_z as i32 + 100, seed_f);
-                    let base_radius = cell_size * cell_fill * (0.6 + cell_size_var * 0.8); // 60-140% of base
+                    let base_radius = cell_size * cell_fill * (0.5 + cell_size_var * 0.9); // 50-140% of base
 
                     // === HEIGHT FALLOFF ===
                     // Clouds are dome-shaped: radius shrinks at top and bottom
@@ -283,9 +305,9 @@ impl CloudGrid {
                     let radius_at_height = base_radius * (0.3 + height_factor * 0.7);
 
                     // === EDGE NOISE ===
-                    // Add noise to the edge for organic shapes
+                    // Add noise to the edge for organic shapes (use original coords for variety)
                     let edge_noise = self.fbm_noise_3d(wx, wy * 0.5, wz, seed_f + 200.0, 0.04, 3);
-                    let noisy_radius = radius_at_height * (0.7 + edge_noise * 0.6);
+                    let noisy_radius = radius_at_height * (0.65 + edge_noise * 0.7);
 
                     // === DENSITY CHECK ===
                     // Inside cloud if distance < noisy radius
@@ -639,14 +661,22 @@ impl CloudMesh {
     }
 }
 
-/// Cloud rendering system
+/// Cloud rendering system with double-buffering for smooth transitions
 pub struct Clouds {
     pipeline: wgpu::RenderPipeline,
     uniform_buffer: wgpu::Buffer,
-    vertex_buffer: wgpu::Buffer,
-    index_buffer: wgpu::Buffer,
     bind_group_layout: wgpu::BindGroupLayout,
     bind_group: wgpu::BindGroup,
+
+    // Double-buffered mesh data for smooth cross-fade during regeneration
+    vertex_buffers: [wgpu::Buffer; 2],
+    index_buffers: [wgpu::Buffer; 2],
+    index_counts: [u32; 2],
+    active_buffer: usize,  // 0 or 1
+
+    // Cross-fade state
+    transition_progress: f32,  // 0.0 = no transition, 0.0->1.0 during fade
+    is_transitioning: bool,
 
     // Cloud state
     grid: CloudGrid,
@@ -654,11 +684,12 @@ pub struct Clouds {
     uniforms: CloudUniforms,
 
     // Mesh state - clouds are generated at fixed world grid positions
-    index_count: u32,
     grid_origin_x: f32,  // Fixed world X where grid starts
     grid_origin_z: f32,  // Fixed world Z where grid starts
     wind_offset_x: f32,  // Accumulated wind offset
     wind_offset_z: f32,
+    wind_dir_x: f32,     // Wind direction (normalized-ish)
+    wind_dir_z: f32,
     needs_regenerate: bool,
 
     // Public settings
@@ -692,20 +723,36 @@ impl Clouds {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
-        // Create vertex/index buffers (will be filled when mesh is generated)
-        let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Cloud Vertex Buffer"),
-            size: (MAX_CLOUD_VERTICES * std::mem::size_of::<CloudVertex>()) as u64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        // Create double-buffered vertex/index buffers for smooth cross-fade
+        let vertex_buffers = [
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Cloud Vertex Buffer 0"),
+                size: (MAX_CLOUD_VERTICES * std::mem::size_of::<CloudVertex>()) as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Cloud Vertex Buffer 1"),
+                size: (MAX_CLOUD_VERTICES * std::mem::size_of::<CloudVertex>()) as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+        ];
 
-        let index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Cloud Index Buffer"),
-            size: (MAX_CLOUD_INDICES * std::mem::size_of::<u32>()) as u64,
-            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let index_buffers = [
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Cloud Index Buffer 0"),
+                size: (MAX_CLOUD_INDICES * std::mem::size_of::<u32>()) as u64,
+                usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Cloud Index Buffer 1"),
+                size: (MAX_CLOUD_INDICES * std::mem::size_of::<u32>()) as u64,
+                usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+        ];
 
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Cloud Bind Group"),
@@ -765,22 +812,36 @@ impl Clouds {
         let quality = CloudQuality::default();
         let voxel_scale = quality.voxel_scale();
         let grid_size = CLOUD_GRID_SIZE / (voxel_scale / CLOUD_VOXEL_SCALE).max(1);
+        let thickness = quality.cloud_thickness();
 
         Self {
             pipeline,
             uniform_buffer,
-            vertex_buffer,
-            index_buffer,
+            vertex_buffers,
+            index_buffers,
+            index_counts: [0, 0],
+            active_buffer: 0,
+            transition_progress: 0.0,
+            is_transitioning: false,
             bind_group_layout,
             bind_group,
-            grid: CloudGrid::new(grid_size, CLOUD_THICKNESS, grid_size, voxel_scale),
+            grid: CloudGrid::new(grid_size, thickness, grid_size, voxel_scale),
             quality,
             uniforms,
-            index_count: 0,
             grid_origin_x: 0.0,
             grid_origin_z: 0.0,
             wind_offset_x: 0.0,
             wind_offset_z: 0.0,
+            // Randomize wind direction using system time
+            // Range: primarily +X with some variation in Z
+            wind_dir_x: 0.8 + (std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| (d.as_millis() % 1000) as f32 / 1000.0 * 0.4)
+                .unwrap_or(0.0)),  // 0.8 to 1.2
+            wind_dir_z: -0.3 + (std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| ((d.as_millis() / 1000) % 1000) as f32 / 1000.0 * 0.6)
+                .unwrap_or(0.0)),  // -0.3 to 0.3
             needs_regenerate: true,
             coverage: 0.5,
             speed: 0.3,
@@ -805,45 +866,65 @@ impl Clouds {
             return;
         }
 
-        // Wind movement - accumulate offset
-        let wind_dir_x = 1.0_f32;
-        let wind_dir_z = 0.3_f32;
+        // Wind movement - accumulate offset continuously using randomized direction
         let wind_speed = self.speed * 8.0; // Blocks per second at full speed
-        self.wind_offset_x += wind_dir_x * wind_speed * delta_time;
-        self.wind_offset_z += wind_dir_z * wind_speed * delta_time;
+        self.wind_offset_x += self.wind_dir_x * wind_speed * delta_time;
+        self.wind_offset_z += self.wind_dir_z * wind_speed * delta_time;
 
         // Grid world size
         let voxel_scale = self.quality.voxel_scale() as f32;
         let grid_world_size = self.grid.size_x as f32 * voxel_scale;
         let half_grid = grid_world_size / 2.0;
 
+        // === CROSS-FADE TRANSITION ===
+        // If we're in a transition, advance it
+        if self.is_transitioning {
+            self.transition_progress += delta_time * 1.5; // ~0.67 second transition
+            if self.transition_progress >= 1.0 {
+                // Transition complete - swap to new buffer
+                self.active_buffer = 1 - self.active_buffer;
+                self.is_transitioning = false;
+                self.transition_progress = 0.0;
+            }
+        }
+
         // === REGENERATION TRIGGERS ===
-        // 1. Player moved far from grid center
-        let dx = camera_pos.x - self.grid_origin_x;
-        let dz = camera_pos.z - self.grid_origin_z;
-        let dist_from_center = (dx * dx + dz * dz).sqrt();
-        let player_moved_far = dist_from_center > grid_world_size * 0.2;
+        // Only trigger if not already transitioning
+        if !self.is_transitioning {
+            let effective_center_x = self.grid_origin_x + self.wind_offset_x;
+            let effective_center_z = self.grid_origin_z + self.wind_offset_z;
+            let dx = camera_pos.x - effective_center_x;
+            let dz = camera_pos.z - effective_center_z;
+            let dist_from_effective_center = (dx * dx + dz * dz).sqrt();
 
-        // 2. Wind has blown clouds far enough that we need new ones
-        // Regenerate when wind offset exceeds ~1/3 of grid (new clouds needed on upwind side)
-        let wind_regen_threshold = grid_world_size * 0.3;
-        let wind_moved_far = self.wind_offset_x.abs() > wind_regen_threshold
-            || self.wind_offset_z.abs() > wind_regen_threshold;
+            // Regenerate when camera is 30% away from effective cloud center
+            let player_moved_far = dist_from_effective_center > grid_world_size * 0.30;
 
-        if self.needs_regenerate || player_moved_far || wind_moved_far {
-            // When regenerating due to wind, bake wind offset into grid origin
-            // This makes clouds "appear" continuously from upwind direction
-            let effective_x = camera_pos.x - self.wind_offset_x;
-            let effective_z = camera_pos.z - self.wind_offset_z;
+            // Safety: also regenerate if wind has accumulated to 45% of grid
+            let wind_too_large = self.wind_offset_x.abs() > grid_world_size * 0.45
+                || self.wind_offset_z.abs() > grid_world_size * 0.45;
 
-            self.grid_origin_x = effective_x;
-            self.grid_origin_z = effective_z;
-            self.regenerate_mesh(queue, effective_x, effective_z);
+            if self.needs_regenerate || player_moved_far || wind_too_large {
+                // Generate into the INACTIVE buffer for cross-fade
+                let inactive_buffer = 1 - self.active_buffer;
+                let new_origin_x = camera_pos.x - self.wind_offset_x;
+                let new_origin_z = camera_pos.z - self.wind_offset_z;
 
-            // Reset wind offset since it's now baked into position
-            self.wind_offset_x = 0.0;
-            self.wind_offset_z = 0.0;
-            self.needs_regenerate = false;
+                self.grid_origin_x = new_origin_x;
+                self.grid_origin_z = new_origin_z;
+                self.regenerate_mesh_to_buffer(queue, new_origin_x, new_origin_z, inactive_buffer);
+
+                // Start transition (unless this is the first generation)
+                if self.index_counts[self.active_buffer] > 0 {
+                    self.is_transitioning = true;
+                    self.transition_progress = 0.0;
+                } else {
+                    // First generation - just swap immediately
+                    self.active_buffer = inactive_buffer;
+                }
+
+                self.needs_regenerate = false;
+            }
         }
 
         // Update uniforms - pass grid info for edge fading
@@ -867,42 +948,63 @@ impl Clouds {
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[self.uniforms]));
     }
 
-    /// Regenerate cloud mesh centered on given position
-    fn regenerate_mesh(&mut self, queue: &wgpu::Queue, center_x: f32, center_z: f32) {
+    /// Regenerate cloud mesh centered on given position into specified buffer
+    fn regenerate_mesh_to_buffer(&mut self, queue: &wgpu::Queue, center_x: f32, center_z: f32, buffer_idx: usize) {
         // Generate cloud voxels
         self.grid.generate(center_x, center_z, self.coverage, 12345);
 
         // Generate mesh
         let mesh = CloudMesh::from_grid(&self.grid, CLOUD_BASE_Y);
 
-        // Upload to GPU
+        // Upload to specified buffer
         if !mesh.vertices.is_empty() && !mesh.indices.is_empty() {
-            queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&mesh.vertices));
-            queue.write_buffer(&self.index_buffer, 0, bytemuck::cast_slice(&mesh.indices));
-            self.index_count = mesh.indices.len() as u32;
+            queue.write_buffer(&self.vertex_buffers[buffer_idx], 0, bytemuck::cast_slice(&mesh.vertices));
+            queue.write_buffer(&self.index_buffers[buffer_idx], 0, bytemuck::cast_slice(&mesh.indices));
+            self.index_counts[buffer_idx] = mesh.indices.len() as u32;
         } else {
-            self.index_count = 0;
+            self.index_counts[buffer_idx] = 0;
         }
 
         tracing::debug!(
-            "Cloud mesh: {} verts, {} indices ({} quads)",
+            "Cloud mesh (buffer {}): {} verts, {} indices ({} quads)",
+            buffer_idx,
             mesh.vertices.len(),
             mesh.indices.len(),
             mesh.indices.len() / 6
         );
     }
 
-    /// Render clouds
+    /// Render clouds (handles cross-fade between buffers during transitions)
     pub fn render<'a>(&'a self, render_pass: &mut wgpu::RenderPass<'a>) {
-        if self.quality == CloudQuality::Off || self.index_count == 0 {
+        if self.quality == CloudQuality::Off {
+            return;
+        }
+
+        let active_count = self.index_counts[self.active_buffer];
+        if active_count == 0 && !self.is_transitioning {
             return;
         }
 
         render_pass.set_pipeline(&self.pipeline);
         render_pass.set_bind_group(0, &self.bind_group, &[]);
-        render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-        render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-        render_pass.draw_indexed(0..self.index_count, 0, 0..1);
+
+        // Draw active buffer (fades out during transition)
+        if active_count > 0 {
+            render_pass.set_vertex_buffer(0, self.vertex_buffers[self.active_buffer].slice(..));
+            render_pass.set_index_buffer(self.index_buffers[self.active_buffer].slice(..), wgpu::IndexFormat::Uint32);
+            render_pass.draw_indexed(0..active_count, 0, 0..1);
+        }
+
+        // During transition, also draw inactive buffer (fading in)
+        if self.is_transitioning {
+            let inactive = 1 - self.active_buffer;
+            let inactive_count = self.index_counts[inactive];
+            if inactive_count > 0 {
+                render_pass.set_vertex_buffer(0, self.vertex_buffers[inactive].slice(..));
+                render_pass.set_index_buffer(self.index_buffers[inactive].slice(..), wgpu::IndexFormat::Uint32);
+                render_pass.draw_indexed(0..inactive_count, 0, 0..1);
+            }
+        }
     }
 
     // === Getters and Setters ===
@@ -914,10 +1016,11 @@ impl Clouds {
     pub fn set_quality(&mut self, quality: CloudQuality) {
         if quality != self.quality {
             self.quality = quality;
-            // Recreate grid with new voxel scale
+            // Recreate grid with new voxel scale and thickness
             let voxel_scale = quality.voxel_scale();
             let grid_size = CLOUD_GRID_SIZE / (voxel_scale / CLOUD_VOXEL_SCALE).max(1);
-            self.grid = CloudGrid::new(grid_size, CLOUD_THICKNESS, grid_size, voxel_scale);
+            let thickness = quality.cloud_thickness();
+            self.grid = CloudGrid::new(grid_size, thickness, grid_size, voxel_scale);
             self.needs_regenerate = true;
         }
     }
@@ -1108,31 +1211,27 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Sun color influence during day
     color = mix(color, color * u.sun_color.rgb, sun_intensity * 0.15);
 
-    // === DISTANCE FADE (from camera) ===
-    let dist = length(u.camera_pos.xyz - in.world_position);
-    let fade_start = 400.0;
-    let fade_end = 550.0;
-    let distance_alpha = 1.0 - smoothstep(fade_start, fade_end, dist);
+    // === CAMERA-RELATIVE FADE ===
+    // Fade based on XZ distance from camera (not grid center!)
+    // This ensures the fade boundary stays at view edge regardless of grid position
+    let camera_xz = vec2<f32>(u.camera_pos.x, u.camera_pos.z);
+    let cloud_xz = vec2<f32>(in.world_position.x, in.world_position.z);
+    let xz_dist = length(cloud_xz - camera_xz);
 
-    // === EDGE FADE (grid boundaries) ===
-    // Soft fade at all edges of the cloud grid so no hard cutoff
-    // Grid center is passed through ambient_color.xy, half_size through camera_pos.w
-    let grid_center_x = u.ambient_color.x;
-    let grid_center_z = u.ambient_color.y;
+    // Use half_grid as the fade distance reference (passed in camera_pos.w)
     let half_grid = u.camera_pos.w;
+    let fade_start = half_grid * 0.75;  // Start fade at 75% of view range
+    let fade_end = half_grid * 0.98;    // Complete fade at 98%
+    let xz_alpha = 1.0 - smoothstep(fade_start, fade_end, xz_dist);
 
-    // Distance from grid center in XZ
-    let edge_dx = abs(in.world_position.x - grid_center_x);
-    let edge_dz = abs(in.world_position.z - grid_center_z);
-    let max_edge_dist = max(edge_dx, edge_dz);
+    // Also fade by vertical distance for 3D effect
+    let vert_dist = length(u.camera_pos.xyz - in.world_position);
+    let vert_fade_start = 450.0;
+    let vert_fade_end = 600.0;
+    let vert_alpha = 1.0 - smoothstep(vert_fade_start, vert_fade_end, vert_dist);
 
-    // Fade starts at 70% of half_grid, full fade at 95%
-    let edge_fade_start = half_grid * 0.70;
-    let edge_fade_end = half_grid * 0.95;
-    let edge_alpha = 1.0 - smoothstep(edge_fade_start, edge_fade_end, max_edge_dist);
-
-    // Combine fades
-    let combined_alpha = distance_alpha * edge_alpha;
+    // Combine fades - use minimum for clean edges
+    let combined_alpha = min(xz_alpha, vert_alpha);
 
     // Final alpha
     let alpha = u.wind_offset.w * combined_alpha;

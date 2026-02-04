@@ -611,24 +611,22 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 // DDA RAY MARCHING FOR SHADOWS
 // ═══════════════════════════════════════════════════════════════════════════
 
-// Convert world position to voxel UV using toroidal wrapping
-// The volume wraps around, so coordinates outside [0,256) map back into the volume
+// Convert world position to voxel UV (no toroidal wrapping)
+// Positions outside the 256-block volume will have UV outside [0,1]
 fn world_to_voxel_uv(world_pos: vec3<f32>) -> vec3<f32> {
-    // Compute local position relative to origin (floating point for smooth sampling)
-    let origin = vec3<f32>(voxel_volume.volume_origin.xyz);
-    let local = world_pos - origin;
+    // Compute local position relative to volume center
+    let center = voxel_volume.volume_center.xyz;
+    let half_size = 128.0;
+    let local = world_pos - center + vec3<f32>(half_size);
 
-    // Toroidal wrap using floating-point modulo
-    // ((x % 256) + 256) % 256 handles negative values correctly
-    let wrapped = ((local % 256.0) + 256.0) % 256.0;
-
-    // Convert to UV (0-1 range)
-    return wrapped / 256.0;
+    // Convert to UV (0-1 range) - NO wrapping
+    // Positions outside volume will have UV outside [0,1] and be rejected
+    return local / 256.0;
 }
 
-// With toroidal wrapping, UV is always in valid range
+// Check if position is within the voxel volume bounds
 fn is_in_volume(uv: vec3<f32>) -> bool {
-    return all(uv >= vec3<f32>(0.0)) && all(uv < vec3<f32>(1.0));
+    return all(uv >= vec3<f32>(0.0)) && all(uv <= vec3<f32>(1.0));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
