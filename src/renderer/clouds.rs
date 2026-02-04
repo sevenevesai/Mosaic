@@ -245,7 +245,10 @@ impl CloudGrid {
     }
 
     /// Generate clouds using cellular noise with domain warping for organic placement
+    /// Optimized with early-exit and parallel processing
     pub fn generate(&mut self, center_x: f32, center_z: f32, coverage: f32, seed: u64) {
+        use rayon::prelude::*;
+
         // Update world offset to center grid on position
         let half_size_x = (self.size_x * self.voxel_scale) as f32 / 2.0;
         let half_size_z = (self.size_z * self.voxel_scale) as f32 / 2.0;
@@ -253,90 +256,209 @@ impl CloudGrid {
         self.world_offset_z = center_z - half_size_z;
 
         // Coverage controls how large each cloud cell grows
-        // 0% = tiny clouds, 100% = large clouds (but ALWAYS with gaps between cells)
-        let cell_fill = 0.15 + coverage.clamp(0.0, 1.0) * 0.55; // 0.15 to 0.70
+        let cell_fill = 0.15 + coverage.clamp(0.0, 1.0) * 0.55;
 
         // Clear grid
         self.data.fill(false);
 
         let seed_f = (seed % 10000) as f32;
-
-        // Cloud cell size in world blocks - determines cloud spacing
-        // Larger cells = bigger, more spaced clouds
-        let cell_size = 90.0; // Slightly larger for more spacing
-
-        // Domain warping strength - how much to displace coordinates (in blocks)
+        let cell_size = 90.0;
         let warp_strength = 35.0;
-        let warp_freq = 0.008; // Low frequency for large-scale warping
+        let warp_freq = 0.008;
 
-        // Generate using cellular approach with domain warping
-        for y in 0..self.size_y {
-            for z in 0..self.size_z {
-                for x in 0..self.size_x {
-                    // World position for this voxel (in blocks)
-                    let wx = self.world_offset_x + (x * self.voxel_scale) as f32;
-                    let wz = self.world_offset_z + (z * self.voxel_scale) as f32;
-                    let wy = y as f32 * self.voxel_scale as f32;
+        // Pre-compute max possible radius for early exit
+        // max_radius = cell_size * max_cell_fill * max_size_var * max_edge_noise
+        let max_radius = cell_size * 0.70 * 1.4 * 1.35; // ~95 blocks
 
-                    // === DOMAIN WARPING ===
-                    // Warp coordinates before cell lookup to break grid pattern
-                    // This displaces where we "think" each point is, creating organic boundaries
-                    let warp_x = self.fbm_noise_3d(wx, 0.0, wz, seed_f + 500.0, warp_freq, 2) * 2.0 - 1.0;
-                    let warp_z = self.fbm_noise_3d(wx + 100.0, 0.0, wz + 100.0, seed_f + 600.0, warp_freq, 2) * 2.0 - 1.0;
+        // Capture values for parallel iteration
+        let size_x = self.size_x;
+        let size_y = self.size_y;
+        let size_z = self.size_z;
+        let voxel_scale = self.voxel_scale;
+        let world_offset_x = self.world_offset_x;
+        let world_offset_z = self.world_offset_z;
+
+        // Generate cloud data in parallel across XZ slices
+        // Each Z slice is independent, so we can parallelize
+        let results: Vec<Vec<(i32, i32, i32)>> = (0..size_z)
+            .into_par_iter()
+            .map(|z| {
+                let mut cloud_voxels = Vec::new();
+
+                for x in 0..size_x {
+                    // World position for this column
+                    let wx = world_offset_x + (x * voxel_scale) as f32;
+                    let wz = world_offset_z + (z * voxel_scale) as f32;
+
+                    // === DOMAIN WARPING (2D - same for all Y in column) ===
+                    let warp_x = Self::fbm_noise_2d_static(wx, wz, seed_f + 500.0, warp_freq, 2) * 2.0 - 1.0;
+                    let warp_z = Self::fbm_noise_2d_static(wx + 100.0, wz + 100.0, seed_f + 600.0, warp_freq, 2) * 2.0 - 1.0;
                     let warped_x = wx + warp_x * warp_strength;
                     let warped_z = wz + warp_z * warp_strength;
 
-                    // === CELLULAR CLOUD PLACEMENT (using warped coordinates) ===
-                    // Find which cell this voxel belongs to
+                    // === CELLULAR CLOUD PLACEMENT ===
                     let cell_x = (warped_x / cell_size).floor();
                     let cell_z = (warped_z / cell_size).floor();
 
-                    // Get cell's cloud center (jittered from cell center)
-                    // Increased jitter range: 10-90% into cell for more randomness
-                    let cell_hash = self.hash_2d(cell_x as i32, cell_z as i32, seed_f);
+                    let cell_hash = Self::hash_2d_static(cell_x as i32, cell_z as i32, seed_f);
                     let jitter_x = (cell_hash * 0.8 + 0.1) * cell_size;
-                    let jitter_z = (self.hash_2d(cell_x as i32 + 73, cell_z as i32 + 37, seed_f) * 0.8 + 0.1) * cell_size;
+                    let jitter_z = (Self::hash_2d_static(cell_x as i32 + 73, cell_z as i32 + 37, seed_f) * 0.8 + 0.1) * cell_size;
 
                     let cloud_center_x = cell_x * cell_size + jitter_x;
                     let cloud_center_z = cell_z * cell_size + jitter_z;
 
-                    // Distance from this voxel to cloud center (using warped position)
+                    // Distance from this column to cloud center
                     let dx = warped_x - cloud_center_x;
                     let dz = warped_z - cloud_center_z;
                     let dist_xz = (dx * dx + dz * dz).sqrt();
 
-                    // Cloud radius for this cell (varies per cell)
-                    let cell_size_var = self.hash_2d(cell_x as i32 + 100, cell_z as i32 + 100, seed_f);
-                    let base_radius = cell_size * cell_fill * (0.5 + cell_size_var * 0.9); // 50-140% of base
+                    // === EARLY EXIT: Skip if definitely outside any cloud ===
+                    if dist_xz > max_radius {
+                        continue;
+                    }
 
-                    // === HEIGHT FALLOFF ===
-                    // Clouds are dome-shaped: radius shrinks at top and bottom
-                    let height_norm = y as f32 / (self.size_y - 1).max(1) as f32;
-                    let height_factor = 1.0 - (2.0 * height_norm - 1.0).powi(2);
-                    let radius_at_height = base_radius * (0.3 + height_factor * 0.7);
+                    // Cell-specific radius variation (same for whole column)
+                    let cell_size_var = Self::hash_2d_static(cell_x as i32 + 100, cell_z as i32 + 100, seed_f);
+                    let base_radius = cell_size * cell_fill * (0.5 + cell_size_var * 0.9);
 
-                    // === EDGE NOISE ===
-                    // Add noise to the edge for organic shapes (use original coords for variety)
-                    let edge_noise = self.fbm_noise_3d(wx, wy * 0.5, wz, seed_f + 200.0, 0.04, 3);
-                    let noisy_radius = radius_at_height * (0.65 + edge_noise * 0.7);
+                    // Process Y layers for this column
+                    for y in 0..size_y {
+                        let wy = y as f32 * voxel_scale as f32;
 
-                    // === DENSITY CHECK ===
-                    // Inside cloud if distance < noisy radius
-                    if dist_xz < noisy_radius {
-                        // Additional density falloff from center (softer edges)
-                        let density = 1.0 - (dist_xz / noisy_radius).powi(2);
+                        // Height falloff (dome shape)
+                        let height_norm = y as f32 / (size_y - 1).max(1) as f32;
+                        let height_factor = 1.0 - (2.0 * height_norm - 1.0).powi(2);
+                        let radius_at_height = base_radius * (0.3 + height_factor * 0.7);
 
-                        // Small detail noise for internal variation
-                        let detail = self.noise_3d(wx * 0.05 + seed_f, wy * 0.03, wz * 0.05);
+                        // Early exit for this Y if clearly outside
+                        if dist_xz > radius_at_height * 1.35 {
+                            continue;
+                        }
 
-                        // Cloud exists if density is high enough
-                        if density + detail * 0.3 > 0.2 {
-                            self.set(x, y, z, true);
+                        // Edge noise (3D, varies with height)
+                        let edge_noise = Self::fbm_noise_3d_static(wx, wy * 0.5, wz, seed_f + 200.0, 0.04, 3);
+                        let noisy_radius = radius_at_height * (0.65 + edge_noise * 0.7);
+
+                        if dist_xz < noisy_radius {
+                            let density = 1.0 - (dist_xz / noisy_radius).powi(2);
+                            let detail = Self::noise_3d_static(wx * 0.05 + seed_f, wy * 0.03, wz * 0.05);
+
+                            if density + detail * 0.3 > 0.2 {
+                                cloud_voxels.push((x, y, z));
+                            }
                         }
                     }
                 }
+
+                cloud_voxels
+            })
+            .collect();
+
+        // Merge results into grid (single-threaded, but fast)
+        for voxels in results {
+            for (x, y, z) in voxels {
+                self.set(x, y, z, true);
             }
         }
+    }
+
+    // Static versions of noise functions for use in parallel closures
+
+    fn hash_2d_static(x: i32, z: i32, seed: f32) -> f32 {
+        let n = x.wrapping_mul(374761393)
+            .wrapping_add(z.wrapping_mul(668265263))
+            .wrapping_add((seed * 1000.0) as i32);
+        let n = (n ^ (n >> 13)).wrapping_mul(1274126177);
+        (n as u32 as f32) / (u32::MAX as f32)
+    }
+
+    fn noise_3d_static(x: f32, y: f32, z: f32) -> f32 {
+        let xi = x.floor() as i32;
+        let yi = y.floor() as i32;
+        let zi = z.floor() as i32;
+
+        let xf = x - x.floor();
+        let yf = y - y.floor();
+        let zf = z - z.floor();
+
+        let u = xf * xf * (3.0 - 2.0 * xf);
+        let v = yf * yf * (3.0 - 2.0 * yf);
+        let w = zf * zf * (3.0 - 2.0 * zf);
+
+        let n000 = Self::hash_3d_static(xi, yi, zi);
+        let n001 = Self::hash_3d_static(xi, yi, zi + 1);
+        let n010 = Self::hash_3d_static(xi, yi + 1, zi);
+        let n011 = Self::hash_3d_static(xi, yi + 1, zi + 1);
+        let n100 = Self::hash_3d_static(xi + 1, yi, zi);
+        let n101 = Self::hash_3d_static(xi + 1, yi, zi + 1);
+        let n110 = Self::hash_3d_static(xi + 1, yi + 1, zi);
+        let n111 = Self::hash_3d_static(xi + 1, yi + 1, zi + 1);
+
+        let nx00 = n000 + u * (n100 - n000);
+        let nx01 = n001 + u * (n101 - n001);
+        let nx10 = n010 + u * (n110 - n010);
+        let nx11 = n011 + u * (n111 - n011);
+
+        let nxy0 = nx00 + v * (nx10 - nx00);
+        let nxy1 = nx01 + v * (nx11 - nx01);
+
+        nxy0 + w * (nxy1 - nxy0)
+    }
+
+    fn hash_3d_static(x: i32, y: i32, z: i32) -> f32 {
+        let n = x.wrapping_mul(374761393)
+            .wrapping_add(y.wrapping_mul(668265263))
+            .wrapping_add(z.wrapping_mul(1274126177));
+        let n = (n ^ (n >> 13)).wrapping_mul(1274126177);
+        (n as u32 as f32) / (u32::MAX as f32)
+    }
+
+    fn fbm_noise_2d_static(x: f32, z: f32, seed: f32, base_freq: f32, octaves: u32) -> f32 {
+        let mut value = 0.0;
+        let mut amplitude = 1.0;
+        let mut frequency = base_freq;
+        let mut total_amp = 0.0;
+
+        for i in 0..octaves {
+            let n = Self::noise_3d_static(
+                x * frequency + seed + i as f32 * 127.1,
+                0.0,
+                z * frequency + seed * 0.6 + i as f32 * 89.3,
+            );
+
+            value += n * amplitude;
+            total_amp += amplitude;
+
+            amplitude *= 0.5;
+            frequency *= 2.0;
+        }
+
+        value / total_amp
+    }
+
+    fn fbm_noise_3d_static(x: f32, y: f32, z: f32, seed: f32, base_freq: f32, octaves: u32) -> f32 {
+        let mut value = 0.0;
+        let mut amplitude = 1.0;
+        let mut frequency = base_freq;
+        let mut total_amp = 0.0;
+
+        for i in 0..octaves {
+            let freq_y = frequency * 0.4;
+
+            let n = Self::noise_3d_static(
+                x * frequency + seed + i as f32 * 127.1,
+                y * freq_y,
+                z * frequency + seed * 0.6 + i as f32 * 89.3,
+            );
+
+            value += n * amplitude;
+            total_amp += amplitude;
+
+            amplitude *= 0.5;
+            frequency *= 2.0;
+        }
+
+        value / total_amp
     }
 
     /// Hash function for cell jitter (2D)

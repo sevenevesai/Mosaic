@@ -54,6 +54,10 @@ harness = false
 name = "lighting_bench"
 harness = false
 
+[[bench]]
+name = "cloud_bench"
+harness = false
+
 [profile.dev]
 opt-level = 1
 

@@ -44,7 +44,10 @@ pub use voxel_gi::VoxelGI;
 pub use vox_loader::{VoxModel, VoxMesh};
 pub use volumetrics::VolumetricLighting;
 pub use water::{Water, WaterQuality};
-pub use clouds::{Clouds, CloudQuality};
+pub use clouds::{
+    Clouds, CloudQuality, CloudGrid, CloudMesh, CloudVertex,
+    CLOUD_GRID_SIZE, CLOUD_VOXEL_SCALE, CLOUD_BASE_Y, CLOUD_THICKNESS_BLOCKS,
+};
 pub use grass::{GrassSystem, GrassQuality, GrassDistance, GrassShadow, GrassTile, BiomePalette, GrassStats};
 
 /// Display mode for the window
