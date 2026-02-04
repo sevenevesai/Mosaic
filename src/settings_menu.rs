@@ -584,6 +584,30 @@ impl SettingsMenu {
                 set_index: |_, _| {},
                 set_float: |r, v| { r.set_audio_ambient(v); },
             },
+            MenuItem {
+                label: "MUSIC",
+                tab: MenuTab::Audio,
+                control_type: ControlType::Toggle,
+                get_value: |r| if r.is_music_enabled() { "ON".to_string() } else { "OFF".to_string() },
+                get_index: |r| if r.is_music_enabled() { 1 } else { 0 },
+                get_float: |_| 0.0,
+                cycle_next: |r| { r.toggle_music(); },
+                cycle_prev: |r| { r.toggle_music(); },
+                set_index: |r, i| { r.set_music_enabled(i == 1); },
+                set_float: |_, _| {},
+            },
+            MenuItem {
+                label: "MUSIC VOLUME",
+                tab: MenuTab::Audio,
+                control_type: ControlType::PercentSlider,
+                get_value: |r| format!("{}%", (r.audio_music() * 100.0).round() as i32),
+                get_index: |_| 0,
+                get_float: |r| r.audio_music(),
+                cycle_next: |r| { r.cycle_audio_music(); },
+                cycle_prev: |r| { r.cycle_audio_music_prev(); },
+                set_index: |_, _| {},
+                set_float: |r, v| { r.set_audio_music(v); },
+            },
 
             // === DEBUG TAB ===
             MenuItem {

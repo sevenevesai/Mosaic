@@ -30,12 +30,55 @@
 //! Missing sounds are gracefully handled (no crash, just silent).
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use glam::Vec3;
 use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink, Source, SpatialSink};
 
 use crate::world::{Block, WorldManager};
+
+/// Base volume level for music (0.0 - 1.0), before category scaling
+const MUSIC_BASE_VOLUME: f32 = 0.6;
+
+/// Crossfade duration for music transitions (seconds)
+const MUSIC_CROSSFADE_SECS: f32 = 4.0;
+
+/// Minimum gap between tracks (seconds)
+const MUSIC_GAP_MIN_SECS: f32 = 30.0;
+
+/// Maximum gap between tracks (seconds)
+const MUSIC_GAP_MAX_SECS: f32 = 90.0;
+
+/// Initial delay before music starts (seconds)
+const MUSIC_STARTUP_DELAY_SECS: f32 = 45.0;
+
+/// Cooldown between skip requests (seconds)
+const MUSIC_SKIP_COOLDOWN_SECS: f32 = 2.0;
+
+/// Music playback state machine
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum MusicState {
+    /// Waiting for startup delay or gap timer
+    Idle,
+    /// Track is playing normally
+    Playing,
+    /// Fading out current track (for skip or transition)
+    FadingOut,
+    /// In silence gap between tracks
+    Gap,
+}
+
+/// Track category for filtering
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TrackCategory {
+    /// Calm ambient tracks for exploration
+    Ambient,
+    /// Combat/intense tracks (excluded from normal rotation)
+    Combat,
+    /// Short stingers/discovery sounds (excluded from rotation)
+    Stinger,
+}
 
 /// Sound material categories for audio feedback
 /// Maps blocks to distinct sound types for footsteps, breaking, and placing
@@ -182,6 +225,10 @@ pub struct AudioSettings {
     pub sfx: f32,
     /// Ambient sounds volume (0.0 - 1.0)
     pub ambient: f32,
+    /// Music volume (0.0 - 1.0)
+    pub music: f32,
+    /// Whether music is enabled
+    pub music_enabled: bool,
 }
 
 impl Default for AudioSettings {
@@ -190,6 +237,8 @@ impl Default for AudioSettings {
             master: 0.8,
             sfx: 1.0,
             ambient: 0.6,
+            music: 0.5,
+            music_enabled: true,
         }
     }
 }
@@ -203,6 +252,11 @@ impl AudioSettings {
     /// Get effective ambient volume (master * ambient)
     pub fn effective_ambient(&self) -> f32 {
         self.master * self.ambient
+    }
+
+    /// Get effective music volume (master * music)
+    pub fn effective_music(&self) -> f32 {
+        self.master * self.music
     }
 }
 
@@ -278,6 +332,28 @@ pub struct AudioManager {
     reverb_mix: f32,
     /// Target reverb mix (smoothly interpolated)
     target_reverb_mix: f32,
+
+    // === Music system ===
+    /// Available music track paths (ambient only, shuffled)
+    music_tracks: Vec<PathBuf>,
+    /// Current position in shuffled track list
+    music_track_index: usize,
+    /// Recently played tracks (to avoid repeats)
+    music_recent: Vec<usize>,
+    /// Current music state
+    music_state: MusicState,
+    /// Timer for gap/delay/fade
+    music_timer: f32,
+    /// Current music sink
+    music_sink: Option<Sink>,
+    /// Current track volume (for fading)
+    music_current_volume: f32,
+    /// Target track volume
+    music_target_volume: f32,
+    /// Skip cooldown timer
+    music_skip_cooldown: f32,
+    /// Name of currently playing track (for logging)
+    music_current_name: String,
 }
 
 impl AudioManager {
@@ -410,11 +486,15 @@ impl AudioManager {
         // Generate cave impulse response for reverb
         let cave_impulse = Some(Self::generate_cave_impulse());
 
+        // Load and categorize music tracks
+        let music_tracks = Self::load_music_tracks();
+
         // Count total sounds loaded
         let footstep_count: usize = footstep_buffers.values().map(|v| v.len()).sum();
         let break_count: usize = break_buffers.values().map(|v| v.len()).sum();
         let place_count: usize = place_buffers.values().map(|v| v.len()).sum();
         let ambient_count = ambient_buffers.len();
+        let music_count = music_tracks.len();
 
         let total = footstep_count + break_count + place_count;
         if total == 0 {
@@ -422,12 +502,13 @@ impl AudioManager {
         }
 
         tracing::info!(
-            "Audio initialized: {} footstep ({} materials), {} break, {} place, {} ambient sounds",
+            "Audio initialized: {} footstep ({} materials), {} break, {} place, {} ambient, {} music tracks",
             footstep_count,
             footstep_buffers.len(),
             break_count,
             place_count,
             ambient_count,
+            music_count,
         );
 
         Some(Self {
@@ -453,6 +534,17 @@ impl AudioManager {
             cave_impulse,
             reverb_mix: 0.0,
             target_reverb_mix: 0.0,
+            // Music system
+            music_tracks,
+            music_track_index: 0,
+            music_recent: Vec::new(),
+            music_state: MusicState::Idle,
+            music_timer: MUSIC_STARTUP_DELAY_SECS,
+            music_sink: None,
+            music_current_volume: 0.0,
+            music_target_volume: 0.0,
+            music_skip_cooldown: 0.0,
+            music_current_name: String::new(),
         })
     }
 
@@ -966,6 +1058,339 @@ impl AudioManager {
     /// Set ambient volume (0.0 - 1.0)
     pub fn set_ambient_volume(&mut self, volume: f32) {
         self.settings.ambient = volume.clamp(0.0, 1.0);
+    }
+
+    /// Set music volume (0.0 - 1.0)
+    pub fn set_music_volume(&mut self, volume: f32) {
+        self.settings.music = volume.clamp(0.0, 1.0);
+    }
+
+    /// Set music enabled state
+    pub fn set_music_enabled(&mut self, enabled: bool) {
+        let was_enabled = self.settings.music_enabled;
+        self.settings.music_enabled = enabled;
+
+        if !enabled && was_enabled {
+            // Turning off: fade out current music
+            if self.music_state == MusicState::Playing {
+                self.music_state = MusicState::FadingOut;
+                self.music_target_volume = 0.0;
+            }
+        } else if enabled && !was_enabled {
+            // Turning on: start music system (will pick up in update_music)
+            if self.music_state != MusicState::Playing && self.music_state != MusicState::FadingOut {
+                self.music_state = MusicState::Idle;
+                self.music_timer = 5.0; // Short delay before starting
+            }
+        }
+    }
+
+    // ========== MUSIC SYSTEM ==========
+
+    /// Load music tracks from assets/music directory
+    fn load_music_tracks() -> Vec<PathBuf> {
+        let music_dir = std::path::Path::new("assets/music");
+        let mut tracks = Vec::new();
+
+        if !music_dir.exists() {
+            tracing::warn!("Music directory not found: assets/music");
+            return tracks;
+        }
+
+        // Patterns for tracks to EXCLUDE (combat, stingers)
+        let exclude_patterns = [
+            "enemy",
+            "boss",
+            "combat",
+            "battle",
+            "fight",
+            "ghosta",
+            "demon",
+            "cinematic",
+            "discovery",  // Short stinger
+            "lava castle",
+        ];
+
+        if let Ok(entries) = std::fs::read_dir(music_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+
+                // Check for audio file extensions
+                if let Some(ext) = path.extension() {
+                    let ext_lower = ext.to_string_lossy().to_lowercase();
+                    if !["flac", "ogg", "mp3", "wav"].contains(&ext_lower.as_str()) {
+                        continue;
+                    }
+                } else {
+                    continue;
+                }
+
+                // Check against exclude patterns
+                let filename_lower = path.file_name()
+                    .map(|n| n.to_string_lossy().to_lowercase())
+                    .unwrap_or_default();
+
+                let should_exclude = exclude_patterns.iter()
+                    .any(|pattern| filename_lower.contains(pattern));
+
+                if should_exclude {
+                    tracing::debug!("Excluding music track (combat/stinger): {:?}", path.file_name());
+                    continue;
+                }
+
+                tracing::debug!("Found ambient music track: {:?}", path.file_name());
+                tracks.push(path);
+            }
+        }
+
+        // Shuffle the tracks initially
+        Self::shuffle_vec(&mut tracks);
+
+        tracing::info!("Loaded {} ambient music tracks", tracks.len());
+        tracks
+    }
+
+    /// Fisher-Yates shuffle for track randomization
+    fn shuffle_vec<T>(vec: &mut Vec<T>) {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let seed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(12345);
+
+        let mut rng_state = seed;
+
+        for i in (1..vec.len()).rev() {
+            // Simple LCG random
+            rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let j = (rng_state as usize) % (i + 1);
+            vec.swap(i, j);
+        }
+    }
+
+    /// Get a random gap duration between tracks
+    fn random_gap_duration() -> f32 {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let seed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(12345);
+
+        let normalized = ((seed % 10000) as f32) / 10000.0;
+        MUSIC_GAP_MIN_SECS + normalized * (MUSIC_GAP_MAX_SECS - MUSIC_GAP_MIN_SECS)
+    }
+
+    /// Update music system - call every frame
+    pub fn update_music(&mut self, dt: f32) {
+        // Update skip cooldown
+        if self.music_skip_cooldown > 0.0 {
+            self.music_skip_cooldown -= dt;
+        }
+
+        // If music disabled, just maintain fade out
+        if !self.settings.music_enabled {
+            if self.music_state == MusicState::FadingOut {
+                self.update_music_fade(dt);
+            }
+            return;
+        }
+
+        // No tracks available
+        if self.music_tracks.is_empty() {
+            return;
+        }
+
+        match self.music_state {
+            MusicState::Idle => {
+                // Waiting for startup delay
+                self.music_timer -= dt;
+                if self.music_timer <= 0.0 {
+                    self.start_next_track();
+                }
+            }
+
+            MusicState::Playing => {
+                // Update volume to match settings
+                self.music_target_volume = MUSIC_BASE_VOLUME * self.settings.effective_music();
+                self.update_music_fade(dt);
+
+                // Check if track finished
+                if let Some(ref sink) = self.music_sink {
+                    if sink.empty() {
+                        tracing::info!("Music track finished: {}", self.music_current_name);
+                        self.music_sink = None;
+                        self.music_state = MusicState::Gap;
+                        self.music_timer = Self::random_gap_duration();
+                        tracing::debug!("Music gap: {:.1}s", self.music_timer);
+                    }
+                }
+            }
+
+            MusicState::FadingOut => {
+                self.update_music_fade(dt);
+
+                // Check if fade complete
+                if self.music_current_volume <= 0.01 {
+                    // Stop the sink
+                    if let Some(sink) = self.music_sink.take() {
+                        sink.stop();
+                    }
+                    self.music_current_volume = 0.0;
+
+                    if self.settings.music_enabled {
+                        // Transition to gap, then next track
+                        self.music_state = MusicState::Gap;
+                        self.music_timer = 2.0; // Short gap after skip
+                    } else {
+                        self.music_state = MusicState::Idle;
+                        self.music_timer = 5.0;
+                    }
+                }
+            }
+
+            MusicState::Gap => {
+                // Silence gap between tracks
+                self.music_timer -= dt;
+                if self.music_timer <= 0.0 {
+                    self.start_next_track();
+                }
+            }
+        }
+    }
+
+    /// Update volume fading
+    fn update_music_fade(&mut self, dt: f32) {
+        let fade_speed = 1.0 / MUSIC_CROSSFADE_SECS;
+
+        if self.music_current_volume < self.music_target_volume {
+            self.music_current_volume = (self.music_current_volume + fade_speed * dt)
+                .min(self.music_target_volume);
+        } else if self.music_current_volume > self.music_target_volume {
+            self.music_current_volume = (self.music_current_volume - fade_speed * dt)
+                .max(self.music_target_volume);
+        }
+
+        // Apply volume to sink
+        if let Some(ref sink) = self.music_sink {
+            sink.set_volume(self.music_current_volume);
+        }
+    }
+
+    /// Start playing the next track in the shuffle
+    fn start_next_track(&mut self) {
+        if self.music_tracks.is_empty() {
+            self.music_state = MusicState::Idle;
+            self.music_timer = 30.0;
+            return;
+        }
+
+        // Get next track, avoiding recent repeats
+        let mut attempts = 0;
+        loop {
+            self.music_track_index = (self.music_track_index + 1) % self.music_tracks.len();
+
+            // Check if recently played (avoid last 3 tracks)
+            if !self.music_recent.contains(&self.music_track_index) || attempts > self.music_tracks.len() {
+                break;
+            }
+            attempts += 1;
+        }
+
+        // Update recent list
+        self.music_recent.push(self.music_track_index);
+        if self.music_recent.len() > 3 {
+            self.music_recent.remove(0);
+        }
+
+        let track_path = &self.music_tracks[self.music_track_index];
+        self.music_current_name = track_path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "Unknown".to_string());
+
+        // Load and play the track
+        match std::fs::File::open(track_path) {
+            Ok(file) => {
+                let buf_reader = std::io::BufReader::new(file);
+                match Decoder::new(buf_reader) {
+                    Ok(source) => {
+                        // Play directly without filtering for now
+                        // (Low-pass filtering requires sample conversion - can add later)
+                        if let Ok(sink) = Sink::try_new(&self.stream_handle) {
+                            sink.set_volume(0.0); // Start silent for fade-in
+                            sink.append(source);
+
+                            self.music_sink = Some(sink);
+                            self.music_state = MusicState::Playing;
+                            self.music_current_volume = 0.0;
+                            self.music_target_volume = MUSIC_BASE_VOLUME * self.settings.effective_music();
+
+                            tracing::info!("Playing music: {}", self.music_current_name);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to decode music track {:?}: {}", track_path, e);
+                        // Try next track after a short delay
+                        self.music_timer = 2.0;
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to open music track {:?}: {}", track_path, e);
+                self.music_timer = 2.0;
+            }
+        }
+    }
+
+    /// Skip to the next track (user-initiated)
+    pub fn skip_track(&mut self) {
+        // Check cooldown
+        if self.music_skip_cooldown > 0.0 {
+            tracing::debug!("Music skip on cooldown ({:.1}s remaining)", self.music_skip_cooldown);
+            return;
+        }
+
+        if !self.settings.music_enabled {
+            return;
+        }
+
+        // Set cooldown
+        self.music_skip_cooldown = MUSIC_SKIP_COOLDOWN_SECS;
+
+        if self.music_state == MusicState::Playing {
+            tracing::info!("Skipping music track: {}", self.music_current_name);
+            self.music_state = MusicState::FadingOut;
+            self.music_target_volume = 0.0;
+        } else if self.music_state == MusicState::Gap || self.music_state == MusicState::Idle {
+            // If in gap, start next track immediately
+            self.music_timer = 0.0;
+        }
+    }
+
+    /// Stop all music playback
+    pub fn stop_music(&mut self) {
+        if let Some(sink) = self.music_sink.take() {
+            sink.stop();
+        }
+        self.music_state = MusicState::Idle;
+        self.music_current_volume = 0.0;
+        self.music_timer = MUSIC_STARTUP_DELAY_SECS;
+    }
+
+    /// Get the name of the currently playing track (or empty if none)
+    pub fn current_track_name(&self) -> &str {
+        if self.music_state == MusicState::Playing || self.music_state == MusicState::FadingOut {
+            &self.music_current_name
+        } else {
+            ""
+        }
+    }
+
+    /// Check if music is currently playing
+    pub fn is_music_playing(&self) -> bool {
+        self.music_state == MusicState::Playing
     }
 }
 

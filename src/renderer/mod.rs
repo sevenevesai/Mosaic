@@ -215,6 +215,10 @@ pub struct Renderer {
     audio_sfx: f32,
     /// Ambient audio volume (0.0 - 1.0)
     audio_ambient: f32,
+    /// Music audio volume (0.0 - 1.0)
+    audio_music: f32,
+    /// Whether background music is enabled
+    music_enabled: bool,
 
     // Voxel-based Global Illumination system
     // Uses DDA ray marching for shadows, VCT for indirect lighting
@@ -822,6 +826,8 @@ impl Renderer {
             audio_master: 0.8,
             audio_sfx: 1.0,
             audio_ambient: 0.6,
+            audio_music: 0.5,
+            music_enabled: true,
             voxel_gi,
             bloom,
             scene_texture,
@@ -1281,6 +1287,51 @@ impl Renderer {
         } else {
             (self.audio_ambient - 0.1).max(0.0)
         };
+    }
+
+    /// Get music audio volume (0.0-1.0)
+    pub fn audio_music(&self) -> f32 {
+        self.audio_music
+    }
+
+    /// Cycle music audio volume forward
+    pub fn cycle_audio_music(&mut self) {
+        self.audio_music = if self.audio_music >= 1.0 {
+            0.0
+        } else {
+            (self.audio_music + 0.1).min(1.0)
+        };
+    }
+
+    /// Set music audio volume directly (0.0-1.0)
+    pub fn set_audio_music(&mut self, value: f32) {
+        self.audio_music = value.clamp(0.0, 1.0);
+    }
+
+    /// Cycle music audio volume backwards
+    pub fn cycle_audio_music_prev(&mut self) {
+        self.audio_music = if self.audio_music <= 0.0 {
+            1.0
+        } else {
+            (self.audio_music - 0.1).max(0.0)
+        };
+    }
+
+    /// Check if music is enabled
+    pub fn is_music_enabled(&self) -> bool {
+        self.music_enabled
+    }
+
+    /// Toggle music on/off
+    pub fn toggle_music(&mut self) -> bool {
+        self.music_enabled = !self.music_enabled;
+        tracing::info!("Music: {}", if self.music_enabled { "ON" } else { "OFF" });
+        self.music_enabled
+    }
+
+    /// Set music enabled state directly
+    pub fn set_music_enabled(&mut self, enabled: bool) {
+        self.music_enabled = enabled;
     }
 
     /// Check if audio settings have changed (for syncing to AudioManager)
@@ -2210,6 +2261,8 @@ impl Renderer {
         self.audio_master = settings.audio_master;
         self.audio_sfx = settings.audio_sfx;
         self.audio_ambient = settings.audio_ambient;
+        self.audio_music = settings.audio_music;
+        self.music_enabled = settings.music_enabled;
     }
 
     /// Collect current settings into a Settings struct
@@ -2233,6 +2286,8 @@ impl Renderer {
             audio_master: self.audio_master,
             audio_sfx: self.audio_sfx,
             audio_ambient: self.audio_ambient,
+            audio_music: self.audio_music,
+            music_enabled: self.music_enabled,
             ssao_quality: self.ssao.quality.as_str().to_string(),
             dof_quality: self.dof.quality.as_str().to_string(),
             aa_quality: self.aa.quality.as_str().to_string(),

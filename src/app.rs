@@ -320,6 +320,15 @@ impl App {
                         KeyCode::KeyP if pressed => {
                             self.profiler.toggle_verbose();
                         }
+                        KeyCode::KeyM if pressed => {
+                            // Skip to next music track
+                            if let Some(ref mut audio) = self.audio {
+                                if self.renderer.is_music_enabled() {
+                                    audio.skip_track();
+                                    tracing::info!("Skipping to next music track...");
+                                }
+                            }
+                        }
                         KeyCode::KeyE if pressed && !self.settings_menu.is_open => {
                             // Toggle inventory with cursor grab handling
                             let was_open = self.player.is_inventory_open();
@@ -603,19 +612,27 @@ impl App {
         }
         self.profiler.end_section("player_update");
 
-        // Update audio system (ambient sounds, volume settings sync)
+        // Update audio system (ambient sounds, music, volume settings sync)
         if let Some(ref mut audio) = self.audio {
             // Sync volume settings from renderer to audio manager
             let new_settings = AudioSettings {
                 master: self.renderer.audio_master(),
                 sfx: self.renderer.audio_sfx(),
                 ambient: self.renderer.audio_ambient(),
+                music: self.renderer.audio_music(),
+                music_enabled: self.renderer.is_music_enabled(),
             };
             if audio.get_settings().master != new_settings.master
                 || audio.get_settings().sfx != new_settings.sfx
                 || audio.get_settings().ambient != new_settings.ambient
+                || audio.get_settings().music != new_settings.music
+                || audio.get_settings().music_enabled != new_settings.music_enabled
             {
-                audio.set_settings(new_settings);
+                audio.set_settings(new_settings.clone());
+                // If music enabled state changed, notify the music system
+                if audio.get_settings().music_enabled != new_settings.music_enabled {
+                    audio.set_music_enabled(new_settings.music_enabled);
+                }
             }
 
             // Update ambient sounds based on environment
@@ -651,6 +668,9 @@ impl App {
             };
 
             audio.update_ambient(dt.as_secs_f32(), env);
+
+            // Update background music system
+            audio.update_music(dt.as_secs_f32());
         }
 
         // Update world (chunk loading/generation, meshing, lighting)

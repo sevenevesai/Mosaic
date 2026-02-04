@@ -71,6 +71,10 @@ pub struct Settings {
     pub audio_sfx: f32,
     /// Ambient sounds volume (0.0 - 1.0)
     pub audio_ambient: f32,
+    /// Music volume (0.0 - 1.0)
+    pub audio_music: f32,
+    /// Whether background music is enabled
+    pub music_enabled: bool,
 
     // === LOD SETTINGS ===
     /// LOD distance: "OFF" or chunk distance where LOD starts (6, 8, 12, 16, 20, 24, 32)
@@ -116,6 +120,8 @@ impl Default for Settings {
             audio_master: 0.8,   // 80% master volume
             audio_sfx: 1.0,      // 100% SFX
             audio_ambient: 0.6,  // 60% ambient
+            audio_music: 0.5,    // 50% music
+            music_enabled: true, // Music on by default
             // LOD defaults
             lod_distance: "12".to_string(),  // Default: LOD starts at 12 chunks
         }
@@ -289,6 +295,14 @@ impl Settings {
                             settings.audio_ambient = v;
                         }
                     }
+                    "audio_music" => {
+                        if let Ok(v) = value.parse() {
+                            settings.audio_music = v;
+                        }
+                    }
+                    "music_enabled" => {
+                        settings.music_enabled = value == "true";
+                    }
                     // LOD settings
                     "lod_distance" => {
                         settings.lod_distance = value.to_string();
@@ -342,6 +356,8 @@ impl Settings {
              audio_master={}\n\
              audio_sfx={}\n\
              audio_ambient={}\n\
+             audio_music={}\n\
+             music_enabled={}\n\
              # LOD Settings\n\
              lod_distance={}\n",
             self.render_distance,
@@ -376,6 +392,8 @@ impl Settings {
             self.audio_master,
             self.audio_sfx,
             self.audio_ambient,
+            self.audio_music,
+            self.music_enabled,
             self.lod_distance,
         );
 
