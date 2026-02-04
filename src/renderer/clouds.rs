@@ -10,9 +10,12 @@
 //! - Wind animation moves entire cloud layer
 //! - Soft white translucent rendering
 //! - Quality presets control voxel scale and update rate
+//! - Background thread generation to avoid frame drops
 
 use wgpu::util::DeviceExt;
 use glam::{Vec3, Mat4};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::thread;
 
 /// Cloud voxel scale - each cloud voxel is this many terrain blocks
 pub const CLOUD_VOXEL_SCALE: i32 = 4;
@@ -28,11 +31,19 @@ pub const CLOUD_THICKNESS_BLOCKS: i32 = 32;
 /// Larger grid = less frequent regeneration = smoother streaming
 pub const CLOUD_GRID_SIZE: i32 = 256;
 
-/// Maximum vertices for cloud mesh (generous for large grid)
-pub const MAX_CLOUD_VERTICES: usize = 65536;
+/// Maximum vertices for cloud mesh (generous for large grid with thick clouds)
+/// At 256 grid with 16 thickness, worst case ~150K vertices
+pub const MAX_CLOUD_VERTICES: usize = 196608;
 
-/// Maximum indices for cloud mesh
-pub const MAX_CLOUD_INDICES: usize = 131072;
+/// Maximum indices for cloud mesh (6 indices per quad, 4 verts per quad)
+pub const MAX_CLOUD_INDICES: usize = 294912;
+
+/// Result of background cloud mesh generation
+struct CloudMeshResult {
+    vertices: Vec<CloudVertex>,
+    indices: Vec<u32>,
+    buffer_idx: usize,
+}
 
 /// Cloud rendering quality preset
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -678,8 +689,12 @@ pub struct Clouds {
     transition_progress: f32,  // 0.0 = no transition, 0.0->1.0 during fade
     is_transitioning: bool,
 
-    // Cloud state
-    grid: CloudGrid,
+    // Background generation
+    mesh_receiver: Receiver<CloudMeshResult>,
+    mesh_sender: Sender<CloudMeshResult>,
+    generation_in_progress: bool,
+
+    // Cloud state (cached for background thread)
     quality: CloudQuality,
     uniforms: CloudUniforms,
 
@@ -810,9 +825,9 @@ impl Clouds {
         });
 
         let quality = CloudQuality::default();
-        let voxel_scale = quality.voxel_scale();
-        let grid_size = CLOUD_GRID_SIZE / (voxel_scale / CLOUD_VOXEL_SCALE).max(1);
-        let thickness = quality.cloud_thickness();
+
+        // Create channel for background mesh generation
+        let (mesh_sender, mesh_receiver) = mpsc::channel();
 
         Self {
             pipeline,
@@ -825,7 +840,9 @@ impl Clouds {
             is_transitioning: false,
             bind_group_layout,
             bind_group,
-            grid: CloudGrid::new(grid_size, thickness, grid_size, voxel_scale),
+            mesh_receiver,
+            mesh_sender,
+            generation_in_progress: false,
             quality,
             uniforms,
             grid_origin_x: 0.0,
@@ -850,6 +867,13 @@ impl Clouds {
     }
 
     /// Update cloud mesh if needed
+    /// Calculate grid world size based on quality
+    fn grid_world_size(&self) -> f32 {
+        let voxel_scale = self.quality.voxel_scale();
+        let grid_size = CLOUD_GRID_SIZE / (voxel_scale / CLOUD_VOXEL_SCALE).max(1);
+        grid_size as f32 * voxel_scale as f32
+    }
+
     pub fn update(
         &mut self,
         queue: &wgpu::Queue,
@@ -866,14 +890,52 @@ impl Clouds {
             return;
         }
 
+        // === CHECK FOR COMPLETED BACKGROUND GENERATION ===
+        // Non-blocking check for mesh data from background thread
+        if let Ok(result) = self.mesh_receiver.try_recv() {
+            // Upload completed mesh to GPU (this is fast - just buffer writes)
+            if !result.vertices.is_empty() && !result.indices.is_empty() {
+                queue.write_buffer(
+                    &self.vertex_buffers[result.buffer_idx],
+                    0,
+                    bytemuck::cast_slice(&result.vertices),
+                );
+                queue.write_buffer(
+                    &self.index_buffers[result.buffer_idx],
+                    0,
+                    bytemuck::cast_slice(&result.indices),
+                );
+                self.index_counts[result.buffer_idx] = result.indices.len() as u32;
+
+                tracing::info!(
+                    "Cloud mesh ready (buffer {}): {} verts, {} quads - uploaded to GPU",
+                    result.buffer_idx,
+                    result.vertices.len(),
+                    result.indices.len() / 6
+                );
+            } else {
+                self.index_counts[result.buffer_idx] = 0;
+            }
+
+            // Start transition (unless this is the first generation)
+            if self.index_counts[self.active_buffer] > 0 {
+                self.is_transitioning = true;
+                self.transition_progress = 0.0;
+            } else {
+                // First generation - just swap immediately
+                self.active_buffer = result.buffer_idx;
+            }
+
+            self.generation_in_progress = false;
+        }
+
         // Wind movement - accumulate offset continuously using randomized direction
         let wind_speed = self.speed * 8.0; // Blocks per second at full speed
         self.wind_offset_x += self.wind_dir_x * wind_speed * delta_time;
         self.wind_offset_z += self.wind_dir_z * wind_speed * delta_time;
 
-        // Grid world size
-        let voxel_scale = self.quality.voxel_scale() as f32;
-        let grid_world_size = self.grid.size_x as f32 * voxel_scale;
+        // Grid world size (calculated from quality, not stored grid)
+        let grid_world_size = self.grid_world_size();
         let half_grid = grid_world_size / 2.0;
 
         // === CROSS-FADE TRANSITION ===
@@ -889,22 +951,30 @@ impl Clouds {
         }
 
         // === REGENERATION TRIGGERS ===
-        // Only trigger if not already transitioning
-        if !self.is_transitioning {
+        // Only trigger if not already transitioning AND not already generating
+        if !self.is_transitioning && !self.generation_in_progress {
             let effective_center_x = self.grid_origin_x + self.wind_offset_x;
             let effective_center_z = self.grid_origin_z + self.wind_offset_z;
             let dx = camera_pos.x - effective_center_x;
             let dz = camera_pos.z - effective_center_z;
             let dist_from_effective_center = (dx * dx + dz * dz).sqrt();
 
-            // Regenerate when camera is 30% away from effective cloud center
-            let player_moved_far = dist_from_effective_center > grid_world_size * 0.30;
+            // Regenerate when camera is 40% away from effective cloud center
+            // With 1024 block grid, this is ~400 blocks of movement tolerance
+            let player_moved_far = dist_from_effective_center > grid_world_size * 0.40;
 
-            // Safety: also regenerate if wind has accumulated to 45% of grid
-            let wind_too_large = self.wind_offset_x.abs() > grid_world_size * 0.45
-                || self.wind_offset_z.abs() > grid_world_size * 0.45;
+            // Safety: also regenerate if wind has accumulated to 50% of grid
+            // At 2.4 blocks/sec (30% speed), this takes ~3.5 minutes
+            let wind_too_large = self.wind_offset_x.abs() > grid_world_size * 0.50
+                || self.wind_offset_z.abs() > grid_world_size * 0.50;
 
             if self.needs_regenerate || player_moved_far || wind_too_large {
+                tracing::info!(
+                    "Cloud regeneration started (background): needs={} player_far={} (dist={:.0}) wind_large={} (wx={:.0} wz={:.0})",
+                    self.needs_regenerate, player_moved_far, dist_from_effective_center,
+                    wind_too_large, self.wind_offset_x, self.wind_offset_z
+                );
+
                 // Generate into the INACTIVE buffer for cross-fade
                 let inactive_buffer = 1 - self.active_buffer;
                 let new_origin_x = camera_pos.x - self.wind_offset_x;
@@ -912,16 +982,13 @@ impl Clouds {
 
                 self.grid_origin_x = new_origin_x;
                 self.grid_origin_z = new_origin_z;
-                self.regenerate_mesh_to_buffer(queue, new_origin_x, new_origin_z, inactive_buffer);
 
-                // Start transition (unless this is the first generation)
-                if self.index_counts[self.active_buffer] > 0 {
-                    self.is_transitioning = true;
-                    self.transition_progress = 0.0;
-                } else {
-                    // First generation - just swap immediately
-                    self.active_buffer = inactive_buffer;
-                }
+                // Start background generation
+                self.start_background_generation(new_origin_x, new_origin_z, inactive_buffer);
+
+                // Reset wind offset - it's now baked into grid_origin
+                self.wind_offset_x = 0.0;
+                self.wind_offset_z = 0.0;
 
                 self.needs_regenerate = false;
             }
@@ -948,30 +1015,46 @@ impl Clouds {
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[self.uniforms]));
     }
 
-    /// Regenerate cloud mesh centered on given position into specified buffer
-    fn regenerate_mesh_to_buffer(&mut self, queue: &wgpu::Queue, center_x: f32, center_z: f32, buffer_idx: usize) {
-        // Generate cloud voxels
-        self.grid.generate(center_x, center_z, self.coverage, 12345);
+    /// Start background thread to generate cloud mesh
+    fn start_background_generation(&mut self, center_x: f32, center_z: f32, buffer_idx: usize) {
+        self.generation_in_progress = true;
 
-        // Generate mesh
-        let mesh = CloudMesh::from_grid(&self.grid, CLOUD_BASE_Y);
+        // Capture values for the background thread
+        let quality = self.quality;
+        let coverage = self.coverage;
+        let sender = self.mesh_sender.clone();
 
-        // Upload to specified buffer
-        if !mesh.vertices.is_empty() && !mesh.indices.is_empty() {
-            queue.write_buffer(&self.vertex_buffers[buffer_idx], 0, bytemuck::cast_slice(&mesh.vertices));
-            queue.write_buffer(&self.index_buffers[buffer_idx], 0, bytemuck::cast_slice(&mesh.indices));
-            self.index_counts[buffer_idx] = mesh.indices.len() as u32;
-        } else {
-            self.index_counts[buffer_idx] = 0;
-        }
+        // Spawn background thread for mesh generation
+        thread::spawn(move || {
+            let start = std::time::Instant::now();
 
-        tracing::debug!(
-            "Cloud mesh (buffer {}): {} verts, {} indices ({} quads)",
-            buffer_idx,
-            mesh.vertices.len(),
-            mesh.indices.len(),
-            mesh.indices.len() / 6
-        );
+            // Create grid for this generation
+            let voxel_scale = quality.voxel_scale();
+            let grid_size = CLOUD_GRID_SIZE / (voxel_scale / CLOUD_VOXEL_SCALE).max(1);
+            let thickness = quality.cloud_thickness();
+            let mut grid = CloudGrid::new(grid_size, thickness, grid_size, voxel_scale);
+
+            // Generate cloud voxels (this is the slow part)
+            grid.generate(center_x, center_z, coverage, 12345);
+
+            // Generate mesh from voxels
+            let mesh = CloudMesh::from_grid(&grid, CLOUD_BASE_Y);
+
+            let elapsed = start.elapsed();
+            tracing::info!(
+                "Cloud mesh generated (background): {} verts, {} quads in {:.1}ms",
+                mesh.vertices.len(),
+                mesh.indices.len() / 6,
+                elapsed.as_secs_f32() * 1000.0
+            );
+
+            // Send result back to main thread
+            let _ = sender.send(CloudMeshResult {
+                vertices: mesh.vertices,
+                indices: mesh.indices,
+                buffer_idx,
+            });
+        });
     }
 
     /// Render clouds (handles cross-fade between buffers during transitions)
@@ -1016,11 +1099,7 @@ impl Clouds {
     pub fn set_quality(&mut self, quality: CloudQuality) {
         if quality != self.quality {
             self.quality = quality;
-            // Recreate grid with new voxel scale and thickness
-            let voxel_scale = quality.voxel_scale();
-            let grid_size = CLOUD_GRID_SIZE / (voxel_scale / CLOUD_VOXEL_SCALE).max(1);
-            let thickness = quality.cloud_thickness();
-            self.grid = CloudGrid::new(grid_size, thickness, grid_size, voxel_scale);
+            // Mark for regeneration - background thread will create new grid
             self.needs_regenerate = true;
         }
     }
@@ -1061,26 +1140,10 @@ impl Clouds {
 
     /// Get cloud density at world XZ position (for terrain shadows)
     /// Returns 0.0-1.0 where 1.0 = full cloud coverage
-    pub fn get_shadow_at(&self, world_x: f32, world_z: f32) -> f32 {
-        if self.quality == CloudQuality::Off || !self.shadows_enabled {
-            return 0.0;
-        }
-
-        // Account for wind offset
-        let sample_x = world_x - self.wind_offset_x;
-        let sample_z = world_z - self.wind_offset_z;
-
-        // Convert to grid coordinates
-        let grid_x = ((sample_x - self.grid.world_offset_x) / self.grid.voxel_scale as f32) as i32;
-        let grid_z = ((sample_z - self.grid.world_offset_z) / self.grid.voxel_scale as f32) as i32;
-
-        // Check if any cloud voxel is present in this column
-        for y in 0..self.grid.size_y {
-            if self.grid.get(grid_x, y, grid_z) {
-                return 0.3; // Partial shadow
-            }
-        }
-
+    /// NOTE: Cloud shadows disabled with background generation (grid not available on main thread)
+    pub fn get_shadow_at(&self, _world_x: f32, _world_z: f32) -> f32 {
+        // Cloud shadows disabled - grid is generated on background thread
+        // TODO: Could implement noise-based shadow sampling if needed
         0.0
     }
 
