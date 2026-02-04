@@ -3046,6 +3046,53 @@ impl Renderer {
                 },
             );
 
+            // === UPDATE WATER PRESENCE TEXTURE ===
+            // This tells the water shader where water actually exists (not just sea level y=32)
+            let presence_changed = self.water_system.set_presence_center(camera.position.x, camera.position.z);
+            if presence_changed {
+                // Clear and rebuild presence texture when camera moves significantly
+                self.water_system.clear_presence();
+
+                // Update presence by scanning for actual Block::Water at sea level
+                // We check chunks that contain the water level (y=31, since WATER_SEA_LEVEL=32)
+                let water_y = crate::constants::WATER_SEA_LEVEL - 1; // y=31 is the top water block
+                let water_chunk_y = water_y / 16; // Which vertical chunk contains water level
+
+                let chunks_read = chunks.read();
+                for (pos, chunk) in chunks_read.iter() {
+                    // Only check chunks at the water level height
+                    if pos.y != water_chunk_y {
+                        continue;
+                    }
+
+                    // Scan for water blocks at the water surface level
+                    let local_y = (water_y % 16) as usize;
+                    let mut water_columns = [[false; 16]; 16];
+                    let mut has_any_water = false;
+
+                    for z in 0..16 {
+                        for x in 0..16 {
+                            let block = chunk.get_block(x, local_y, z);
+                            if matches!(block, crate::world::Block::Water) {
+                                water_columns[z][x] = true;
+                                has_any_water = true;
+                            }
+                        }
+                    }
+
+                    if has_any_water {
+                        self.water_system.update_presence_from_chunk(
+                            pos.x * 16,
+                            pos.z * 16,
+                            &water_columns,
+                        );
+                    }
+                }
+
+                // Upload the presence texture to GPU
+                self.water_system.upload_presence(&self.queue);
+            }
+
             // Update water system bind group with current textures
             self.water_system.update_bind_group(
                 &self.device,

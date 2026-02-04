@@ -22,6 +22,10 @@ use wgpu::util::DeviceExt;
 /// Maximum number of distinct water levels supported
 pub const MAX_WATER_LEVELS: usize = 16;
 
+/// Size of the water presence texture (covers WATER_PRESENCE_SIZE x WATER_PRESENCE_SIZE blocks)
+/// This texture is centered on the camera and indicates where water actually exists
+pub const WATER_PRESENCE_SIZE: u32 = 512;
+
 /// Water rendering quality preset
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WaterQuality {
@@ -162,8 +166,16 @@ pub struct WaterUniforms {
     // Screen dimensions for UV calculations
     pub screen_size: [f32; 2],
 
-    // Padding to 16-byte alignment
-    pub _padding: [f32; 2],
+    // Water presence texture center (world XZ coordinates)
+    pub presence_center: [f32; 2],
+
+    // Water presence texture size in blocks
+    pub presence_size: f32,
+
+    // Padding to match WGSL struct layout:
+    // - WGSL vec3<f32> has 16-byte alignment, causing implicit padding
+    // - Total padding needed: 28 bytes (to get from offset 420 to 448 for array)
+    pub _padding: [f32; 7],
 
     // Water levels array (up to MAX_WATER_LEVELS)
     pub water_levels: [WaterLevel; MAX_WATER_LEVELS],
@@ -203,7 +215,9 @@ impl Default for WaterUniforms {
             water_level_count: 1,
             wave_octaves: 3,
             screen_size: [1920.0, 1080.0],
-            _padding: [0.0; 2],
+            presence_center: [0.0, 0.0],
+            presence_size: WATER_PRESENCE_SIZE as f32,
+            _padding: [0.0; 7],
             water_levels: levels,
         }
     }
@@ -218,6 +232,16 @@ pub struct Water {
     sampler: wgpu::Sampler,
     quality: WaterQuality,
     uniforms: WaterUniforms,
+    /// Water presence texture - indicates where water actually exists (R8 format)
+    /// Each texel = 255 if water exists at that XZ position, 0 if no water
+    presence_texture: wgpu::Texture,
+    presence_texture_view: wgpu::TextureView,
+    /// Center of the presence texture in world coordinates (updated when camera moves)
+    presence_center: [f32; 2],
+    /// CPU-side buffer for updating presence texture
+    presence_data: Vec<u8>,
+    /// Whether the presence texture has been initialized (ensures first frame always updates)
+    presence_initialized: bool,
 }
 
 impl Water {
@@ -270,8 +294,40 @@ impl Water {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                // binding 4: Water presence texture (indicates where water exists)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
+
+        // Create water presence texture (R8Unorm - 1 byte per texel)
+        let presence_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Water Presence Texture"),
+            size: wgpu::Extent3d {
+                width: WATER_PRESENCE_SIZE,
+                height: WATER_PRESENCE_SIZE,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        let presence_texture_view = presence_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Initialize presence data to all zeros (no water)
+        let presence_data = vec![0u8; (WATER_PRESENCE_SIZE * WATER_PRESENCE_SIZE) as usize];
 
         // Create uniform buffer
         let uniforms = WaterUniforms::default();
@@ -342,6 +398,11 @@ impl Water {
             sampler,
             quality: WaterQuality::default(),
             uniforms,
+            presence_texture,
+            presence_texture_view,
+            presence_center: [0.0, 0.0],
+            presence_data,
+            presence_initialized: false,
         }
     }
 
@@ -371,6 +432,10 @@ impl Water {
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&self.presence_texture_view),
                 },
             ],
         }));
@@ -404,6 +469,10 @@ impl Water {
         self.uniforms.sun_color = [sun_color.x, sun_color.y, sun_color.z, 1.0];
         self.uniforms.ambient_color = [ambient_color.x, ambient_color.y, ambient_color.z, brightness];
         self.uniforms.screen_size = [screen_width, screen_height];
+
+        // Update presence texture center from camera position
+        self.uniforms.presence_center = self.presence_center;
+        self.uniforms.presence_size = WATER_PRESENCE_SIZE as f32;
 
         // Apply quality settings
         self.uniforms.ssr_steps = self.quality.ssr_steps();
@@ -447,6 +516,97 @@ impl Water {
     /// Cycle through quality presets
     pub fn cycle_quality(&mut self) {
         self.quality = self.quality.next();
+    }
+
+    /// Clear the water presence texture (call before updating with chunk data)
+    pub fn clear_presence(&mut self) {
+        self.presence_data.fill(0);
+    }
+
+    /// Update water presence from chunk water data
+    ///
+    /// Call this method for each chunk that has water, passing the chunk's water columns.
+    /// The presence texture is centered on camera_pos and covers WATER_PRESENCE_SIZE blocks.
+    ///
+    /// # Arguments
+    /// * `chunk_world_x` - World X coordinate of chunk origin (chunk_pos.x * 16)
+    /// * `chunk_world_z` - World Z coordinate of chunk origin (chunk_pos.z * 16)
+    /// * `water_columns` - 16x16 array indicating if each column has water (indexed as [z][x])
+    pub fn update_presence_from_chunk(
+        &mut self,
+        chunk_world_x: i32,
+        chunk_world_z: i32,
+        water_columns: &[[bool; 16]; 16],
+    ) {
+        let half_size = (WATER_PRESENCE_SIZE / 2) as f32;
+        let center_x = self.presence_center[0];
+        let center_z = self.presence_center[1];
+
+        for lz in 0..16 {
+            for lx in 0..16 {
+                if water_columns[lz][lx] {
+                    // World position of this water column
+                    let world_x = chunk_world_x + lx as i32;
+                    let world_z = chunk_world_z + lz as i32;
+
+                    // Convert to texture coordinates (centered on camera)
+                    let tex_x = (world_x as f32 - center_x + half_size) as i32;
+                    let tex_z = (world_z as f32 - center_z + half_size) as i32;
+
+                    // Check bounds
+                    if tex_x >= 0 && tex_x < WATER_PRESENCE_SIZE as i32
+                        && tex_z >= 0 && tex_z < WATER_PRESENCE_SIZE as i32
+                    {
+                        let idx = (tex_z as u32 * WATER_PRESENCE_SIZE + tex_x as u32) as usize;
+                        self.presence_data[idx] = 255;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Set the center of the water presence texture (call when camera moves significantly)
+    /// Returns true if the center changed (texture needs re-uploading)
+    pub fn set_presence_center(&mut self, x: f32, z: f32) -> bool {
+        // First call always triggers update
+        if !self.presence_initialized {
+            self.presence_center = [x, z];
+            self.presence_initialized = true;
+            return true;
+        }
+
+        // Only update if moved more than 32 blocks (avoids constant re-uploading)
+        let dx = (x - self.presence_center[0]).abs();
+        let dz = (z - self.presence_center[1]).abs();
+        if dx > 32.0 || dz > 32.0 {
+            self.presence_center = [x, z];
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Upload the presence texture to the GPU
+    pub fn upload_presence(&self, queue: &wgpu::Queue) {
+        queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &self.presence_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &self.presence_data,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(WATER_PRESENCE_SIZE),
+                rows_per_image: Some(WATER_PRESENCE_SIZE),
+            },
+            wgpu::Extent3d {
+                width: WATER_PRESENCE_SIZE,
+                height: WATER_PRESENCE_SIZE,
+                depth_or_array_layers: 1,
+            },
+        );
     }
 
     /// Render water (fullscreen pass)
@@ -515,7 +675,14 @@ struct WaterUniforms {
     wave_octaves: u32,
 
     screen_size: vec2<f32>,
-    _padding: vec2<f32>,
+
+    // Water presence texture parameters
+    presence_center: vec2<f32>,  // World XZ of texture center
+    presence_size: f32,          // Texture size in blocks
+
+    // Explicit padding to match Rust struct layout (7 f32s = 28 bytes)
+    // This ensures array starts at same offset in both Rust and WGSL
+    _pad0: f32, _pad1: f32, _pad2: f32, _pad3: f32, _pad4: f32, _pad5: f32, _pad6: f32,
 
     // Note: array access in WGSL requires fixed size
     water_levels: array<WaterLevel, 16>,
@@ -533,6 +700,7 @@ struct CameraUniform {
 @group(1) @binding(1) var depth_texture: texture_depth_2d;
 @group(1) @binding(2) var scene_texture: texture_2d<f32>;
 @group(1) @binding(3) var tex_sampler: sampler;
+@group(1) @binding(4) var presence_texture: texture_2d<f32>;
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
@@ -549,6 +717,24 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     out.clip_position = vec4<f32>(x, y, 0.0, 1.0);
     out.uv = vec2<f32>((x + 1.0) * 0.5, (1.0 - y) * 0.5);
     return out;
+}
+
+// Check if water exists at a world XZ position using the presence texture
+// Returns 1.0 if water exists, 0.0 if not
+fn check_water_presence(world_x: f32, world_z: f32) -> f32 {
+    let half_size = water.presence_size * 0.5;
+    let tex_x = (world_x - water.presence_center.x + half_size) / water.presence_size;
+    let tex_z = (world_z - water.presence_center.y + half_size) / water.presence_size;
+
+    // Check bounds
+    if (tex_x < 0.0 || tex_x > 1.0 || tex_z < 0.0 || tex_z > 1.0) {
+        // Outside presence texture - default to no water (safe for caves)
+        return 0.0;
+    }
+
+    // Sample presence texture (R channel only)
+    let presence = textureSampleLevel(presence_texture, tex_sampler, vec2<f32>(tex_x, tex_z), 0.0).r;
+    return presence;
 }
 
 // Hash function for noise
@@ -778,6 +964,26 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
         if (t > 0.0 && t < hit_t) {
             let hit_pos = cam_pos + ray_dir * t;
+
+            // === PRESENCE TEST: Check if water actually exists at this XZ position ===
+            // This is the primary test - only draw water where water blocks exist
+            let presence = check_water_presence(hit_pos.x, hit_pos.z);
+            if (presence < 0.5) {
+                // No water at this location - skip
+                depth_test_failed = true;
+                continue;
+            }
+
+            // === DEPTH TEST 0: Underground cave/cavern check ===
+            // If BOTH camera AND scene geometry are below the water level,
+            // we're in an air-filled cave/cavern - don't render fake water plane
+            // Use margin of 1.0 to allow underwater surface viewing when close to surface
+            let cam_below_water = cam_pos.y < level.height - 1.0;
+            let scene_below_water = scene_world_pos.y < level.height - 1.0;
+            if (cam_below_water && scene_below_water) {
+                depth_test_failed = true;
+                continue;
+            }
 
             // === DEPTH TEST 1: Terrain height check ===
             // If terrain is clearly above water, don't draw water on it
