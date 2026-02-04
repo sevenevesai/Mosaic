@@ -79,7 +79,24 @@ fn generate_chunk_with_generator(pos: ChunkPos, generator: &TerrainGenerator) ->
     let world_y = pos.y * CHUNK_SIZE_I32;
     let world_z = pos.z * CHUNK_SIZE_I32;
 
-    // Pre-compute column cache for all 16x16 columns
+    // ═══════════════════════════════════════════════════════════════════════════
+    // OPTIMIZATION: Pre-compute heights for 20x20 grid (16 + 2 border on each side)
+    // This allows cliff detection to use lookups instead of redundant noise calls
+    // Reduces height calculations from 1280 (256 × 5) to 400 per chunk (3.2x faster)
+    // ═══════════════════════════════════════════════════════════════════════════
+    const BORDER: usize = 2;
+    const GRID_SIZE: usize = CHUNK_SIZE + BORDER * 2; // 20x20
+    let mut height_grid = [[0i32; GRID_SIZE]; GRID_SIZE];
+
+    for gz in 0..GRID_SIZE {
+        for gx in 0..GRID_SIZE {
+            let wx = world_x + gx as i32 - BORDER as i32;
+            let wz = world_z + gz as i32 - BORDER as i32;
+            height_grid[gz][gx] = generator.get_terrain_height(wx, wz);
+        }
+    }
+
+    // Pre-compute column cache for all 16x16 columns using the height grid
     let mut columns = [[ColumnCache {
         height: 0,
         is_mountain: false,
@@ -93,7 +110,10 @@ fn generate_chunk_with_generator(pos: ChunkPos, generator: &TerrainGenerator) ->
         for x in 0..CHUNK_SIZE {
             let wx = world_x + x as i32;
             let wz = world_z + z as i32;
-            columns[z][x] = generator.compute_column_cache(wx, wz);
+            // Grid coordinates with border offset
+            let gx = x + BORDER;
+            let gz = z + BORDER;
+            columns[z][x] = generator.compute_column_cache_with_heights(wx, wz, &height_grid, gx, gz);
         }
     }
 
@@ -281,6 +301,47 @@ impl TerrainGenerator {
     }
 
     /// Compute and cache all column-based data for a single (x, z) position
+    /// Uses pre-computed height grid for cliff detection (fast path)
+    fn compute_column_cache_with_heights(
+        &self,
+        x: i32,
+        z: i32,
+        height_grid: &[[i32; 20]; 20],
+        gx: usize,
+        gz: usize,
+    ) -> ColumnCache {
+        let height = height_grid[gz][gx];
+        let is_mountain = self.get_mountain_mask(x, z) > 0.3;
+
+        // Cliff detection using pre-computed heights (no redundant noise calls!)
+        let h_north = height_grid[gz.saturating_sub(2)][gx];
+        let h_south = height_grid[(gz + 2).min(19)][gx];
+        let h_east = height_grid[gz][(gx + 2).min(19)];
+        let h_west = height_grid[gz][gx.saturating_sub(2)];
+
+        let h_ns = (h_north - h_south).abs();
+        let h_ew = (h_east - h_west).abs();
+        let cliff_factor = ((h_ns.max(h_ew)) as f64 / 8.0).min(1.0);
+
+        let is_rocky_outcrop = self.is_rocky_outcrop(x, z);
+        let biome_id = self.biome_registry.get_biome_id(x, z);
+        // Beaches only in non-frozen biomes (tundra doesn't have sandy beaches)
+        let is_beach = biome_id != biome::BiomeId::Tundra
+            && height < WATER_SEA_LEVEL + 2
+            && height >= WATER_SEA_LEVEL - 3;
+
+        ColumnCache {
+            height,
+            is_mountain,
+            cliff_factor,
+            is_rocky_outcrop,
+            biome_id,
+            is_beach,
+        }
+    }
+
+    /// Compute column cache (legacy - for standalone use)
+    #[allow(dead_code)]
     fn compute_column_cache(&self, x: i32, z: i32) -> ColumnCache {
         let height = self.get_terrain_height(x, z);
         let is_mountain = self.get_mountain_mask(x, z) > 0.3;
