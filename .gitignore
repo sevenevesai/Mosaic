@@ -92,9 +92,8 @@ tarpaulin-report.html
 /*.gif
 /*.bmp
 
-# Assets - textures are ~5MB, uncomment to exclude from git
-# If using Git LFS, remove this and configure LFS for assets/**
-# /assets/
+# Assets - textures, sounds, models excluded from git
+/assets/
 
 # Environment
 .env

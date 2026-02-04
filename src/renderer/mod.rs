@@ -199,6 +199,8 @@ pub struct Renderer {
     // Graphics settings
     bloom_enabled: bool,
     render_distance: i32,
+    /// LOD start distance: 0 = OFF (all full detail), or chunk distance where LOD begins
+    lod_distance: i32,
     shadow_distance: i32,
     display_mode: DisplayMode,
     /// Flag indicating display mode change is pending (app.rs applies it)
@@ -811,6 +813,7 @@ impl Renderer {
             shadow_debug: 0.0,   // Shadow debug off by default
             bloom_enabled: true,
             render_distance: crate::constants::RENDER_DISTANCE,
+            lod_distance: crate::constants::LOD_FULL_DETAIL, // Default: LOD starts at 12 chunks
             shadow_distance: crate::constants::RENDER_DISTANCE,
             display_mode: DisplayMode::Windowed,
             display_mode_pending: false,
@@ -1940,6 +1943,85 @@ impl Renderer {
         self.render_distance = distance.clamp(8, 32);
     }
 
+    /// Get current LOD distance (0 = OFF, otherwise chunk distance where LOD starts)
+    pub fn lod_distance(&self) -> i32 {
+        self.lod_distance
+    }
+
+    /// Get display string for LOD distance
+    pub fn lod_distance_str(&self) -> String {
+        if self.lod_distance == 0 {
+            "OFF".to_string()
+        } else {
+            format!("{}", self.lod_distance)
+        }
+    }
+
+    /// Get LOD distance index for menu (0=OFF, 1=6, 2=8, 3=12, 4=16, 5=20, 6=24, 7=32)
+    pub fn lod_distance_index(&self) -> usize {
+        match self.lod_distance {
+            0 => 0,  // OFF
+            6 => 1,
+            8 => 2,
+            12 => 3,
+            16 => 4,
+            20 => 5,
+            24 => 6,
+            32 => 7,
+            _ => 3, // Default to 12
+        }
+    }
+
+    /// Cycle LOD distance: OFF -> 6 -> 8 -> 12 -> 16 -> 20 -> 24 -> 32 -> OFF
+    pub fn cycle_lod_distance(&mut self) -> i32 {
+        let values = [0, 6, 8, 12, 16, 20, 24, 32];
+        let idx = self.lod_distance_index();
+        let next_idx = (idx + 1) % values.len();
+        self.lod_distance = values[next_idx];
+        self.lod_distance
+    }
+
+    /// Cycle LOD distance backwards
+    pub fn cycle_lod_distance_prev(&mut self) -> i32 {
+        let values = [0, 6, 8, 12, 16, 20, 24, 32];
+        let idx = self.lod_distance_index();
+        let prev_idx = if idx == 0 { values.len() - 1 } else { idx - 1 };
+        self.lod_distance = values[prev_idx];
+        self.lod_distance
+    }
+
+    /// Set LOD distance by index
+    pub fn set_lod_distance_index(&mut self, index: usize) {
+        let values = [0, 6, 8, 12, 16, 20, 24, 32];
+        if index < values.len() {
+            self.lod_distance = values[index];
+        }
+    }
+
+    /// Set LOD distance directly
+    pub fn set_lod_distance(&mut self, distance: i32) {
+        self.lod_distance = distance;
+    }
+
+    /// Calculate LOD thresholds based on current settings
+    /// Returns (full_detail_distance, half_detail_distance)
+    /// If lod_distance is 0 (OFF), returns (i32::MAX, i32::MAX) - everything full detail
+    pub fn lod_thresholds(&self) -> (i32, i32) {
+        if self.lod_distance == 0 {
+            // OFF: everything is full detail
+            (i32::MAX, i32::MAX)
+        } else {
+            // Calculate dynamic thresholds
+            // Full detail: 0 to lod_distance
+            // Half detail: lod_distance to lod_distance + remaining/2
+            let max_dist = self.render_distance.min(32);
+            let remaining = max_dist - self.lod_distance;
+            let half_range = remaining / 2;
+            let half_threshold = self.lod_distance + half_range;
+            (self.lod_distance, half_threshold)
+        }
+    }
+
     /// Get current shadow distance
     pub fn shadow_distance(&self) -> i32 {
         self.shadow_distance
@@ -2009,6 +2091,11 @@ impl Renderer {
     /// Apply settings from a Settings struct
     pub fn apply_settings(&mut self, settings: &crate::settings::Settings) {
         self.render_distance = settings.render_distance;
+        // Apply LOD distance setting
+        self.lod_distance = match settings.lod_distance.to_uppercase().as_str() {
+            "OFF" => 0,
+            _ => settings.lod_distance.parse().unwrap_or(12),
+        };
         self.shadow_mode = settings.shadow_mode;
         self.bloom_enabled = settings.bloom_enabled;
         self.volumetrics.set_enabled(settings.volumetrics_enabled);
@@ -2129,6 +2216,7 @@ impl Renderer {
     pub fn collect_settings(&self, windowed_size: (u32, u32)) -> crate::settings::Settings {
         crate::settings::Settings {
             render_distance: self.render_distance,
+            lod_distance: self.lod_distance_str(),
             shadow_mode: self.shadow_mode,
             bloom_enabled: self.bloom_enabled,
             volumetrics_enabled: self.volumetrics.enabled,

@@ -102,10 +102,12 @@ Two biomes with distinct cave behavior:
 
 ```rust
 CHUNK_SIZE: 16           // Blocks per chunk dimension
-RENDER_DISTANCE: 24      // Chunks around player
-LOD_FULL_DETAIL: 8       // Full mesh within 8 chunks
+RENDER_DISTANCE: 32      // Chunks around player
+LOD_FULL_DETAIL: 12      // Default full mesh distance (configurable via settings)
 WATER_SEA_LEVEL: 32      // Y level for water generation
 ```
+
+**LOD Distance** (ESC menu → LOD DISTANCE): Controls when mesh detail reduction begins. Values: OFF, 6, 8, 12, 16, 20, 24, 32. OFF = all chunks full detail (higher GPU load). Dynamic thresholds: Full detail to setting value, Half to midpoint, Quarter beyond.
 
 ## Code Patterns
 

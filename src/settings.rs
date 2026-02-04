@@ -71,6 +71,10 @@ pub struct Settings {
     pub audio_sfx: f32,
     /// Ambient sounds volume (0.0 - 1.0)
     pub audio_ambient: f32,
+
+    // === LOD SETTINGS ===
+    /// LOD distance: "OFF" or chunk distance where LOD starts (6, 8, 12, 16, 20, 24, 32)
+    pub lod_distance: String,
 }
 
 impl Default for Settings {
@@ -112,6 +116,8 @@ impl Default for Settings {
             audio_master: 0.8,   // 80% master volume
             audio_sfx: 1.0,      // 100% SFX
             audio_ambient: 0.6,  // 60% ambient
+            // LOD defaults
+            lod_distance: "12".to_string(),  // Default: LOD starts at 12 chunks
         }
     }
 }
@@ -283,6 +289,10 @@ impl Settings {
                             settings.audio_ambient = v;
                         }
                     }
+                    // LOD settings
+                    "lod_distance" => {
+                        settings.lod_distance = value.to_string();
+                    }
                     _ => {}
                 }
             }
@@ -331,7 +341,9 @@ impl Settings {
              # Audio Settings\n\
              audio_master={}\n\
              audio_sfx={}\n\
-             audio_ambient={}\n",
+             audio_ambient={}\n\
+             # LOD Settings\n\
+             lod_distance={}\n",
             self.render_distance,
             self.shadow_mode,
             self.bloom_enabled,
@@ -364,6 +376,7 @@ impl Settings {
             self.audio_master,
             self.audio_sfx,
             self.audio_ambient,
+            self.lod_distance,
         );
 
         if let Err(e) = fs::write(Self::FILE_PATH, content) {

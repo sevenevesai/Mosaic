@@ -341,6 +341,13 @@ pub struct WorldManager {
     /// Total load distance - includes render + impostor range (in chunks)
     /// Chunks beyond render_distance but within load_distance only compute average_color
     load_distance: i32,
+
+    /// LOD full detail threshold (0 to this = Full detail)
+    /// If i32::MAX, LOD is OFF and everything is full detail
+    lod_full_threshold: i32,
+
+    /// LOD half detail threshold (lod_full to this = Half detail, beyond = Quarter)
+    lod_half_threshold: i32,
 }
 
 impl WorldManager {
@@ -418,6 +425,8 @@ impl WorldManager {
             pending_urgent: ahash::AHashSet::new(),
             render_distance: RENDER_DISTANCE,
             load_distance: RENDER_DISTANCE, // Initially same, updated when impostor range is set
+            lod_full_threshold: crate::constants::LOD_FULL_DETAIL,
+            lod_half_threshold: crate::constants::LOD_HALF_DETAIL,
         }
     }
 
@@ -444,6 +453,29 @@ impl WorldManager {
     /// Get the current total load distance
     pub fn load_distance(&self) -> i32 {
         self.load_distance
+    }
+
+    /// Set LOD thresholds
+    /// full_threshold: chunks within this distance use full detail
+    /// half_threshold: chunks between full and this use half detail, beyond use quarter
+    /// Pass (i32::MAX, i32::MAX) to disable LOD (everything full detail)
+    pub fn set_lod_thresholds(&mut self, full_threshold: i32, half_threshold: i32) {
+        // Only log if thresholds actually changed
+        if self.lod_full_threshold != full_threshold || self.lod_half_threshold != half_threshold {
+            tracing::info!(
+                "LOD thresholds set: Full={}, Half={} (OFF={})",
+                if full_threshold == i32::MAX { "∞".to_string() } else { full_threshold.to_string() },
+                if half_threshold == i32::MAX { "∞".to_string() } else { half_threshold.to_string() },
+                full_threshold == i32::MAX
+            );
+        }
+        self.lod_full_threshold = full_threshold;
+        self.lod_half_threshold = half_threshold;
+    }
+
+    /// Check if LOD is enabled (false means all chunks use full detail)
+    pub fn is_lod_enabled(&self) -> bool {
+        self.lod_full_threshold != i32::MAX
     }
 
     fn worker_loop(
@@ -642,14 +674,16 @@ impl WorldManager {
                     }
                     drop(chunks_read);
 
+                    // Remesh neighbors with appropriate LOD (not always Full!)
                     for neighbor in neighbors_to_remesh {
-                        self.force_remesh(neighbor);
+                        let neighbor_lod = self.calculate_lod(neighbor, player_chunk);
+                        self.force_remesh_with_lod(neighbor, neighbor_lod);
                     }
 
                     // ALSO remesh the current chunk itself after queuing neighbor remeshes
                     // This handles the case where THIS chunk's initial mesh didn't see all neighbors
                     // The generation system ensures correct ordering - stale meshes are discarded
-                    self.force_remesh(pos);
+                    self.force_remesh_with_lod(pos, lod);
                 }
                 ChunkResult::Meshed(pos, mesh, generation) => {
                     self.pending_meshing.remove(&pos);
@@ -766,9 +800,15 @@ impl WorldManager {
     }
 
     /// Force a remesh regardless of current LOD or pending status
-    /// Always queues a new mesh task - used after block modifications or neighbor changes
+    /// Always queues a new mesh task - used after block modifications (uses Full LOD)
     /// This handles race conditions where a mesh task is already running with stale neighbor data
     fn force_remesh(&mut self, pos: ChunkPos) {
+        self.force_remesh_with_lod(pos, LodLevel::Full);
+    }
+
+    /// Force a remesh with specified LOD level
+    /// Used for neighbor remeshes during chunk generation where LOD should be respected
+    fn force_remesh_with_lod(&mut self, pos: ChunkPos, lod: LodLevel) {
         // Increment generation - this invalidates any in-flight mesh tasks for this chunk
         let gen = self.mesh_generation.entry(pos).or_insert(0);
         *gen += 1;
@@ -777,7 +817,7 @@ impl WorldManager {
         // Always queue, even if already pending - the in-flight task may have stale data
         // The generation counter ensures only the latest result is accepted
         self.pending_meshing.insert(pos, ());
-        let _ = self.task_sender.send(ChunkTask::Mesh(pos, LodLevel::Full, current_gen));
+        let _ = self.task_sender.send(ChunkTask::Mesh(pos, lod, current_gen));
     }
 
     fn queue_meshing_with_lod(&mut self, pos: ChunkPos, lod: LodLevel) {
@@ -807,17 +847,17 @@ impl WorldManager {
     }
 
     /// Calculate LOD level based on distance from player
+    /// Uses dynamic thresholds set via set_lod_thresholds()
     fn calculate_lod(&self, chunk_pos: ChunkPos, player_chunk: ChunkPos) -> LodLevel {
-        use crate::constants::{LOD_FULL_DETAIL, LOD_HALF_DETAIL};
-
         // Calculate horizontal distance (ignore vertical for LOD)
         let dx = (chunk_pos.x - player_chunk.x).abs();
         let dz = (chunk_pos.z - player_chunk.z).abs();
         let dist = dx.max(dz); // Chebyshev distance
 
-        if dist <= LOD_FULL_DETAIL {
+        // Use dynamic thresholds (i32::MAX means LOD is OFF, everything full detail)
+        if dist <= self.lod_full_threshold {
             LodLevel::Full
-        } else if dist <= LOD_HALF_DETAIL {
+        } else if dist <= self.lod_half_threshold {
             LodLevel::Half
         } else {
             LodLevel::Quarter
@@ -866,6 +906,21 @@ impl WorldManager {
 
     pub fn total_vertices(&self) -> u64 {
         self.meshes.values().map(|m| m.vertices.len() as u64).sum()
+    }
+
+    /// Get LOD distribution for debugging (Full, Half, Quarter counts)
+    pub fn lod_distribution(&self) -> (usize, usize, usize) {
+        let mut full = 0;
+        let mut half = 0;
+        let mut quarter = 0;
+        for mesh in self.meshes.values() {
+            match mesh.lod {
+                LodLevel::Full => full += 1,
+                LodLevel::Half => half += 1,
+                LodLevel::Quarter => quarter += 1,
+            }
+        }
+        (full, half, quarter)
     }
 
     pub fn total_water_vertices(&self) -> u64 {

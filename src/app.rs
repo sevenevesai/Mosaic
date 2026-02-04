@@ -37,6 +37,8 @@ pub struct App {
     windowed_size: PhysicalSize<u32>,
     /// Flag to indicate quit was requested from menu
     quit_requested: bool,
+    /// Counter for periodic LOD stats logging
+    lod_log_counter: u32,
 }
 
 impl App {
@@ -59,6 +61,9 @@ impl App {
         let mut renderer = Renderer::new(window.clone()).await;
         renderer.apply_settings(&settings);
 
+        // Get LOD thresholds from renderer (will be applied to world after it's created)
+        let lod_thresholds = renderer.lod_thresholds();
+
         // Initialize world manager with save directory
         let save_dir = std::path::PathBuf::from("saves/world1");
         let mut world = match WorldManager::new_with_save(&save_dir, None) {
@@ -71,6 +76,9 @@ impl App {
                 WorldManager::new()
             }
         };
+
+        // Apply LOD thresholds from renderer settings
+        world.set_lod_thresholds(lod_thresholds.0, lod_thresholds.1);
 
         // Try to load player data, fall back to spawn position
         let player_path = save_dir.join("player.dat");
@@ -135,6 +143,7 @@ impl App {
             settings_menu,
             windowed_size: window_size,
             quit_requested: false,
+            lod_log_counter: 0,
         };
 
         tracing::info!("Engine initialized successfully");
@@ -646,13 +655,32 @@ impl App {
 
         // Update world (chunk loading/generation, meshing, lighting)
         self.profiler.begin_section("world_update");
-        // Sync render distance and total load distance (including impostor range) to world manager
+        // Sync render distance, LOD thresholds, and total load distance to world manager
         self.world.set_render_distance(self.renderer.render_distance());
+        let (lod_full, lod_half) = self.renderer.lod_thresholds();
+        self.world.set_lod_thresholds(lod_full, lod_half);
         self.world.set_load_distance(self.renderer.total_view_distance());
         self.world.update(&self.player.position());
         // Run water flow simulation
         self.world.tick_water_simulation(dt.as_secs_f32());
         self.profiler.end_section("world_update");
+
+        // Log LOD distribution every 600 frames (~10 seconds at 60fps)
+        self.lod_log_counter += 1;
+        if self.lod_log_counter >= 600 {
+            self.lod_log_counter = 0;
+            let (full, half, quarter) = self.world.lod_distribution();
+            let total = full + half + quarter;
+            if total > 0 {
+                tracing::info!(
+                    "LOD distribution: Full={} ({:.0}%), Half={} ({:.0}%), Quarter={} ({:.0}%) | Total={} meshes",
+                    full, full as f32 / total as f32 * 100.0,
+                    half, half as f32 / total as f32 * 100.0,
+                    quarter, quarter as f32 / total as f32 * 100.0,
+                    total
+                );
+            }
+        }
 
         // Update item entities (physics, pickup, merging)
         self.profiler.begin_section("item_entities");

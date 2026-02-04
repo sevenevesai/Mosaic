@@ -237,6 +237,18 @@ impl SettingsMenu {
                 set_float: |_, _| {},
             },
             MenuItem {
+                label: "LOD DISTANCE",
+                tab: MenuTab::Graphics,
+                control_type: ControlType::EnumCycle,
+                get_value: |r| r.lod_distance_str(),
+                get_index: |r| r.lod_distance_index(),
+                get_float: |_| 0.0,
+                cycle_next: |r| { r.cycle_lod_distance(); },
+                cycle_prev: |r| { r.cycle_lod_distance_prev(); },
+                set_index: |r, i| { r.set_lod_distance_index(i); },
+                set_float: |_, _| {},
+            },
+            MenuItem {
                 label: "SHADOW MODE",
                 tab: MenuTab::Graphics,
                 control_type: ControlType::EnumCycle,

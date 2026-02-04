@@ -28,13 +28,13 @@ pub mod constants {
     pub const WORLD_HEIGHT: usize = CHUNK_SIZE * CHUNKS_VERTICAL;
 
     /// Render distance in chunks
-    pub const RENDER_DISTANCE: i32 = 24;
+    pub const RENDER_DISTANCE: i32 = 32;
 
     /// LOD levels - distances at which to switch detail levels
-    /// Set all to RENDER_DISTANCE to disable LOD and use full detail everywhere
-    pub const LOD_FULL_DETAIL: i32 = 24;     // Full mesh detail (all chunks)
-    pub const LOD_HALF_DETAIL: i32 = 24;     // Disabled - same as full
-    pub const LOD_QUARTER_DETAIL: i32 = 24;  // Disabled - same as full
+    /// Reduces triangle count for distant chunks with minimal visual impact
+    pub const LOD_FULL_DETAIL: i32 = 12;     // Full mesh detail (close range)
+    pub const LOD_HALF_DETAIL: i32 = 22;     // Half detail (medium range)
+    pub const LOD_QUARTER_DETAIL: i32 = 32;  // Quarter detail (far range)
 
     /// Texture atlas tile size (pixel art)
     pub const TEXTURE_TILE_SIZE: u32 = 256;

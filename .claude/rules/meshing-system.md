@@ -59,13 +59,19 @@ To verify winding: compute `(v1-v0) × (v2-v0)` - result should point same direc
 
 ## LOD System
 
-Three detail levels based on distance from player:
+Three detail levels based on distance from player. Thresholds are **user-configurable** via ESC menu → LOD DISTANCE.
 
-| LOD | Distance | Block Sampling |
-|-----|----------|----------------|
-| Full | < 8 chunks | Every block |
-| Half | 8-16 chunks | Every 2nd block |
-| Quarter | 16-24 chunks | Every 4th block |
+| LOD | Distance (default) | Block Sampling |
+|-----|-------------------|----------------|
+| Full | 0 to LOD setting (12) | Every block |
+| Half | LOD to midpoint (12-17) | Every 2nd block |
+| Quarter | Beyond midpoint (17+) | Every 4th block |
+
+**Settings** (ESC menu → LOD DISTANCE):
+- **OFF**: All chunks use Full detail (highest quality, highest GPU cost)
+- **6-32**: LOD starts at this chunk distance, Half/Quarter calculated dynamically
+
+Dynamic threshold calculation: `Half = LOD + (render_distance - LOD) / 2`
 
 LOD affects greedy mesh generation - coarser sampling = larger quads = fewer vertices.
 
