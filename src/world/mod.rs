@@ -22,7 +22,7 @@ pub use lighting::{LightEngine, apply_light_updates, world_to_chunk_local};
 pub use meshing::{ChunkMesh, ChunkVertex, GpuMesh, LodLevel, build_chunk_mesh, build_chunk_mesh_lod, MESH_STATS};
 pub use storage::{WorldStorage, SharedStorage, StorageError, create_shared_storage};
 pub use water_meshing::{WaterMesh, WaterVertex, GpuWaterMesh, build_water_mesh, chunk_has_water};
-pub use water_flow::{WaterFlowEngine, apply_water_updates};
+pub use water_flow::{WaterFlowEngine, WaterPos, WaterUpdate, apply_water_updates};
 
 use std::sync::Arc;
 
@@ -652,6 +652,10 @@ impl WorldManager {
                     // Queue water meshing if chunk has water
                     if has_water {
                         self.queue_water_meshing(pos);
+                        // Activate water flow simulation for this chunk
+                        if let Some(chunk_arc) = self.chunks.read().get(&pos) {
+                            self.water_flow_engine.activate_chunk_water(chunk_arc.as_ref(), pos);
+                        }
                     }
                     // ALWAYS force remesh neighbors that exist (including edge-adjacent for diagonal structures)
                     // This fixes AO artifacts at chunk boundaries where neighbors
@@ -1343,9 +1347,19 @@ impl WorldManager {
         }
     }
 
-    /// Activate water flow simulation in a region around a world position
-    pub fn activate_water_flow(&mut self, x: i32, z: i32, radius: i32) {
-        self.water_flow_engine.activate_region(x, z, radius);
+    /// Place a water source at a world position (player interaction)
+    pub fn place_water_source(&mut self, x: i32, y: i32, z: i32) {
+        self.water_flow_engine.activate_source(x, y, z);
+    }
+
+    /// Remove water at a world position (player interaction)
+    pub fn remove_water(&mut self, x: i32, y: i32, z: i32) {
+        self.water_flow_engine.remove_water(x, y, z);
+    }
+
+    /// Update player position for water simulation culling
+    pub fn update_water_player_position(&mut self, chunk_pos: ChunkPos) {
+        self.water_flow_engine.set_player_position(chunk_pos);
     }
 
     /// Get number of active water cells being simulated
@@ -1361,6 +1375,11 @@ impl WorldManager {
     /// Check if water flow simulation is enabled
     pub fn water_flow_enabled(&self) -> bool {
         self.water_flow_engine.enabled
+    }
+
+    /// Set water simulation radius (in chunks)
+    pub fn set_water_sim_radius(&mut self, radius: i32) {
+        self.water_flow_engine.sim_radius = radius;
     }
 
     /// Save all dirty chunks and world metadata (blocking)

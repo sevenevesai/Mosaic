@@ -1,155 +1,172 @@
-//! Water Flow Simulation Engine
+//! Water Flow Simulation Engine (Cellular Automata)
 //!
-//! Implements a pipe-model water simulation for realistic gravity-driven water flow.
-//! The simulation runs on a 2D heightfield grid where water flows based on pressure
-//! differences between adjacent cells.
+//! Implements a level-based cellular automata water simulation for realistic
+//! and performant water flow. Inspired by Minecraft's water mechanics but with
+//! visual smoothing for better aesthetics.
 //!
 //! Key concepts:
-//! - Pressure is proportional to water height (hydrostatic)
-//! - Virtual pipes connect adjacent cells, allowing water to flow
-//! - Flow rate depends on pressure difference between connected cells
-//! - Volume is conserved (water doesn't appear or disappear)
+//! - Water has levels 0-7 (0 = empty, 7 = full/source)
+//! - Horizontal flow: water spreads with level decay (7 → 6 → 5 → ...)
+//! - Vertical flow: water always flows down at full level (waterfalls)
+//! - Sources maintain level 7 indefinitely
+//! - Flowing water decays over distance from source
+//!
+//! Visual integration:
+//! - Level affects surface height (for smooth visual transitions)
+//! - Flow direction drives wave animation
+//! - Foam increases at flow points and waterfalls
 
+use std::collections::VecDeque;
 use std::sync::Arc;
+
 use ahash::{AHashMap, AHashSet};
 use parking_lot::RwLock;
 
 use crate::constants::{
-    CHUNK_SIZE, CHUNK_SIZE_I32,
-    WATER_FLOW_GRAVITY, WATER_FLOW_PIPE_AREA, WATER_FLOW_PIPE_LENGTH,
-    WATER_FLOW_DAMPING, WATER_FLOW_MIN_VELOCITY, WATER_FLOW_MIN_HEIGHT_DIFF,
-    WATER_FLOW_MAX_ACTIVE_CELLS, WATER_FLOW_STABILITY_TICKS,
+    CHUNK_SIZE, CHUNK_SIZE_I32, BLOCK_SCALE,
+    WATER_FLOW_MAX_ACTIVE_CELLS, WATER_FLOW_CELLS_PER_TICK,
+    WATER_FLOW_STABILITY_TICKS, WATER_FLOW_SIM_RADIUS,
 };
 
-use super::chunk::{Chunk, ChunkPos};
+use super::chunk::{Block, Chunk, ChunkPos, WATER_LEVEL_MAX, WATER_LEVEL_MIN};
 
-/// 4 cardinal directions for water flow: +X, -X, +Z, -Z
+/// 4 cardinal directions for horizontal water flow: +X, -X, +Z, -Z
 const FLOW_DIRECTIONS: [(i32, i32); 4] = [
-    (1, 0),   // +X
-    (-1, 0),  // -X
-    (0, 1),   // +Z
-    (0, -1),  // -Z
+    (1, 0),   // +X (East)
+    (-1, 0),  // -X (West)
+    (0, 1),   // +Z (South)
+    (0, -1),  // -Z (North)
 ];
 
-/// Direction indices for flux array
-const DIR_POS_X: usize = 0;
-const DIR_NEG_X: usize = 1;
-const DIR_POS_Z: usize = 2;
-const DIR_NEG_Z: usize = 3;
-
-/// Convert world X,Z coordinates to chunk position and local coordinates
+/// Convert world X, Y, Z coordinates to chunk position and local coordinates
 #[inline]
-pub fn world_to_chunk_local_2d(x: i32, z: i32) -> (ChunkPos, usize, usize) {
+pub fn world_to_chunk_local(x: i32, y: i32, z: i32) -> (ChunkPos, usize, usize, usize) {
     let chunk_pos = ChunkPos {
         x: x.div_euclid(CHUNK_SIZE_I32),
-        y: 0, // Water is 2D heightfield, Y component not used for water chunks
+        y: y.div_euclid(CHUNK_SIZE_I32),
         z: z.div_euclid(CHUNK_SIZE_I32),
     };
     let local_x = x.rem_euclid(CHUNK_SIZE_I32) as usize;
+    let local_y = y.rem_euclid(CHUNK_SIZE_I32) as usize;
     let local_z = z.rem_euclid(CHUNK_SIZE_I32) as usize;
-    (chunk_pos, local_x, local_z)
+    (chunk_pos, local_x, local_y, local_z)
+}
+
+/// A water cell position in world coordinates
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct WaterPos {
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+}
+
+impl WaterPos {
+    pub fn new(x: i32, y: i32, z: i32) -> Self {
+        Self { x, y, z }
+    }
+
+    /// Get the chunk position for this water cell
+    pub fn chunk_pos(&self) -> ChunkPos {
+        ChunkPos {
+            x: self.x.div_euclid(CHUNK_SIZE_I32),
+            y: self.y.div_euclid(CHUNK_SIZE_I32),
+            z: self.z.div_euclid(CHUNK_SIZE_I32),
+        }
+    }
+
+    /// Get local coordinates within the chunk
+    pub fn local(&self) -> (usize, usize, usize) {
+        (
+            self.x.rem_euclid(CHUNK_SIZE_I32) as usize,
+            self.y.rem_euclid(CHUNK_SIZE_I32) as usize,
+            self.z.rem_euclid(CHUNK_SIZE_I32) as usize,
+        )
+    }
+
+    /// Get position below this one
+    pub fn below(&self) -> WaterPos {
+        WaterPos::new(self.x, self.y - 1, self.z)
+    }
+
+    /// Get position above this one
+    pub fn above(&self) -> WaterPos {
+        WaterPos::new(self.x, self.y + 1, self.z)
+    }
+
+    /// Get neighbor in a horizontal direction
+    pub fn neighbor(&self, dx: i32, dz: i32) -> WaterPos {
+        WaterPos::new(self.x + dx, self.y, self.z + dz)
+    }
 }
 
 /// State of an active water cell being simulated
 #[derive(Clone, Copy, Debug)]
 pub struct ActiveWaterCell {
-    /// World X coordinate
-    pub world_x: i32,
-    /// World Z coordinate
-    pub world_z: i32,
-    /// Number of ticks this cell has been stable (low velocity change)
-    pub stability_counter: u32,
+    /// World position
+    pub pos: WaterPos,
+    /// Current water level (0-7)
+    pub level: u8,
+    /// Whether this is a source (infinite water)
+    pub is_source: bool,
+    /// Distance from nearest source
+    pub source_distance: u8,
+    /// Number of ticks this cell has been stable
+    pub stability_counter: u8,
+    /// Primary flow direction for visuals
+    pub flow_dir: (i8, i8),
 }
 
-/// Flux data for a water cell - outgoing flow to each neighbor
-#[derive(Clone, Copy, Debug, Default)]
-pub struct CellFlux {
-    /// Outgoing flux in each direction [+X, -X, +Z, -Z]
-    /// Positive values = water flowing out in that direction
-    pub flux: [f32; 4],
-}
-
-impl CellFlux {
-    /// Get total outgoing flux (sum of positive flux values)
-    #[inline]
-    pub fn total_outflow(&self) -> f32 {
-        self.flux.iter().map(|&f| f.max(0.0)).sum()
-    }
-
-    /// Scale all flux values by a factor
-    #[inline]
-    pub fn scale(&mut self, factor: f32) {
-        for f in &mut self.flux {
-            *f *= factor;
-        }
-    }
-}
-
-/// Water flow simulation parameters
+/// Water update to apply to the world
 #[derive(Clone, Debug)]
-pub struct FlowParams {
-    /// Gravity constant for pressure calculation
-    pub gravity: f32,
-    /// Cross-sectional area of virtual pipes
-    pub pipe_area: f32,
-    /// Length between cell centers
-    pub pipe_length: f32,
-    /// Velocity damping per tick
-    pub damping: f32,
-    /// Minimum velocity threshold
-    pub min_velocity: f32,
-    /// Minimum height difference to trigger flow
-    pub min_height_diff: f32,
+pub struct WaterUpdate {
+    pub pos: WaterPos,
+    pub level: u8,
+    pub is_source: bool,
+    pub source_distance: u8,
+    pub flow_dir: (i8, i8),
+    /// Whether to remove water (level = 0)
+    pub remove: bool,
 }
 
-impl Default for FlowParams {
-    fn default() -> Self {
-        Self {
-            gravity: WATER_FLOW_GRAVITY,
-            pipe_area: WATER_FLOW_PIPE_AREA,
-            pipe_length: WATER_FLOW_PIPE_LENGTH,
-            damping: WATER_FLOW_DAMPING,
-            min_velocity: WATER_FLOW_MIN_VELOCITY,
-            min_height_diff: WATER_FLOW_MIN_HEIGHT_DIFF,
-        }
-    }
-}
-
-/// Water flow simulation engine
-///
-/// Manages active water cells and runs pipe-model simulation to update
-/// water heights and flow velocities across the world.
+/// Water flow simulation engine using cellular automata
 pub struct WaterFlowEngine {
     /// Active water cells that need simulation
-    /// Key: (world_x, world_z) position
-    active_cells: AHashMap<(i32, i32), ActiveWaterCell>,
+    /// Using a HashMap for O(1) lookup by position
+    active_cells: AHashMap<WaterPos, ActiveWaterCell>,
 
-    /// Flux values for each active cell
-    /// Stores outgoing flow in each of 4 directions
-    flux: AHashMap<(i32, i32), CellFlux>,
+    /// Queue of cells to process (for BFS-style propagation)
+    process_queue: VecDeque<WaterPos>,
 
-    /// Chunks that have been modified and need water mesh regeneration
+    /// Set of positions already queued (to avoid duplicates)
+    queued: AHashSet<WaterPos>,
+
+    /// Chunks that have been modified and need remeshing
     dirty_chunks: AHashSet<ChunkPos>,
 
     /// Simulation tick counter
     tick: u64,
 
-    /// Simulation parameters
-    pub params: FlowParams,
+    /// Player position (for simulation radius culling)
+    player_chunk: Option<ChunkPos>,
 
     /// Whether simulation is enabled
     pub enabled: bool,
+
+    /// Simulation quality/distance setting
+    pub sim_radius: i32,
 }
 
 impl WaterFlowEngine {
     pub fn new() -> Self {
         Self {
-            active_cells: AHashMap::new(),
-            flux: AHashMap::new(),
+            active_cells: AHashMap::with_capacity(10000),
+            process_queue: VecDeque::with_capacity(1000),
+            queued: AHashSet::with_capacity(1000),
             dirty_chunks: AHashSet::new(),
             tick: 0,
-            params: FlowParams::default(),
+            player_chunk: None,
             enabled: true,
+            sim_radius: WATER_FLOW_SIM_RADIUS,
         }
     }
 
@@ -163,39 +180,85 @@ impl WaterFlowEngine {
         self.active_cells.len()
     }
 
+    /// Update player position for simulation culling
+    pub fn set_player_position(&mut self, chunk_pos: ChunkPos) {
+        self.player_chunk = Some(chunk_pos);
+    }
+
+    /// Check if a chunk is within simulation radius
+    fn is_in_sim_radius(&self, chunk_pos: ChunkPos) -> bool {
+        match self.player_chunk {
+            Some(player) => {
+                let dx = (chunk_pos.x - player.x).abs();
+                let dy = (chunk_pos.y - player.y).abs();
+                let dz = (chunk_pos.z - player.z).abs();
+                dx <= self.sim_radius && dy <= self.sim_radius && dz <= self.sim_radius
+            }
+            None => true, // No player set, simulate everything
+        }
+    }
+
     /// Check if a position has active water
-    pub fn is_active(&self, x: i32, z: i32) -> bool {
-        self.active_cells.contains_key(&(x, z))
+    pub fn is_active(&self, pos: WaterPos) -> bool {
+        self.active_cells.contains_key(&pos)
     }
 
     /// Activate a water cell for simulation
-    pub fn activate(&mut self, x: i32, z: i32) {
-        if self.active_cells.len() < WATER_FLOW_MAX_ACTIVE_CELLS {
-            self.active_cells.entry((x, z)).or_insert(ActiveWaterCell {
-                world_x: x,
-                world_z: z,
-                stability_counter: 0,
-            });
-            self.flux.entry((x, z)).or_insert(CellFlux::default());
+    pub fn activate(&mut self, pos: WaterPos, level: u8, is_source: bool, source_dist: u8) {
+        if self.active_cells.len() >= WATER_FLOW_MAX_ACTIVE_CELLS {
+            return;
+        }
+
+        // Check if in simulation radius
+        if !self.is_in_sim_radius(pos.chunk_pos()) {
+            return;
+        }
+
+        let cell = ActiveWaterCell {
+            pos,
+            level,
+            is_source,
+            source_distance: source_dist,
+            stability_counter: 0,
+            flow_dir: (0, 0),
+        };
+
+        self.active_cells.insert(pos, cell);
+
+        // Add to process queue if not already queued
+        if !self.queued.contains(&pos) {
+            self.process_queue.push_back(pos);
+            self.queued.insert(pos);
         }
     }
 
-    /// Activate all water cells within a radius of a world position
-    pub fn activate_region(&mut self, center_x: i32, center_z: i32, radius: i32) {
-        for dz in -radius..=radius {
-            for dx in -radius..=radius {
-                self.activate(center_x + dx, center_z + dz);
-            }
-        }
+    /// Activate a water source at a position
+    pub fn activate_source(&mut self, x: i32, y: i32, z: i32) {
+        let pos = WaterPos::new(x, y, z);
+        self.activate(pos, WATER_LEVEL_MAX, true, 0);
+    }
+
+    /// Activate flowing water at a position
+    pub fn activate_flow(&mut self, x: i32, y: i32, z: i32, level: u8, source_dist: u8) {
+        let pos = WaterPos::new(x, y, z);
+        self.activate(pos, level, false, source_dist);
     }
 
     /// Deactivate a water cell
-    pub fn deactivate(&mut self, x: i32, z: i32) {
-        self.active_cells.remove(&(x, z));
-        self.flux.remove(&(x, z));
+    pub fn deactivate(&mut self, pos: WaterPos) {
+        self.active_cells.remove(&pos);
+        self.queued.remove(&pos);
     }
 
-    /// Mark a chunk as dirty (needs water mesh regeneration)
+    /// Queue a position for processing
+    fn queue_for_processing(&mut self, pos: WaterPos) {
+        if !self.queued.contains(&pos) && self.is_in_sim_radius(pos.chunk_pos()) {
+            self.process_queue.push_back(pos);
+            self.queued.insert(pos);
+        }
+    }
+
+    /// Mark a chunk as dirty (needs remeshing)
     fn mark_dirty(&mut self, chunk_pos: ChunkPos) {
         self.dirty_chunks.insert(chunk_pos);
     }
@@ -205,283 +268,319 @@ impl WaterFlowEngine {
         self.dirty_chunks.drain().collect()
     }
 
-    /// Get water height at a world position from chunk data
-    fn get_water_height(
+    /// Get block at a world position
+    fn get_block(
         &self,
-        x: i32,
-        z: i32,
+        pos: WaterPos,
         chunks: &AHashMap<ChunkPos, Arc<Chunk>>,
-    ) -> Option<f32> {
-        let (chunk_pos, local_x, local_z) = world_to_chunk_local_2d(x, z);
+    ) -> Option<Block> {
+        let chunk_pos = pos.chunk_pos();
+        let (lx, ly, lz) = pos.local();
+        chunks.get(&chunk_pos).map(|c| c.get_block(lx, ly, lz))
+    }
 
-        // For water, we need chunks at any Y level that might have water
-        // Check Y=0 chunk first (where sea level usually is), then Y=1, Y=2
-        for y in 0..3 {
-            let pos = ChunkPos { x: chunk_pos.x, y, z: chunk_pos.z };
-            if let Some(chunk) = chunks.get(&pos) {
-                if let Some(water_data) = chunk.water_data() {
-                    let col = water_data.get_column(local_x, local_z);
-                    if col.has_water {
-                        return Some(col.surface_y);
-                    }
+    /// Check if a position can hold water (not solid, not already water source)
+    fn can_hold_water(
+        &self,
+        pos: WaterPos,
+        chunks: &AHashMap<ChunkPos, Arc<Chunk>>,
+    ) -> bool {
+        match self.get_block(pos, chunks) {
+            Some(block) => !block.is_solid() && block != Block::Water,
+            None => false, // Chunk not loaded
+        }
+    }
+
+    /// Check if a position has solid terrain below
+    /// Scans down through water blocks to find the actual floor (solid) or air (cave)
+    fn has_floor(
+        &self,
+        pos: WaterPos,
+        chunks: &AHashMap<ChunkPos, Arc<Chunk>>,
+    ) -> bool {
+        let mut check_pos = pos.below();
+        let mut scanned = 0;
+
+        // Scan down through water to find the actual floor
+        // Max scan distance to prevent infinite loops
+        for _ in 0..32 {
+            scanned += 1;
+            match self.get_block(check_pos, chunks) {
+                Some(Block::Water) => {
+                    // Water block - continue scanning down
+                    check_pos = check_pos.below();
+                }
+                Some(block) if block.is_solid() => {
+                    // Found solid floor after scanning
+                    return true;
+                }
+                Some(_block) => {
+                    // Found air (or other non-solid, non-water block) - this is a cave opening!
+                    return false;
+                }
+                None => {
+                    // Chunk not loaded - assume solid to be safe
+                    return true;
                 }
             }
         }
+
+        // Exceeded scan distance, assume solid
+        true
+    }
+
+    /// Get the first non-water position below this one (cave opening)
+    fn find_cave_below(
+        &self,
+        pos: WaterPos,
+        chunks: &AHashMap<ChunkPos, Arc<Chunk>>,
+    ) -> Option<WaterPos> {
+        let mut check_pos = pos.below();
+
+        for _ in 0..32 {
+            match self.get_block(check_pos, chunks) {
+                Some(Block::Water) => {
+                    check_pos = check_pos.below();
+                }
+                Some(block) if !block.is_solid() && block != Block::Water => {
+                    // Found air (cave) - this is where water should flow
+                    return Some(check_pos);
+                }
+                _ => {
+                    // Solid block or chunk not loaded
+                    return None;
+                }
+            }
+        }
+
         None
     }
 
-    /// Get terrain height at a world position (top of solid blocks)
-    fn get_terrain_height(
+    /// Get water level at a position (from active cells or world data)
+    fn get_water_level(
         &self,
-        x: i32,
-        z: i32,
+        pos: WaterPos,
         chunks: &AHashMap<ChunkPos, Arc<Chunk>>,
-    ) -> f32 {
-        let (chunk_pos, local_x, local_z) = world_to_chunk_local_2d(x, z);
+    ) -> u8 {
+        // Check active cells first
+        if let Some(cell) = self.active_cells.get(&pos) {
+            return cell.level;
+        }
 
-        // Search from top down to find highest solid block
-        for y in (0..8).rev() {
-            let pos = ChunkPos { x: chunk_pos.x, y, z: chunk_pos.z };
-            if let Some(chunk) = chunks.get(&pos) {
-                for local_y in (0..CHUNK_SIZE).rev() {
-                    let block = chunk.get_block(local_x, local_y, local_z);
-                    if block.is_solid() {
-                        // Return top of this block
-                        return y as f32 * CHUNK_SIZE as f32 + local_y as f32 + 1.0;
-                    }
+        // Check chunk water data
+        let chunk_pos = pos.chunk_pos();
+        let (lx, _ly, lz) = pos.local();
+        if let Some(chunk) = chunks.get(&chunk_pos) {
+            if let Some(water_data) = chunk.water_data() {
+                let col = water_data.get_column(lx, lz);
+                if col.has_water {
+                    return col.level;
                 }
             }
         }
 
-        // No solid found, return 0 (bottom of world)
-        0.0
+        0 // No water
     }
 
-    /// Check if a cell is a water source (shouldn't drain)
-    fn is_source(
-        &self,
-        x: i32,
-        z: i32,
-        chunks: &AHashMap<ChunkPos, Arc<Chunk>>,
-    ) -> bool {
-        let (chunk_pos, local_x, local_z) = world_to_chunk_local_2d(x, z);
-
-        for y in 0..3 {
-            let pos = ChunkPos { x: chunk_pos.x, y, z: chunk_pos.z };
-            if let Some(chunk) = chunks.get(&pos) {
-                if let Some(water_data) = chunk.water_data() {
-                    let col = water_data.get_column(local_x, local_z);
-                    if col.has_water && col.is_source {
-                        return true;
-                    }
-                }
-            }
-        }
-        false
+    /// Calculate the surface Y for a water level at a given terrain height
+    fn calculate_surface_y(terrain_y: f32, level: u8) -> f32 {
+        // Water surface is terrain + (level/7) of a block
+        let level_height = (level as f32 / WATER_LEVEL_MAX as f32) * BLOCK_SCALE;
+        terrain_y + level_height
     }
 
     /// Run one simulation tick
     ///
-    /// This implements the pipe model algorithm:
-    /// 1. Calculate pressure at each active cell
-    /// 2. Update flux based on pressure differences
-    /// 3. Scale outflow to prevent over-draining
-    /// 4. Apply flux to update water heights
-    /// 5. Calculate velocity from net flux
-    /// 6. Update flow angles
+    /// Processes water cells using CA rules:
+    /// 1. Water with no floor flows down (waterfall) at full level
+    /// 2. Water with floor spreads horizontally with level decay
+    /// 3. Water level naturally settles (higher flows to lower)
+    /// 4. Sources maintain level 7 indefinitely
     pub fn simulate_tick(
         &mut self,
-        dt: f32,
+        _dt: f32,
         chunks: &Arc<RwLock<AHashMap<ChunkPos, Arc<Chunk>>>>,
-    ) -> Vec<(ChunkPos, Vec<WaterUpdate>)> {
+    ) -> Vec<WaterUpdate> {
         if !self.enabled || self.active_cells.is_empty() {
             return Vec::new();
         }
 
         self.tick += 1;
+
+        // Log stats every 300 ticks (~5 seconds)
+        if self.tick % 300 == 0 {
+            tracing::debug!("Water flow tick {}: {} active cells, {} in queue",
+                self.tick, self.active_cells.len(), self.process_queue.len());
+        }
         let chunks_read = chunks.read();
 
-        // Collect all water heights and terrain heights for active cells
-        let mut heights: AHashMap<(i32, i32), (f32, f32)> = AHashMap::new(); // (water_height, terrain_height)
+        let mut updates: Vec<WaterUpdate> = Vec::new();
+        let mut cells_processed = 0;
+        let mut cells_to_deactivate: Vec<WaterPos> = Vec::new();
+        let mut new_activations: Vec<(WaterPos, u8, bool, u8, (i8, i8))> = Vec::new();
 
-        for (&(x, z), _) in &self.active_cells {
-            let water_h = self.get_water_height(x, z, &chunks_read).unwrap_or(0.0);
-            let terrain_h = self.get_terrain_height(x, z, &chunks_read);
-            heights.insert((x, z), (water_h, terrain_h));
-        }
+        // Process cells from the queue
+        while let Some(pos) = self.process_queue.pop_front() {
+            self.queued.remove(&pos);
 
-        // Also collect heights for neighbors of active cells
-        for (&(x, z), _) in &self.active_cells {
-            for (dx, dz) in FLOW_DIRECTIONS {
-                let nx = x + dx;
-                let nz = z + dz;
-                if !heights.contains_key(&(nx, nz)) {
-                    let water_h = self.get_water_height(nx, nz, &chunks_read).unwrap_or(0.0);
-                    let terrain_h = self.get_terrain_height(nx, nz, &chunks_read);
-                    heights.insert((nx, nz), (water_h, terrain_h));
-                }
+            if cells_processed >= WATER_FLOW_CELLS_PER_TICK {
+                // Re-queue for next tick
+                self.process_queue.push_back(pos);
+                self.queued.insert(pos);
+                break;
             }
-        }
 
-        // Step 1: Update flux based on pressure differences
-        let pipe_factor = self.params.gravity * self.params.pipe_area / self.params.pipe_length * dt;
+            let cell = match self.active_cells.get(&pos) {
+                Some(c) => *c,
+                None => continue, // Cell was deactivated
+            };
 
-        for (&(x, z), _) in &self.active_cells {
-            let (self_water, self_terrain) = heights.get(&(x, z)).copied().unwrap_or((0.0, 0.0));
-            let self_surface = self_water.max(self_terrain); // Effective surface height
+            cells_processed += 1;
 
-            if self_water <= self_terrain {
-                // No water at this cell
+            // Skip if outside sim radius
+            if !self.is_in_sim_radius(pos.chunk_pos()) {
                 continue;
             }
 
-            let flux_entry = self.flux.entry((x, z)).or_insert(CellFlux::default());
+            let mut changed = false;
+            let mut new_level = cell.level;
+            let mut new_flow_dir = cell.flow_dir;
 
-            for (dir_idx, (dx, dz)) in FLOW_DIRECTIONS.iter().enumerate() {
-                let nx = x + dx;
-                let nz = z + dz;
+            // === RULE 1: Waterfall (flow down into caves) ===
+            if !self.has_floor(pos, &chunks_read) {
+                // Find the actual cave opening below (could be multiple blocks down)
+                let target_pos = self.find_cave_below(pos, &chunks_read).unwrap_or_else(|| pos.below());
+                if self.can_hold_water(target_pos, &chunks_read) {
+                    let target_level = self.get_water_level(target_pos, &chunks_read);
+                    if target_level < WATER_LEVEL_MAX {
+                        // Flow down at full level (waterfall into cave)
+                        new_activations.push((
+                            target_pos,
+                            WATER_LEVEL_MAX,
+                            false,
+                            cell.source_distance.saturating_add(1),
+                            (0, 0), // Vertical flow
+                        ));
+                        changed = true;
 
-                let (neighbor_water, neighbor_terrain) = heights.get(&(nx, nz)).copied().unwrap_or((0.0, f32::MAX));
-                let neighbor_surface = neighbor_water.max(neighbor_terrain);
-
-                // Pressure difference drives flow
-                let delta_h = self_surface - neighbor_surface;
-
-                // Update flux with acceleration from pressure difference
-                flux_entry.flux[dir_idx] *= self.params.damping;
-                flux_entry.flux[dir_idx] += delta_h * pipe_factor;
-
-                // Clamp to prevent backward flow through terrain
-                // Water can't flow "uphill" against terrain
-                if neighbor_terrain > self_water {
-                    flux_entry.flux[dir_idx] = flux_entry.flux[dir_idx].min(0.0);
-                }
-            }
-        }
-
-        // Step 2: Scale outflow to prevent draining more than available
-        for (&(x, z), _) in &self.active_cells {
-            let (self_water, self_terrain) = heights.get(&(x, z)).copied().unwrap_or((0.0, 0.0));
-            let available = (self_water - self_terrain).max(0.0);
-
-            if let Some(flux_entry) = self.flux.get_mut(&(x, z)) {
-                let total_out = flux_entry.total_outflow();
-                if total_out > available && total_out > 0.0 {
-                    let scale = available / total_out;
-                    flux_entry.scale(scale);
-                }
-            }
-        }
-
-        // Step 3: Calculate new heights and velocities
-        // First, collect all the data we need without mutating self
-        let mut updates: AHashMap<ChunkPos, Vec<WaterUpdate>> = AHashMap::new();
-        let mut cells_to_deactivate: Vec<(i32, i32)> = Vec::new();
-        let mut stability_updates: Vec<((i32, i32), u32)> = Vec::new(); // (pos, new_counter)
-        let mut dirty_chunks: Vec<ChunkPos> = Vec::new();
-
-        // Pre-collect source status for all active cells
-        let source_status: AHashMap<(i32, i32), bool> = self.active_cells.keys()
-            .map(|&(x, z)| ((x, z), self.is_source(x, z, &chunks_read)))
-            .collect();
-
-        // Collect current stability counters
-        let stability_counters: AHashMap<(i32, i32), u32> = self.active_cells.iter()
-            .map(|(&pos, cell)| (pos, cell.stability_counter))
-            .collect();
-
-        for &(x, z) in self.active_cells.keys() {
-            let (old_water, terrain) = heights.get(&(x, z)).copied().unwrap_or((0.0, 0.0));
-
-            // Calculate net flux (inflow - outflow)
-            let mut net_flux = 0.0;
-            let mut velocity_x = 0.0;
-            let mut velocity_z = 0.0;
-
-            // Outflow from this cell
-            if let Some(flux_entry) = self.flux.get(&(x, z)) {
-                net_flux -= flux_entry.flux[DIR_POS_X].max(0.0);
-                net_flux -= flux_entry.flux[DIR_NEG_X].max(0.0);
-                net_flux -= flux_entry.flux[DIR_POS_Z].max(0.0);
-                net_flux -= flux_entry.flux[DIR_NEG_Z].max(0.0);
-
-                velocity_x += flux_entry.flux[DIR_POS_X] - flux_entry.flux[DIR_NEG_X];
-                velocity_z += flux_entry.flux[DIR_POS_Z] - flux_entry.flux[DIR_NEG_Z];
-            }
-
-            // Inflow from neighbors
-            for (dir_idx, (dx, dz)) in FLOW_DIRECTIONS.iter().enumerate() {
-                let nx = x + dx;
-                let nz = z + dz;
-
-                if let Some(neighbor_flux) = self.flux.get(&(nx, nz)) {
-                    // Opposite direction index
-                    let opposite_idx = match dir_idx {
-                        DIR_POS_X => DIR_NEG_X,
-                        DIR_NEG_X => DIR_POS_X,
-                        DIR_POS_Z => DIR_NEG_Z,
-                        DIR_NEG_Z => DIR_POS_Z,
-                        _ => continue,
-                    };
-
-                    // Inflow is neighbor's outflow toward us (positive flux in opposite direction)
-                    let inflow = neighbor_flux.flux[opposite_idx].max(0.0);
-                    net_flux += inflow;
+                        // Non-source water drains when flowing down
+                        if !cell.is_source {
+                            new_level = new_level.saturating_sub(1);
+                        }
+                    }
                 }
             }
 
-            // Calculate new water height
-            let mut new_water = old_water + net_flux * dt;
+            // === RULE 2: Horizontal spread (only if we have a floor) ===
+            if cell.level >= WATER_LEVEL_MIN && self.has_floor(pos, &chunks_read) {
+                // Calculate spread level (decays by 1)
+                let spread_level = if cell.is_source {
+                    WATER_LEVEL_MAX - 1 // Sources spread at level 6
+                } else {
+                    cell.level.saturating_sub(1)
+                };
 
-            // Check if this is a source - sources don't drain below their level
-            let is_source = source_status.get(&(x, z)).copied().unwrap_or(false);
-            if is_source {
-                new_water = new_water.max(old_water);
-            }
+                if spread_level >= WATER_LEVEL_MIN {
+                    let mut lowest_neighbor: Option<(WaterPos, u8, i8, i8)> = None;
 
-            // Clamp to terrain (can't go below ground)
-            new_water = new_water.max(terrain);
+                    for (dx, dz) in FLOW_DIRECTIONS {
+                        let neighbor_pos = pos.neighbor(dx, dz);
 
-            // Normalize velocity by water depth for flow angle calculation
-            let water_depth = (new_water - terrain).max(0.1);
-            velocity_x /= water_depth;
-            velocity_z /= water_depth;
+                        // Check if neighbor can hold water
+                        if !self.can_hold_water(neighbor_pos, &chunks_read) {
+                            continue;
+                        }
 
-            // Check stability
-            let height_change = (new_water - old_water).abs();
-            let velocity_magnitude = (velocity_x * velocity_x + velocity_z * velocity_z).sqrt();
+                        let neighbor_level = self.get_water_level(neighbor_pos, &chunks_read);
 
-            let current_counter = stability_counters.get(&(x, z)).copied().unwrap_or(0);
-            if height_change < self.params.min_height_diff &&
-               velocity_magnitude < self.params.min_velocity {
-                let new_counter = current_counter + 1;
-                stability_updates.push(((x, z), new_counter));
-                if new_counter >= WATER_FLOW_STABILITY_TICKS {
-                    cells_to_deactivate.push((x, z));
+                        // Flow to neighbors with lower level
+                        if neighbor_level < spread_level {
+                            // Track lowest for flow direction
+                            if lowest_neighbor.is_none()
+                                || neighbor_level < lowest_neighbor.unwrap().1
+                            {
+                                lowest_neighbor =
+                                    Some((neighbor_pos, neighbor_level, dx as i8, dz as i8));
+                            }
+
+                            // Activate the neighbor
+                            let new_dist = cell.source_distance.saturating_add(1);
+                            new_activations.push((
+                                neighbor_pos,
+                                spread_level,
+                                false,
+                                new_dist,
+                                (dx as i8, dz as i8),
+                            ));
+                            changed = true;
+                        }
+                    }
+
+                    // Update flow direction toward lowest neighbor
+                    if let Some((_, _, dx, dz)) = lowest_neighbor {
+                        new_flow_dir = (dx, dz);
+                    }
                 }
-            } else {
-                stability_updates.push(((x, z), 0));
             }
 
-            // Create update if height or velocity changed significantly
-            if height_change > 0.0001 || velocity_magnitude > 0.001 {
-                let (chunk_pos, local_x, local_z) = world_to_chunk_local_2d(x, z);
+            // === RULE 3: Level equalization ===
+            // Water flows from higher to lower levels (gravity settling)
+            if !cell.is_source && cell.level > WATER_LEVEL_MIN {
+                for (dx, dz) in FLOW_DIRECTIONS {
+                    let neighbor_pos = pos.neighbor(dx, dz);
+                    let neighbor_level = self.get_water_level(neighbor_pos, &chunks_read);
 
-                // Find the actual chunk Y that has water
-                for y in 0..3 {
-                    let pos = ChunkPos { x: chunk_pos.x, y, z: chunk_pos.z };
-                    if chunks_read.get(&pos).is_some() {
-                        let update = WaterUpdate {
-                            local_x,
-                            local_z,
-                            new_height: new_water,
-                            velocity_x,
-                            velocity_z,
-                        };
-
-                        updates.entry(pos).or_insert_with(Vec::new).push(update);
-                        dirty_chunks.push(pos);
+                    // If neighbor has significantly less water, we lose some
+                    if neighbor_level + 2 < cell.level {
+                        new_level = new_level.saturating_sub(1);
+                        changed = true;
                         break;
+                    }
+                }
+            }
+
+            // === Update cell state ===
+            if changed || new_level != cell.level || new_flow_dir != cell.flow_dir {
+                if new_level < WATER_LEVEL_MIN && !cell.is_source {
+                    // Water dried up
+                    cells_to_deactivate.push(pos);
+                    updates.push(WaterUpdate {
+                        pos,
+                        level: 0,
+                        is_source: false,
+                        source_distance: 255,
+                        flow_dir: (0, 0),
+                        remove: true,
+                    });
+                } else {
+                    // Update the cell
+                    if let Some(cell_mut) = self.active_cells.get_mut(&pos) {
+                        cell_mut.level = new_level;
+                        cell_mut.flow_dir = new_flow_dir;
+                        cell_mut.stability_counter = 0;
+                    }
+
+                    updates.push(WaterUpdate {
+                        pos,
+                        level: new_level,
+                        is_source: cell.is_source,
+                        source_distance: cell.source_distance,
+                        flow_dir: new_flow_dir,
+                        remove: false,
+                    });
+                }
+
+                self.mark_dirty(pos.chunk_pos());
+            } else {
+                // Cell is stable
+                if let Some(cell_mut) = self.active_cells.get_mut(&pos) {
+                    cell_mut.stability_counter += 1;
+                    if cell_mut.stability_counter >= WATER_FLOW_STABILITY_TICKS as u8
+                        && !cell_mut.is_source
+                    {
+                        // Cell has been stable long enough, deactivate
+                        // (but keep the water in the world)
+                        cells_to_deactivate.push(pos);
                     }
                 }
             }
@@ -489,37 +588,99 @@ impl WaterFlowEngine {
 
         drop(chunks_read);
 
-        // Apply stability updates
-        for ((x, z), counter) in stability_updates {
-            if let Some(cell) = self.active_cells.get_mut(&(x, z)) {
-                cell.stability_counter = counter;
-            }
+        // Apply deactivations
+        for pos in cells_to_deactivate {
+            self.deactivate(pos);
         }
 
-        // Mark dirty chunks
-        for pos in dirty_chunks {
-            self.mark_dirty(pos);
-        }
+        // Apply new activations
+        for (pos, level, is_source, source_dist, flow_dir) in new_activations {
+            if !self.active_cells.contains_key(&pos) {
+                let mut cell = ActiveWaterCell {
+                    pos,
+                    level,
+                    is_source,
+                    source_distance: source_dist,
+                    stability_counter: 0,
+                    flow_dir,
+                };
 
-        // Deactivate stable cells
-        for (x, z) in cells_to_deactivate {
-            self.deactivate(x, z);
-        }
+                // Merge with existing if present
+                if let Some(existing) = self.active_cells.get(&pos) {
+                    cell.level = cell.level.max(existing.level);
+                    cell.is_source = cell.is_source || existing.is_source;
+                }
 
-        updates.into_iter().collect()
-    }
-
-    /// Activate all water cells in newly generated chunks
-    pub fn activate_chunk_water(&mut self, chunk: &Chunk, chunk_pos: ChunkPos) {
-        if let Some(water_data) = chunk.water_data() {
-            for (local_x, local_z, col) in water_data.iter_water_columns() {
-                if col.has_water && !col.is_source {
-                    let world_x = chunk_pos.x * CHUNK_SIZE_I32 + local_x as i32;
-                    let world_z = chunk_pos.z * CHUNK_SIZE_I32 + local_z as i32;
-                    self.activate(world_x, world_z);
+                self.active_cells.insert(pos, cell);
+                self.queue_for_processing(pos);
+            } else if let Some(existing) = self.active_cells.get_mut(&pos) {
+                // Update existing cell if new level is higher
+                if level > existing.level {
+                    existing.level = level;
+                    existing.source_distance = existing.source_distance.min(source_dist);
+                    existing.stability_counter = 0;
+                    self.queue_for_processing(pos);
                 }
             }
         }
+
+        updates
+    }
+
+    /// Activate water cells from a newly loaded chunk
+    pub fn activate_chunk_water(&mut self, chunk: &Chunk, chunk_pos: ChunkPos) {
+        let mut activated_count = 0;
+        if let Some(water_data) = chunk.water_data() {
+            for (local_x, local_z, col) in water_data.iter_water_columns() {
+                if col.has_water && col.level >= WATER_LEVEL_MIN {
+                    // Find the Y position for this water column
+                    // Water is at the surface, need to find the actual block Y
+                    let world_x = chunk_pos.x * CHUNK_SIZE_I32 + local_x as i32;
+                    let world_z = chunk_pos.z * CHUNK_SIZE_I32 + local_z as i32;
+                    let world_y = (col.surface_y / BLOCK_SCALE).floor() as i32;
+
+                    let pos = WaterPos::new(world_x, world_y, world_z);
+                    self.activate(pos, col.level, col.is_source, col.source_distance);
+                    activated_count += 1;
+                }
+            }
+        }
+    }
+
+    /// Remove a water source and trigger flow recalculation
+    pub fn remove_water(&mut self, x: i32, y: i32, z: i32) {
+        let pos = WaterPos::new(x, y, z);
+
+        // Deactivate this cell
+        self.deactivate(pos);
+
+        // Queue neighbors for recalculation
+        for (dx, dz) in FLOW_DIRECTIONS {
+            let neighbor = pos.neighbor(dx, dz);
+            if self.active_cells.contains_key(&neighbor) {
+                self.queue_for_processing(neighbor);
+            }
+        }
+
+        // Also check above and below
+        let above = pos.above();
+        let below = pos.below();
+        if self.active_cells.contains_key(&above) {
+            self.queue_for_processing(above);
+        }
+        if self.active_cells.contains_key(&below) {
+            self.queue_for_processing(below);
+        }
+
+        self.mark_dirty(pos.chunk_pos());
+    }
+
+    /// Clear all active cells (for world reload)
+    pub fn clear(&mut self) {
+        self.active_cells.clear();
+        self.process_queue.clear();
+        self.queued.clear();
+        self.dirty_chunks.clear();
     }
 }
 
@@ -529,33 +690,25 @@ impl Default for WaterFlowEngine {
     }
 }
 
-/// Water update to apply to a chunk
-#[derive(Clone, Debug)]
-pub struct WaterUpdate {
-    /// Local X coordinate within chunk
-    pub local_x: usize,
-    /// Local Z coordinate within chunk
-    pub local_z: usize,
-    /// New water surface height
-    pub new_height: f32,
-    /// New X velocity component
-    pub velocity_x: f32,
-    /// New Z velocity component
-    pub velocity_z: f32,
-}
-
 /// Apply water updates to chunks
 pub fn apply_water_updates(
-    updates: Vec<(ChunkPos, Vec<WaterUpdate>)>,
+    updates: Vec<WaterUpdate>,
     chunks: &Arc<RwLock<AHashMap<ChunkPos, Arc<Chunk>>>>,
 ) {
     if updates.is_empty() {
         return;
     }
 
+    // Group updates by chunk
+    let mut updates_by_chunk: AHashMap<ChunkPos, Vec<&WaterUpdate>> = AHashMap::new();
+    for update in &updates {
+        let chunk_pos = update.pos.chunk_pos();
+        updates_by_chunk.entry(chunk_pos).or_default().push(update);
+    }
+
     let mut chunks_write = chunks.write();
 
-    for (chunk_pos, water_updates) in updates {
+    for (chunk_pos, chunk_updates) in updates_by_chunk {
         if let Some(old_chunk) = chunks_write.get(&chunk_pos) {
             // Clone the chunk for modification (copy-on-write)
             let mut new_chunk = Chunk::new();
@@ -570,42 +723,46 @@ pub fn apply_water_updates(
                 }
             }
 
-            // Copy and update water data
+            // Copy existing water data
             if let Some(old_water) = old_chunk.water_data() {
                 let water_data = new_chunk.ensure_water_data();
-
-                // Copy existing water columns
                 for z in 0..CHUNK_SIZE {
                     for x in 0..CHUNK_SIZE {
                         let old_col = old_water.get_column(x, z);
                         if old_col.has_water {
                             let col = water_data.get_column_mut(x, z);
-                            col.surface_y = old_col.surface_y;
-                            col.has_water = true;
-                            col.foam = old_col.foam;
-                            col.flow_angle = old_col.flow_angle;
-                            col.flow_velocity_x = old_col.flow_velocity_x;
-                            col.flow_velocity_z = old_col.flow_velocity_z;
-                            col.is_source = old_col.is_source;
+                            *col = *old_col;
                         }
                     }
                 }
-
-                // Apply updates
-                for update in water_updates {
-                    let col = water_data.get_column_mut(update.local_x, update.local_z);
-                    col.surface_y = update.new_height;
-                    col.flow_velocity_x = update.velocity_x;
-                    col.flow_velocity_z = update.velocity_z;
-                    col.update_flow_angle();
-
-                    // Increase foam based on flow speed
-                    let speed = col.flow_speed();
-                    col.foam = (col.foam + speed * 0.1).min(1.0);
-                }
-
-                water_data.recalculate_bounds();
             }
+
+            // Apply updates
+            let water_data = new_chunk.ensure_water_data();
+            for update in chunk_updates {
+                let (lx, ly, lz) = update.pos.local();
+                let col = water_data.get_column_mut(lx, lz);
+
+                if update.remove {
+                    col.clear();
+                } else {
+                    // Calculate surface Y based on terrain and level
+                    let terrain_y = (ly as f32 + chunk_pos.y as f32 * CHUNK_SIZE as f32) * BLOCK_SCALE;
+                    let surface_y = WaterFlowEngine::calculate_surface_y(terrain_y, update.level);
+
+                    if update.is_source {
+                        col.set_as_source(surface_y);
+                    } else {
+                        col.set_flowing(update.level, surface_y, update.source_distance);
+                    }
+
+                    col.flow_dir_x = update.flow_dir.0;
+                    col.flow_dir_z = update.flow_dir.1;
+                    col.update_flow_angle_from_dir();
+                }
+            }
+
+            water_data.recalculate_bounds();
 
             // Replace chunk
             chunks_write.insert(chunk_pos, Arc::new(new_chunk));
@@ -618,71 +775,44 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_world_to_chunk_local_2d() {
-        // Positive coordinates
-        let (pos, lx, lz) = world_to_chunk_local_2d(17, 33);
-        assert_eq!(pos.x, 1);
-        assert_eq!(pos.z, 2);
-        assert_eq!(lx, 1);
-        assert_eq!(lz, 1);
-
-        // Origin
-        let (pos, lx, lz) = world_to_chunk_local_2d(0, 0);
-        assert_eq!(pos.x, 0);
-        assert_eq!(pos.z, 0);
-        assert_eq!(lx, 0);
-        assert_eq!(lz, 0);
-
-        // Negative coordinates
-        let (pos, lx, lz) = world_to_chunk_local_2d(-1, -1);
-        assert_eq!(pos.x, -1);
-        assert_eq!(pos.z, -1);
-        assert_eq!(lx, 15);
-        assert_eq!(lz, 15);
-
-        // Boundary
-        let (pos, lx, _lz) = world_to_chunk_local_2d(16, 0);
-        assert_eq!(pos.x, 1);
-        assert_eq!(lx, 0);
+    fn test_water_pos_chunk_local() {
+        let pos = WaterPos::new(17, 33, -5);
+        assert_eq!(pos.chunk_pos(), ChunkPos { x: 1, y: 2, z: -1 });
+        assert_eq!(pos.local(), (1, 1, 11));
     }
 
     #[test]
-    fn test_cell_flux() {
-        let mut flux = CellFlux::default();
-        flux.flux[DIR_POS_X] = 1.0;
-        flux.flux[DIR_NEG_Z] = 0.5;
-        flux.flux[DIR_NEG_X] = -0.3; // Negative (inflow)
-
-        assert!((flux.total_outflow() - 1.5).abs() < 0.001);
-
-        flux.scale(0.5);
-        assert!((flux.flux[DIR_POS_X] - 0.5).abs() < 0.001);
-        assert!((flux.flux[DIR_NEG_Z] - 0.25).abs() < 0.001);
+    fn test_water_pos_neighbors() {
+        let pos = WaterPos::new(10, 20, 30);
+        assert_eq!(pos.below(), WaterPos::new(10, 19, 30));
+        assert_eq!(pos.above(), WaterPos::new(10, 21, 30));
+        assert_eq!(pos.neighbor(1, 0), WaterPos::new(11, 20, 30));
+        assert_eq!(pos.neighbor(0, -1), WaterPos::new(10, 20, 29));
     }
 
     #[test]
     fn test_water_flow_engine_activation() {
         let mut engine = WaterFlowEngine::new();
 
-        assert_eq!(engine.active_cell_count(), 0);
+        let pos = WaterPos::new(10, 20, 30);
+        engine.activate(pos, 7, true, 0);
 
-        engine.activate(10, 20);
-        assert!(engine.is_active(10, 20));
+        assert!(engine.is_active(pos));
         assert_eq!(engine.active_cell_count(), 1);
 
-        engine.activate_region(0, 0, 2);
-        // Should activate 5x5 = 25 cells, but (10, 20) already exists
-        // Actually radius 2 means -2..=2 = 5 values per axis = 25 cells
-        assert!(engine.active_cell_count() >= 25);
-
-        engine.deactivate(10, 20);
-        assert!(!engine.is_active(10, 20));
+        engine.deactivate(pos);
+        assert!(!engine.is_active(pos));
+        assert_eq!(engine.active_cell_count(), 0);
     }
 
     #[test]
-    fn test_flow_params_default() {
-        let params = FlowParams::default();
-        assert!((params.gravity - WATER_FLOW_GRAVITY).abs() < 0.001);
-        assert!((params.damping - WATER_FLOW_DAMPING).abs() < 0.001);
+    fn test_surface_y_calculation() {
+        // At terrain Y=32 with full level, surface should be at 32 + 1.0
+        let surface = WaterFlowEngine::calculate_surface_y(32.0, 7);
+        assert!((surface - 33.0).abs() < 0.01);
+
+        // At terrain Y=32 with half level, surface should be at 32 + 0.5
+        let surface = WaterFlowEngine::calculate_surface_y(32.0, 3);
+        assert!((surface - 32.43).abs() < 0.01); // 32 + (3/7)
     }
 }

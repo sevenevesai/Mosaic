@@ -96,40 +96,45 @@ pub mod constants {
     /// Fresnel power for reflection blend
     pub const WATER_FRESNEL_POWER: f32 = 4.0;
 
-    // ============ WATER FLOW SIMULATION CONSTANTS ============
+    // ============ WATER FLOW SIMULATION CONSTANTS (CA System) ============
 
     /// Water flow simulation tick rate (ticks per second)
-    /// 20 Hz provides smooth flow without excessive CPU usage
-    pub const WATER_FLOW_TICK_RATE: f32 = 1.0 / 20.0;
+    /// 10 Hz is sufficient for CA simulation and reduces CPU load
+    pub const WATER_FLOW_TICK_RATE: f32 = 1.0 / 10.0;
 
-    /// Gravity constant for water pressure calculation (blocks/s^2)
-    pub const WATER_FLOW_GRAVITY: f32 = 9.8;
+    /// Maximum water level for CA simulation (0-7 scale)
+    /// Level 7 = full, Level 0 = empty
+    pub const WATER_LEVEL_MAX: u8 = 7;
 
-    /// Cross-sectional area of virtual pipes between cells
-    pub const WATER_FLOW_PIPE_AREA: f32 = 1.0;
-
-    /// Length between adjacent cell centers (blocks)
-    pub const WATER_FLOW_PIPE_LENGTH: f32 = 1.0;
-
-    /// Velocity damping factor per tick (0.0-1.0)
-    /// Higher values = slower energy loss = longer flowing water
-    pub const WATER_FLOW_DAMPING: f32 = 0.985;
-
-    /// Minimum flow velocity before considered stationary (blocks/s)
-    pub const WATER_FLOW_MIN_VELOCITY: f32 = 0.001;
-
-    /// Minimum height difference to trigger flow (blocks)
-    pub const WATER_FLOW_MIN_HEIGHT_DIFF: f32 = 0.001;
+    /// Maximum horizontal spread distance from a source (in blocks)
+    /// Water flowing horizontally loses 1 level per block after this
+    pub const WATER_FLOW_MAX_SPREAD: u8 = 7;
 
     /// Maximum number of active water cells to simulate per tick
-    pub const WATER_FLOW_MAX_ACTIVE_CELLS: usize = 50000;
+    /// CA is cheaper than pipe model, so we can handle more
+    pub const WATER_FLOW_MAX_ACTIVE_CELLS: usize = 100000;
+
+    /// Maximum cells to process per single tick (batching for frame pacing)
+    pub const WATER_FLOW_CELLS_PER_TICK: usize = 5000;
 
     /// Radius around block changes to activate water simulation (blocks)
     pub const WATER_FLOW_ACTIVATION_RADIUS: i32 = 4;
 
+    /// Chunk radius for water simulation around player
+    /// Water outside this radius pauses simulation
+    pub const WATER_FLOW_SIM_RADIUS: i32 = 8;
+
     /// Number of simulation ticks before a stable cell becomes inactive
-    pub const WATER_FLOW_STABILITY_TICKS: u32 = 10;
+    pub const WATER_FLOW_STABILITY_TICKS: u32 = 5;
 
     /// Initial flow scale when generating water from terrain gradient
     pub const WATER_FLOW_INITIAL_SCALE: f32 = 0.5;
+
+    // Legacy constants kept for compatibility (unused in CA system)
+    pub const WATER_FLOW_GRAVITY: f32 = 9.8;
+    pub const WATER_FLOW_PIPE_AREA: f32 = 1.0;
+    pub const WATER_FLOW_PIPE_LENGTH: f32 = 1.0;
+    pub const WATER_FLOW_DAMPING: f32 = 0.985;
+    pub const WATER_FLOW_MIN_VELOCITY: f32 = 0.001;
+    pub const WATER_FLOW_MIN_HEIGHT_DIFF: f32 = 0.001;
 }

@@ -26,6 +26,13 @@ pub const MAX_WATER_LEVELS: usize = 16;
 /// This texture is centered on the camera and indicates where water actually exists
 pub const WATER_PRESENCE_SIZE: u32 = 512;
 
+/// Water presence texture format: RGBA8
+/// - R: Water level (0 = no water, 36 = level 1, ..., 255 = level 7)
+/// - G: Flow direction X (-1,0,+1 mapped to 0,127,255)
+/// - B: Flow direction Z (-1,0,+1 mapped to 0,127,255)
+/// - A: Flags (bit 0 = is_source, bit 1 = is_flowing)
+pub const WATER_PRESENCE_BYTES_PER_TEXEL: u32 = 4;
+
 /// Water rendering quality preset
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WaterQuality {
@@ -223,6 +230,17 @@ impl Default for WaterUniforms {
     }
 }
 
+/// Water column data for presence texture updates
+#[derive(Clone, Copy, Default)]
+pub struct WaterColumnInfo {
+    pub has_water: bool,
+    pub level: u8,        // 0-7
+    pub flow_dir_x: i8,   // -1, 0, +1
+    pub flow_dir_z: i8,   // -1, 0, +1
+    pub is_source: bool,
+    pub is_flowing: bool,
+}
+
 /// Water rendering system
 pub struct Water {
     pipeline: wgpu::RenderPipeline,
@@ -308,7 +326,8 @@ impl Water {
             ],
         });
 
-        // Create water presence texture (R8Unorm - 1 byte per texel)
+        // Create water presence texture (RGBA8Unorm - 4 bytes per texel)
+        // R = water level, G = flow_dir_x, B = flow_dir_z, A = flags
         let presence_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Water Presence Texture"),
             size: wgpu::Extent3d {
@@ -319,15 +338,15 @@ impl Water {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R8Unorm,
+            format: wgpu::TextureFormat::Rgba8Unorm,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
 
         let presence_texture_view = presence_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        // Initialize presence data to all zeros (no water)
-        let presence_data = vec![0u8; (WATER_PRESENCE_SIZE * WATER_PRESENCE_SIZE) as usize];
+        // Initialize presence data to all zeros (no water) - RGBA format
+        let presence_data = vec![0u8; (WATER_PRESENCE_SIZE * WATER_PRESENCE_SIZE * WATER_PRESENCE_BYTES_PER_TEXEL) as usize];
 
         // Create uniform buffer
         let uniforms = WaterUniforms::default();
@@ -557,8 +576,73 @@ impl Water {
                     if tex_x >= 0 && tex_x < WATER_PRESENCE_SIZE as i32
                         && tex_z >= 0 && tex_z < WATER_PRESENCE_SIZE as i32
                     {
-                        let idx = (tex_z as u32 * WATER_PRESENCE_SIZE + tex_x as u32) as usize;
-                        self.presence_data[idx] = 255;
+                        // RGBA format: R=level, G=flow_x, B=flow_z, A=flags
+                        let idx = ((tex_z as u32 * WATER_PRESENCE_SIZE + tex_x as u32) * WATER_PRESENCE_BYTES_PER_TEXEL) as usize;
+                        self.presence_data[idx] = 255;     // R: full level (legacy compat)
+                        self.presence_data[idx + 1] = 127; // G: neutral flow X
+                        self.presence_data[idx + 2] = 127; // B: neutral flow Z
+                        self.presence_data[idx + 3] = 1;   // A: is_source flag
+                    }
+                }
+            }
+        }
+    }
+
+    /// Update water presence from chunk water data with full column info
+    ///
+    /// This version includes water level and flow direction for visual effects.
+    pub fn update_presence_from_chunk_detailed(
+        &mut self,
+        chunk_world_x: i32,
+        chunk_world_z: i32,
+        water_columns: &[[WaterColumnInfo; 16]; 16],
+    ) {
+        let half_size = (WATER_PRESENCE_SIZE / 2) as f32;
+        let center_x = self.presence_center[0];
+        let center_z = self.presence_center[1];
+
+        for lz in 0..16 {
+            for lx in 0..16 {
+                let col = &water_columns[lz][lx];
+                if col.has_water && col.level > 0 {
+                    // World position of this water column
+                    let world_x = chunk_world_x + lx as i32;
+                    let world_z = chunk_world_z + lz as i32;
+
+                    // Convert to texture coordinates (centered on camera)
+                    let tex_x = (world_x as f32 - center_x + half_size) as i32;
+                    let tex_z = (world_z as f32 - center_z + half_size) as i32;
+
+                    // Check bounds
+                    if tex_x >= 0 && tex_x < WATER_PRESENCE_SIZE as i32
+                        && tex_z >= 0 && tex_z < WATER_PRESENCE_SIZE as i32
+                    {
+                        let idx = ((tex_z as u32 * WATER_PRESENCE_SIZE + tex_x as u32) * WATER_PRESENCE_BYTES_PER_TEXEL) as usize;
+
+                        // R: Water level (0-7 mapped to 0-255)
+                        self.presence_data[idx] = (col.level as u32 * 255 / 7).min(255) as u8;
+
+                        // G: Flow direction X (-1,0,+1 mapped to 0,127,255)
+                        self.presence_data[idx + 1] = match col.flow_dir_x {
+                            -1 => 0,
+                            0 => 127,
+                            1 => 255,
+                            _ => 127,
+                        };
+
+                        // B: Flow direction Z (-1,0,+1 mapped to 0,127,255)
+                        self.presence_data[idx + 2] = match col.flow_dir_z {
+                            -1 => 0,
+                            0 => 127,
+                            1 => 255,
+                            _ => 127,
+                        };
+
+                        // A: Flags (bit 0 = is_source, bit 1 = is_flowing)
+                        let mut flags = 0u8;
+                        if col.is_source { flags |= 1; }
+                        if col.is_flowing { flags |= 2; }
+                        self.presence_data[idx + 3] = flags;
                     }
                 }
             }
@@ -598,7 +682,7 @@ impl Water {
             &self.presence_data,
             wgpu::ImageDataLayout {
                 offset: 0,
-                bytes_per_row: Some(WATER_PRESENCE_SIZE),
+                bytes_per_row: Some(WATER_PRESENCE_SIZE * WATER_PRESENCE_BYTES_PER_TEXEL),
                 rows_per_image: Some(WATER_PRESENCE_SIZE),
             },
             wgpu::Extent3d {
@@ -719,22 +803,58 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     return out;
 }
 
-// Check if water exists at a world XZ position using the presence texture
-// Returns 1.0 if water exists, 0.0 if not
-fn check_water_presence(world_x: f32, world_z: f32) -> f32 {
+// Water presence info from texture sampling
+struct WaterPresenceInfo {
+    exists: f32,       // 0.0 = no water, 1.0 = has water
+    level: f32,        // 0.0-1.0 water level (0=empty, 1=full)
+    flow_dir: vec2<f32>, // Flow direction (-1 to +1 for X and Z)
+    is_source: bool,   // Is this a source block?
+    is_flowing: bool,  // Is this actively flowing?
+}
+
+// Sample water presence info at a world XZ position
+fn sample_water_presence(world_x: f32, world_z: f32) -> WaterPresenceInfo {
+    var info: WaterPresenceInfo;
+    info.exists = 0.0;
+    info.level = 0.0;
+    info.flow_dir = vec2<f32>(0.0, 0.0);
+    info.is_source = false;
+    info.is_flowing = false;
+
     let half_size = water.presence_size * 0.5;
     let tex_x = (world_x - water.presence_center.x + half_size) / water.presence_size;
     let tex_z = (world_z - water.presence_center.y + half_size) / water.presence_size;
 
     // Check bounds
     if (tex_x < 0.0 || tex_x > 1.0 || tex_z < 0.0 || tex_z > 1.0) {
-        // Outside presence texture - default to no water (safe for caves)
-        return 0.0;
+        return info;
     }
 
-    // Sample presence texture (R channel only)
-    let presence = textureSampleLevel(presence_texture, tex_sampler, vec2<f32>(tex_x, tex_z), 0.0).r;
-    return presence;
+    // Sample presence texture (RGBA format)
+    // R = water level, G = flow_dir_x, B = flow_dir_z, A = flags
+    let sample = textureSampleLevel(presence_texture, tex_sampler, vec2<f32>(tex_x, tex_z), 0.0);
+
+    // R channel: water level (0-1)
+    info.level = sample.r;
+    info.exists = select(0.0, 1.0, sample.r > 0.01);
+
+    // G channel: flow direction X (0=−1, 0.5=0, 1=+1)
+    info.flow_dir.x = (sample.g - 0.5) * 2.0;
+
+    // B channel: flow direction Z (0=−1, 0.5=0, 1=+1)
+    info.flow_dir.y = (sample.b - 0.5) * 2.0;
+
+    // A channel: flags
+    let flags = u32(sample.a * 255.0);
+    info.is_source = (flags & 1u) != 0u;
+    info.is_flowing = (flags & 2u) != 0u;
+
+    return info;
+}
+
+// Legacy function for compatibility - just checks if water exists
+fn check_water_presence(world_x: f32, world_z: f32) -> f32 {
+    return sample_water_presence(world_x, world_z).exists;
 }
 
 // Hash function for noise
@@ -755,8 +875,60 @@ fn noise2(p: vec2<f32>) -> f32 {
     );
 }
 
-// Calculate animated wave normal - subtle, calm water
+// Calculate animated wave normal with flow direction influence
+fn get_wave_normal_with_flow(pos: vec2<f32>, time: f32, flow_dir: vec2<f32>, is_flowing: bool) -> vec3<f32> {
+    let wave_speed = water.wave_speed * 0.5;
+
+    // Stronger waves when flowing, gentler for still water
+    let flow_strength = length(flow_dir);
+    let wave_strength = water.wave_strength * select(0.3, 0.6, is_flowing);
+
+    var dx = 0.0;
+    var dz = 0.0;
+
+    // Flow direction influence - waves move in flow direction
+    let flow_offset = flow_dir * time * wave_speed * 2.0;
+
+    // Layer 1: Large slow swells (follow flow direction)
+    let p1 = pos * 0.015 + flow_offset * 0.3 + vec2<f32>(time * wave_speed * 0.2, time * wave_speed * 0.15);
+    dx += sin(p1.x * 1.5 + p1.y * 1.0) * 0.4;
+    dz += sin(p1.y * 1.5 - p1.x * 0.8) * 0.4;
+
+    // Layer 2: Medium ripples (stronger influence from flow)
+    let p2 = pos * 0.04 + flow_offset * 0.5 + vec2<f32>(time * wave_speed * 0.4, -time * wave_speed * 0.25);
+    dx += sin(p2.x * 2.0 + p2.y * 1.8) * 0.35;
+    dz += sin(p2.y * 2.0 - p2.x * 1.5) * 0.35;
+
+    // Add directional bias based on flow
+    if (flow_strength > 0.1) {
+        dx += flow_dir.x * 0.3 * wave_strength;
+        dz += flow_dir.y * 0.3 * wave_strength;
+    }
+
+    // Layer 3: Small detail (if quality allows)
+    if (water.wave_octaves >= 3u) {
+        let p3 = pos * 0.08 + flow_offset * 0.7 + vec2<f32>(-time * wave_speed * 0.3, time * wave_speed * 0.4);
+        dx += sin(p3.x * 3.0 + p3.y * 2.5) * 0.2;
+        dz += sin(p3.y * 2.8 - p3.x * 3.0) * 0.2;
+    }
+
+    // Layer 4: Fine detail (Ultra only)
+    if (water.wave_octaves >= 4u) {
+        let p4 = pos * 0.12 + vec2<f32>(time * wave_speed * 0.5, time * wave_speed * 0.35);
+        dx += sin(p4.x * 4.0 + p4.y * 3.5) * 0.1;
+        dz += sin(p4.y * 3.5 - p4.x * 4.0) * 0.1;
+    }
+
+    return normalize(vec3<f32>(-dx * wave_strength, 1.0, -dz * wave_strength));
+}
+
+// Calculate animated wave normal - subtle, calm water (legacy, no flow)
 fn get_wave_normal(pos: vec2<f32>, time: f32) -> vec3<f32> {
+    return get_wave_normal_with_flow(pos, time, vec2<f32>(0.0, 0.0), false);
+}
+
+// Legacy wave calculation kept for reference
+fn get_wave_normal_simple(pos: vec2<f32>, time: f32) -> vec3<f32> {
     let wave_speed = water.wave_speed * 0.5; // Slower waves
     let wave_strength = water.wave_strength * 0.4; // Much gentler
 
@@ -1043,8 +1215,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         discard;
     }
 
-    // Calculate wave normal
-    let wave_normal = get_wave_normal(water_pos.xz, time);
+    // Sample water presence info for flow direction
+    let water_info = sample_water_presence(water_pos.x, water_pos.z);
+
+    // Calculate wave normal with flow direction influence
+    let wave_normal = get_wave_normal_with_flow(water_pos.xz, time, water_info.flow_dir, water_info.is_flowing);
 
     // Distance-based normal fade (reduce waves at distance for stability)
     let dist = length(water_pos - cam_pos);
@@ -1137,7 +1312,22 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Shore foam
     let shore_foam_intensity = smoothstep(1.5, 0.0, depth_diff) * 0.4;
     let foam_noise = noise2(water_pos.xz * 0.3 + vec2<f32>(time * 0.1, time * 0.07));
-    let foam = shore_foam_intensity * smoothstep(water.foam_threshold - 0.1, water.foam_threshold, foam_noise);
+    var foam = shore_foam_intensity * smoothstep(water.foam_threshold - 0.1, water.foam_threshold, foam_noise);
+
+    // Flow foam - add extra foam where water is actively flowing
+    if (water_info.is_flowing) {
+        let flow_strength = length(water_info.flow_dir);
+        // Animated foam patterns following flow direction
+        let flow_offset = water_info.flow_dir * time * 0.5;
+        let flow_foam_noise = noise2(water_pos.xz * 0.4 + flow_offset);
+        let flow_foam = flow_strength * smoothstep(0.4, 0.7, flow_foam_noise) * 0.35;
+        foam = max(foam, flow_foam);
+    }
+
+    // Extra foam at low water levels (visible flowing edges)
+    let level_foam = (1.0 - water_info.level) * 0.2;
+    foam = max(foam, level_foam * smoothstep(0.5, 0.7, foam_noise));
+
     let foam_color = vec3<f32>(0.9, 0.92, 0.95) * brightness;
     final_color = mix(final_color, foam_color, foam);
 

@@ -681,6 +681,9 @@ impl App {
         self.world.set_lod_thresholds(lod_full, lod_half);
         self.world.set_load_distance(self.renderer.total_view_distance());
         self.world.update(&self.player.position());
+        // Update player position for water flow simulation culling
+        let player_chunk = crate::world::ChunkPos::from_world_pos(self.player.position());
+        self.world.update_water_player_position(player_chunk);
         // Run water flow simulation
         self.world.tick_water_simulation(dt.as_secs_f32());
         self.profiler.end_section("world_update");

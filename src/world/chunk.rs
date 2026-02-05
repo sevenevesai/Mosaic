@@ -6,6 +6,11 @@ use crate::constants::{CHUNK_SIZE, CHUNK_SIZE_F32, CHUNK_SIZE_I32, BLOCK_SCALE};
 
 /// Water data for a single column in a chunk
 /// Stores the water surface height for heightfield rendering
+///
+/// Uses a cellular automata (CA) level system (0-7) for flow simulation:
+/// - Level 0 = no water (empty)
+/// - Level 1-6 = flowing water (decays with distance from source)
+/// - Level 7 = full water (source blocks or filled pools)
 #[derive(Debug, Clone, Copy)]
 pub struct WaterColumn {
     /// Water surface height in world Y coordinates
@@ -13,7 +18,7 @@ pub struct WaterColumn {
     pub surface_y: f32,
     /// Whether this column has water at all
     pub has_water: bool,
-    /// Foam factor (0.0-1.0) - higher near block edges
+    /// Foam factor (0.0-1.0) - higher near block edges and flow points
     pub foam: f32,
     /// Flow direction for animation (radians, 0 = +X direction)
     /// Computed from flow velocity components
@@ -25,6 +30,18 @@ pub struct WaterColumn {
     /// Whether this is an infinite water source (springs, sea level water)
     /// Source water maintains its level and doesn't drain
     pub is_source: bool,
+    /// Water level for CA simulation (0-7)
+    /// 0 = empty, 7 = full, 1-6 = flowing with decay
+    pub level: u8,
+    /// Primary flow direction X (-1, 0, +1) for visual animation
+    pub flow_dir_x: i8,
+    /// Primary flow direction Z (-1, 0, +1) for visual animation
+    pub flow_dir_z: i8,
+    /// Distance from nearest source (for flow decay and effects)
+    /// 255 = unknown/far, 0 = is source
+    pub source_distance: u8,
+    /// Whether this cell is actively flowing (needs simulation)
+    pub is_flowing: bool,
 }
 
 impl Default for WaterColumn {
@@ -37,9 +54,20 @@ impl Default for WaterColumn {
             flow_velocity_x: 0.0,
             flow_velocity_z: 0.0,
             is_source: false,
+            level: 0,
+            flow_dir_x: 0,
+            flow_dir_z: 0,
+            source_distance: 255,
+            is_flowing: false,
         }
     }
 }
+
+/// Maximum water level for CA simulation
+pub const WATER_LEVEL_MAX: u8 = 7;
+
+/// Minimum water level that counts as having water
+pub const WATER_LEVEL_MIN: u8 = 1;
 
 impl WaterColumn {
     /// Calculate flow angle from velocity components
@@ -65,6 +93,79 @@ impl WaterColumn {
     #[inline]
     pub fn update_flow_angle(&mut self) {
         self.flow_angle = self.calculate_flow_angle();
+    }
+
+    /// Update flow angle from flow direction integers
+    #[inline]
+    pub fn update_flow_angle_from_dir(&mut self) {
+        if self.flow_dir_x != 0 || self.flow_dir_z != 0 {
+            self.flow_angle = (self.flow_dir_z as f32).atan2(self.flow_dir_x as f32);
+            // Also update velocity for compatibility
+            let speed = if self.is_flowing { 1.0 } else { 0.2 };
+            self.flow_velocity_x = self.flow_dir_x as f32 * speed;
+            self.flow_velocity_z = self.flow_dir_z as f32 * speed;
+        }
+    }
+
+    /// Get the water level as a normalized value (0.0-1.0)
+    #[inline]
+    pub fn level_normalized(&self) -> f32 {
+        self.level as f32 / WATER_LEVEL_MAX as f32
+    }
+
+    /// Check if this column has significant water (level > 0)
+    #[inline]
+    pub fn has_significant_water(&self) -> bool {
+        self.has_water && self.level >= WATER_LEVEL_MIN
+    }
+
+    /// Check if this is a full water column (level 7 or source)
+    #[inline]
+    pub fn is_full(&self) -> bool {
+        self.level >= WATER_LEVEL_MAX || self.is_source
+    }
+
+    /// Set as a water source (infinite, full level)
+    pub fn set_as_source(&mut self, surface_y: f32) {
+        self.has_water = true;
+        self.is_source = true;
+        self.level = WATER_LEVEL_MAX;
+        self.surface_y = surface_y;
+        self.source_distance = 0;
+        self.is_flowing = false;
+        self.foam = 0.1; // Slight foam at sources
+    }
+
+    /// Set as flowing water with a specific level
+    pub fn set_flowing(&mut self, level: u8, surface_y: f32, source_dist: u8) {
+        self.has_water = level >= WATER_LEVEL_MIN;
+        self.is_source = false;
+        self.level = level.min(WATER_LEVEL_MAX);
+        self.surface_y = surface_y;
+        self.source_distance = source_dist;
+        self.is_flowing = level >= WATER_LEVEL_MIN;
+        // Foam increases with flow and decreases with level
+        self.foam = if self.is_flowing {
+            0.2 + (1.0 - self.level_normalized()) * 0.3
+        } else {
+            0.0
+        };
+    }
+
+    /// Clear water from this column
+    pub fn clear(&mut self) {
+        self.has_water = false;
+        self.is_source = false;
+        self.level = 0;
+        self.surface_y = 0.0;
+        self.source_distance = 255;
+        self.is_flowing = false;
+        self.foam = 0.0;
+        self.flow_dir_x = 0;
+        self.flow_dir_z = 0;
+        self.flow_velocity_x = 0.0;
+        self.flow_velocity_z = 0.0;
+        self.flow_angle = 0.0;
     }
 }
 
@@ -109,6 +210,15 @@ impl ChunkWaterData {
         col.surface_y = surface_y;
         col.has_water = true;
         col.foam = foam;
+
+        // Set default CA fields for static water
+        col.level = WATER_LEVEL_MAX;
+        col.is_source = true;
+        col.source_distance = 0;
+        col.is_flowing = false;
+        col.flow_dir_x = 0;
+        col.flow_dir_z = 0;
+
         self.has_any_water = true;
         self.min_water_y = self.min_water_y.min(surface_y);
         self.max_water_y = self.max_water_y.max(surface_y);
@@ -134,6 +244,21 @@ impl ChunkWaterData {
         col.flow_velocity_z = flow_velocity_z;
         col.is_source = is_source;
         col.update_flow_angle();
+
+        // Set CA system fields
+        col.level = WATER_LEVEL_MAX; // Sea level water is always full
+        col.source_distance = if is_source { 0 } else { 1 };
+        col.is_flowing = !is_source && (flow_velocity_x.abs() > 0.01 || flow_velocity_z.abs() > 0.01);
+
+        // Calculate flow direction from velocity
+        if flow_velocity_x.abs() > 0.01 || flow_velocity_z.abs() > 0.01 {
+            col.flow_dir_x = if flow_velocity_x > 0.05 { 1 } else if flow_velocity_x < -0.05 { -1 } else { 0 };
+            col.flow_dir_z = if flow_velocity_z > 0.05 { 1 } else if flow_velocity_z < -0.05 { -1 } else { 0 };
+        } else {
+            col.flow_dir_x = 0;
+            col.flow_dir_z = 0;
+        }
+
         self.has_any_water = true;
         self.min_water_y = self.min_water_y.min(surface_y);
         self.max_water_y = self.max_water_y.max(surface_y);

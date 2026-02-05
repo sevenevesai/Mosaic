@@ -393,12 +393,8 @@ impl TerrainGenerator {
         let is_cave = y > 5 && biome.is_cave(x, y, z, col.height, &self.cave_noise);
 
         if is_cave {
-            // Underwater caves fill with water (except in frozen biomes)
-            if y < WATER_SEA_LEVEL && col.height < WATER_SEA_LEVEL + 4
-                && col.biome_id != biome::BiomeId::Tundra
-            {
-                return Block::Water;
-            }
+            // Caves are always air - water will flow in dynamically via CA simulation
+            // This creates the "runoff" effect where water falls into caves
             return Block::Air;
         }
 

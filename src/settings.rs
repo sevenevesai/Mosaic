@@ -79,6 +79,12 @@ pub struct Settings {
     // === LOD SETTINGS ===
     /// LOD distance: "OFF" or chunk distance where LOD starts (6, 8, 12, 16, 20, 24, 32)
     pub lod_distance: String,
+
+    // === WATER FLOW SETTINGS ===
+    /// Whether water flow simulation is enabled
+    pub water_flow_enabled: bool,
+    /// Water flow simulation distance: NEAR (4), MEDIUM (8), FAR (16), ULTRA (24)
+    pub water_flow_distance: String,
 }
 
 impl Default for Settings {
@@ -124,6 +130,9 @@ impl Default for Settings {
             music_enabled: true, // Music on by default
             // LOD defaults
             lod_distance: "12".to_string(),  // Default: LOD starts at 12 chunks
+            // Water flow defaults
+            water_flow_enabled: true,             // Water flow on by default
+            water_flow_distance: "MEDIUM".to_string(), // Default: 8 chunk radius
         }
     }
 }
@@ -307,6 +316,13 @@ impl Settings {
                     "lod_distance" => {
                         settings.lod_distance = value.to_string();
                     }
+                    // Water flow settings
+                    "water_flow_enabled" => {
+                        settings.water_flow_enabled = value == "true";
+                    }
+                    "water_flow_distance" => {
+                        settings.water_flow_distance = value.to_string();
+                    }
                     _ => {}
                 }
             }
@@ -359,7 +375,10 @@ impl Settings {
              audio_music={}\n\
              music_enabled={}\n\
              # LOD Settings\n\
-             lod_distance={}\n",
+             lod_distance={}\n\
+             # Water Flow Settings\n\
+             water_flow_enabled={}\n\
+             water_flow_distance={}\n",
             self.render_distance,
             self.shadow_mode,
             self.bloom_enabled,
@@ -395,6 +414,8 @@ impl Settings {
             self.audio_music,
             self.music_enabled,
             self.lod_distance,
+            self.water_flow_enabled,
+            self.water_flow_distance,
         );
 
         if let Err(e) = fs::write(Self::FILE_PATH, content) {

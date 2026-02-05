@@ -272,6 +272,10 @@ pub struct Renderer {
 
     // Procedural grass rendering
     grass_system: GrassSystem,
+
+    // Water flow settings (mirrored from WorldManager for settings save/load)
+    water_flow_enabled: bool,
+    water_flow_distance: String,
 }
 
 impl Renderer {
@@ -852,6 +856,8 @@ impl Renderer {
             scenery_renderer,
             impostor_renderer,
             grass_system,
+            water_flow_enabled: true,
+            water_flow_distance: "MEDIUM".to_string(),
         }
     }
 
@@ -1959,6 +1965,88 @@ impl Renderer {
         self.grass_system.set_shadow(shadow);
     }
 
+    // === WATER FLOW SETTINGS ===
+    // These are stored here for settings persistence but need to be
+    // synchronized with WorldManager which actually runs the simulation.
+
+    /// Get water flow enabled state
+    pub fn water_flow_enabled(&self) -> bool {
+        self.water_flow_enabled
+    }
+
+    /// Set water flow enabled state
+    pub fn set_water_flow_enabled(&mut self, enabled: bool) {
+        self.water_flow_enabled = enabled;
+    }
+
+    /// Toggle water flow enabled
+    pub fn toggle_water_flow(&mut self) -> bool {
+        self.water_flow_enabled = !self.water_flow_enabled;
+        self.water_flow_enabled
+    }
+
+    /// Get water flow distance setting as string
+    pub fn water_flow_distance(&self) -> &str {
+        &self.water_flow_distance
+    }
+
+    /// Get water flow distance as index (0=NEAR, 1=MEDIUM, 2=FAR, 3=ULTRA)
+    pub fn water_flow_distance_index(&self) -> usize {
+        match self.water_flow_distance.to_uppercase().as_str() {
+            "NEAR" => 0,
+            "MEDIUM" => 1,
+            "FAR" => 2,
+            "ULTRA" => 3,
+            _ => 1, // Default to MEDIUM
+        }
+    }
+
+    /// Get water flow distance in chunks
+    pub fn water_flow_distance_chunks(&self) -> i32 {
+        match self.water_flow_distance.to_uppercase().as_str() {
+            "NEAR" => 4,
+            "MEDIUM" => 8,
+            "FAR" => 16,
+            "ULTRA" => 24,
+            _ => 8, // Default to MEDIUM
+        }
+    }
+
+    /// Cycle water flow distance forward
+    pub fn cycle_water_flow_distance(&mut self) -> &str {
+        self.water_flow_distance = match self.water_flow_distance.to_uppercase().as_str() {
+            "NEAR" => "MEDIUM".to_string(),
+            "MEDIUM" => "FAR".to_string(),
+            "FAR" => "ULTRA".to_string(),
+            "ULTRA" => "NEAR".to_string(),
+            _ => "MEDIUM".to_string(),
+        };
+        &self.water_flow_distance
+    }
+
+    /// Cycle water flow distance backward
+    pub fn cycle_water_flow_distance_prev(&mut self) -> &str {
+        self.water_flow_distance = match self.water_flow_distance.to_uppercase().as_str() {
+            "NEAR" => "ULTRA".to_string(),
+            "MEDIUM" => "NEAR".to_string(),
+            "FAR" => "MEDIUM".to_string(),
+            "ULTRA" => "FAR".to_string(),
+            _ => "MEDIUM".to_string(),
+        };
+        &self.water_flow_distance
+    }
+
+    /// Set water flow distance by index
+    pub fn set_water_flow_distance_index(&mut self, index: usize) {
+        self.water_flow_distance = match index {
+            0 => "NEAR".to_string(),
+            1 => "MEDIUM".to_string(),
+            2 => "FAR".to_string(),
+            3 => "ULTRA".to_string(),
+            _ => "MEDIUM".to_string(),
+        };
+    }
+
     /// Check if water refraction is enabled
     pub fn is_refraction_enabled(&self) -> bool {
         self.water_system.quality() != WaterQuality::Off
@@ -2263,6 +2351,10 @@ impl Renderer {
         self.audio_ambient = settings.audio_ambient;
         self.audio_music = settings.audio_music;
         self.music_enabled = settings.music_enabled;
+
+        // Apply water flow settings (stored here for collect_settings, applied to WorldManager by app.rs)
+        self.water_flow_enabled = settings.water_flow_enabled;
+        self.water_flow_distance = settings.water_flow_distance.clone();
     }
 
     /// Collect current settings into a Settings struct
@@ -2307,6 +2399,9 @@ impl Renderer {
             grass_quality: self.grass_system.quality().as_str().to_string(),
             grass_distance: self.grass_system.distance().as_str().to_string(),
             grass_shadow: self.grass_system.shadow().as_str().to_string(),
+            // Water flow settings (stored/managed by WorldManager, use defaults here)
+            water_flow_enabled: self.water_flow_enabled,
+            water_flow_distance: self.water_flow_distance.clone(),
         }
     }
 
@@ -3680,10 +3775,12 @@ impl DayNightCycle {
         if t < 0.0 { t + 1.0 } else { t };
 
         // Sun rotates around X axis: rises at 0.25, peaks at 0.5, sets at 0.75
+        // Offset by ~20 degrees so sun is never directly overhead (always casts shadows)
         let sun_angle = (t - 0.25) * std::f32::consts::TAU; // Full rotation
-        let sun_y = sun_angle.sin();
+        let sun_y = sun_angle.sin() * 0.94; // Cap max height (~20° from zenith)
         let sun_xz = sun_angle.cos();
-        let sun_direction = Vec3::new(sun_xz * 0.5, sun_y, sun_xz * 0.866).normalize();
+        // Add slight north offset so there's always shadow direction
+        let sun_direction = Vec3::new(sun_xz * 0.5, sun_y, sun_xz * 0.866 + 0.34).normalize();
 
         // Moon is opposite to sun
         let moon_direction = -sun_direction;
