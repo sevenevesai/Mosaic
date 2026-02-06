@@ -98,7 +98,12 @@ pub fn save_items(path: &Path, manager: &ItemEntityManager) -> Result<(), ItemDa
         // Flags
         let flags = if item.no_despawn { 0x01 } else { 0x00 };
         data[offset+30] = flags;
-        // [31] reserved
+
+        // Durability for tools (byte 31 = low, repurpose for tool durability)
+        if item.item_id >= 128 {
+            data[offset+25] = (item.durability & 0xFF) as u8;
+            data[offset+31] = ((item.durability >> 8) & 0xFF) as u8;
+        }
     }
 
     // Atomic write
@@ -181,6 +186,13 @@ pub fn load_items(path: &Path, manager: &mut ItemEntityManager) -> Result<(), It
         let flags = data[offset+30];
         let no_despawn = (flags & 0x01) != 0;
 
+        // Decode tool durability from bytes 25 (low) + 31 (high) when item_id >= 128
+        let durability = if item_id >= 128 {
+            data[offset+25] as u16 | ((data[offset+31] as u16) << 8)
+        } else {
+            0
+        };
+
         items.push(SavedItemEntity {
             position,
             velocity,
@@ -188,6 +200,7 @@ pub fn load_items(path: &Path, manager: &mut ItemEntityManager) -> Result<(), It
             count,
             age,
             no_despawn,
+            durability,
         });
     }
 

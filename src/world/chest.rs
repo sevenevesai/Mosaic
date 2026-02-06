@@ -180,8 +180,13 @@ impl ChestManager {
                             slot: slot as u8,
                             item_id: match s.item {
                                 Item::Block(block) => block as u8,
+                                Item::Tool { kind, material, .. } => 128 + kind.to_id() * 6 + material.to_id(),
                             },
                             count: s.count,
+                            durability: match s.item {
+                                Item::Tool { durability, .. } => durability,
+                                _ => 0,
+                            },
                         })
                     })
                     .collect(),
@@ -197,12 +202,22 @@ impl ChestManager {
             let mut chest = ChestData::new(saved.rotation);
 
             for item in saved.items {
-                let block = crate::world::Block::from(item.item_id);
-                if !matches!(block, crate::world::Block::Air) {
-                    chest.container.set_slot(
-                        item.slot as usize,
-                        Some(ItemStack::new(Item::Block(block), item.count)),
-                    );
+                if item.item_id >= 128 {
+                    // Decode tool
+                    use crate::inventory::{ToolKind, ToolMaterial};
+                    let tool_idx = item.item_id - 128;
+                    if let (Some(kind), Some(material)) = (ToolKind::from_id(tool_idx / 6), ToolMaterial::from_id(tool_idx % 6)) {
+                        let tool = Item::Tool { kind, material, durability: item.durability };
+                        chest.container.set_slot(item.slot as usize, Some(ItemStack::new(tool, 1)));
+                    }
+                } else {
+                    let block = crate::world::Block::from(item.item_id);
+                    if !matches!(block, crate::world::Block::Air) {
+                        chest.container.set_slot(
+                            item.slot as usize,
+                            Some(ItemStack::new(Item::Block(block), item.count)),
+                        );
+                    }
                 }
             }
 
@@ -232,4 +247,5 @@ pub struct SavedChestItem {
     pub slot: u8,
     pub item_id: u8,
     pub count: u8,
+    pub durability: u16,
 }

@@ -772,6 +772,79 @@ impl Block {
         )
     }
 
+    /// Hardness in seconds (time to mine by hand). 0.0 = instant. -1.0 = unbreakable.
+    pub fn hardness(&self) -> f32 {
+        match self {
+            Block::Air | Block::Water => 0.0,
+            Block::Bedrock => -1.0,
+            // Instant breaks
+            Block::Torch | Block::DeadBush | Block::Snow | Block::Vines => 0.0,
+            // Soft blocks (shovel preferred)
+            Block::Dirt | Block::Grass | Block::SnowGrass | Block::JungleGrass
+            | Block::MudBlock | Block::Peat | Block::Sand | Block::Gravel => 0.75,
+            // Leaves
+            Block::Leaves | Block::JungleLeaves | Block::SpruceLeaves => 0.3,
+            // Wood (axe preferred)
+            Block::Wood | Block::OakLog | Block::BirchLog | Block::PineLog
+            | Block::JungleLog | Block::Chest => 2.0,
+            Block::Cactus => 0.5,
+            // Stone variants (pickaxe preferred)
+            Block::Stone | Block::StoneDirt | Block::StoneRubble2 | Block::MossyStone
+            | Block::CrackedStone | Block::ClayStone | Block::Sandstone
+            | Block::RedSandstone | Block::Brick | Block::Stalactite | Block::Stalagmite => 1.5,
+            // Ice
+            Block::Ice | Block::PackedIce => 0.5,
+            // Common ores
+            Block::CoalOre | Block::CopperOre | Block::TinOre => 3.0,
+            // Mid-tier ores
+            Block::IronOre | Block::NickelOre | Block::LeadOre
+            | Block::QuartzOre | Block::RedstoneOre | Block::SilverOre
+            | Block::GoldOre | Block::AmethystOre => 3.0,
+            // Precious ores
+            Block::EmeraldOre | Block::SapphireOre => 4.0,
+            Block::DiamondOre | Block::TitaniumOre | Block::UraniumOre => 5.0,
+            // Crystals
+            Block::CrystalAmethyst | Block::CrystalQuartz => 1.5,
+        }
+    }
+
+    /// Preferred tool type for mining speed bonus. None = no preference.
+    pub fn preferred_tool(&self) -> Option<crate::inventory::item::ToolKind> {
+        use crate::inventory::item::ToolKind;
+        match self {
+            // Shovel blocks
+            Block::Dirt | Block::Grass | Block::SnowGrass | Block::JungleGrass
+            | Block::MudBlock | Block::Peat | Block::Sand | Block::Gravel
+            | Block::Snow => Some(ToolKind::Shovel),
+            // Axe blocks
+            Block::Wood | Block::OakLog | Block::BirchLog | Block::PineLog
+            | Block::JungleLog | Block::Leaves | Block::JungleLeaves
+            | Block::SpruceLeaves | Block::Chest | Block::Cactus => Some(ToolKind::Axe),
+            // Pickaxe blocks
+            Block::Stone | Block::StoneDirt | Block::StoneRubble2 | Block::MossyStone
+            | Block::CrackedStone | Block::ClayStone | Block::Sandstone
+            | Block::RedSandstone | Block::Brick | Block::Stalactite | Block::Stalagmite
+            | Block::Ice | Block::PackedIce
+            | Block::CoalOre | Block::CopperOre | Block::TinOre | Block::IronOre
+            | Block::NickelOre | Block::LeadOre | Block::QuartzOre | Block::RedstoneOre
+            | Block::SilverOre | Block::GoldOre | Block::AmethystOre | Block::EmeraldOre
+            | Block::SapphireOre | Block::DiamondOre | Block::TitaniumOre | Block::UraniumOre
+            | Block::CrystalAmethyst | Block::CrystalQuartz => Some(ToolKind::Pickaxe),
+            _ => None,
+        }
+    }
+
+    /// Minimum harvest level required to drop items from this block.
+    /// 0 = any tool/hand, 1 = stone+, 2 = iron+, 3 = diamond
+    pub fn required_harvest_level(&self) -> u8 {
+        match self {
+            Block::DiamondOre | Block::TitaniumOre | Block::UraniumOre
+            | Block::EmeraldOre | Block::SapphireOre | Block::GoldOre => 2,
+            Block::IronOre | Block::RedstoneOre => 1,
+            _ => 0,
+        }
+    }
+
     /// Get texture indices for each face: [top, bottom, front, back, left, right]
     /// Atlas is 8x8 (64 tiles), indices 0-63
     pub fn texture_indices(&self) -> [u32; 6] {
@@ -1688,5 +1761,59 @@ mod tests {
         assert_eq!(chunk.get_block(1, 0, 0), Block::Air);   // 1+0+0 = 1 (odd)
         assert_eq!(chunk.get_block(1, 1, 0), Block::Stone); // 1+1+0 = 2 (even)
         assert_eq!(chunk.get_block(1, 1, 1), Block::Air);   // 1+1+1 = 3 (odd)
+    }
+
+    // === Block hardness & mining tests ===
+
+    #[test]
+    fn test_block_hardness_air_water_zero() {
+        assert_eq!(Block::Air.hardness(), 0.0);
+        assert_eq!(Block::Water.hardness(), 0.0);
+    }
+
+    #[test]
+    fn test_block_hardness_bedrock_unbreakable() {
+        assert!(Block::Bedrock.hardness() < 0.0); // Negative = unbreakable
+    }
+
+    #[test]
+    fn test_block_hardness_ordering() {
+        // Dirt should be softer than stone
+        assert!(Block::Dirt.hardness() < Block::Stone.hardness());
+        // Stone should be softer than ores
+        assert!(Block::Stone.hardness() <= Block::IronOre.hardness());
+        // Diamond ore should be among the hardest
+        assert!(Block::DiamondOre.hardness() >= Block::Stone.hardness());
+    }
+
+    #[test]
+    fn test_block_hardness_all_positive_or_special() {
+        // Solid breakable blocks should have positive hardness
+        let test_blocks = [
+            Block::Dirt, Block::Grass, Block::Stone, Block::Sand,
+            Block::Wood, Block::Leaves, Block::CoalOre,
+            Block::IronOre, Block::GoldOre, Block::DiamondOre,
+        ];
+        for block in test_blocks {
+            assert!(block.hardness() > 0.0, "{:?} should have positive hardness", block);
+        }
+        // Instant-break blocks have zero hardness
+        assert_eq!(Block::Torch.hardness(), 0.0);
+        assert_eq!(Block::DeadBush.hardness(), 0.0);
+    }
+
+    #[test]
+    fn test_block_preferred_tool() {
+        use crate::inventory::item::ToolKind;
+        // Dirt/sand prefer shovel
+        assert_eq!(Block::Dirt.preferred_tool(), Some(ToolKind::Shovel));
+        assert_eq!(Block::Sand.preferred_tool(), Some(ToolKind::Shovel));
+        // Stone/ores prefer pickaxe
+        assert_eq!(Block::Stone.preferred_tool(), Some(ToolKind::Pickaxe));
+        assert_eq!(Block::IronOre.preferred_tool(), Some(ToolKind::Pickaxe));
+        // Wood prefers axe
+        assert_eq!(Block::Wood.preferred_tool(), Some(ToolKind::Axe));
+        // Air has no preferred tool
+        assert_eq!(Block::Air.preferred_tool(), None);
     }
 }

@@ -488,6 +488,11 @@ impl ItemEntityManager {
             velocity: e.velocity.into(),
             item_id: match e.item {
                 Item::Block(b) => b as u8,
+                Item::Tool { kind, material, .. } => 128 + kind.to_id() * 6 + material.to_id(),
+            },
+            durability: match e.item {
+                Item::Tool { durability, .. } => durability,
+                _ => 0,
             },
             count: e.count,
             age: e.age,
@@ -497,19 +502,35 @@ impl ItemEntityManager {
 
     /// Load from saved data
     pub fn load_data(&mut self, data: Vec<SavedItemEntity>) {
+        use crate::inventory::{ToolKind, ToolMaterial};
+
         self.clear();
         for saved in data {
-            let item = Item::Block(Block::from(saved.item_id));
+            let item = if saved.item_id >= 128 {
+                // Decode tool
+                let tool_idx = saved.item_id - 128;
+                let kind_id = tool_idx / 6;
+                let mat_id = tool_idx % 6;
+                match (ToolKind::from_id(kind_id), ToolMaterial::from_id(mat_id)) {
+                    (Some(kind), Some(material)) => {
+                        Item::Tool { kind, material, durability: saved.durability }
+                    }
+                    _ => continue, // Skip invalid tool data
+                }
+            } else {
+                Item::Block(Block::from(saved.item_id))
+            };
+            let count = if matches!(item, Item::Tool { .. }) { 1 } else { saved.count };
             let mut entity = ItemEntity::new(
                 self.next_id,
                 Vec3::from(saved.position),
                 Vec3::from(saved.velocity),
                 item,
-                saved.count,
+                count,
             );
             entity.age = saved.age;
             entity.no_despawn = saved.no_despawn;
-            entity.pickup_delay = 0.0; // Already existed, can be picked up
+            entity.pickup_delay = 0.0;
 
             self.entities.insert(self.next_id, entity);
             self.next_id += 1;
@@ -533,6 +554,8 @@ pub struct SavedItemEntity {
     pub count: u8,
     pub age: f32,
     pub no_despawn: bool,
+    /// Tool durability (only used when item_id >= 128)
+    pub durability: u16,
 }
 
 // Simple random helpers (avoid pulling in rand crate)

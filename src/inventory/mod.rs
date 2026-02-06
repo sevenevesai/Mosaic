@@ -9,5 +9,5 @@
 pub mod item;
 pub mod inventory;
 
-pub use item::{Item, ItemStack, ItemTag, ItemRarity, BlockItemExt};
+pub use item::{Item, ItemStack, ItemTag, ItemRarity, BlockItemExt, ToolKind, ToolMaterial};
 pub use inventory::{Inventory, HOTBAR_SIZE, MAIN_INVENTORY_SIZE, TOTAL_SLOTS, layout};

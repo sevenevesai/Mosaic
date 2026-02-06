@@ -6,6 +6,7 @@
 //! - Stack count numbers
 
 use crate::inventory::{Inventory, HOTBAR_SIZE, layout};
+use crate::inventory::item::Item;
 use wgpu::util::DeviceExt;
 
 /// Vertex for inventory UI elements (slots, icons)
@@ -312,13 +313,17 @@ impl InventoryUI {
                 let icon_x = x + icon_padding;
                 let icon_y = y + icon_padding;
 
-                // Item texture
-                let tex_index = stack.item.texture_index() as f32;
-                self.add_textured_rect(&mut vertices, icon_x, icon_y, icon_size, icon_size, tex_index, [1.0, 1.0, 1.0, 1.0]);
+                self.add_item_icon(&mut vertices, &stack.item, icon_x, icon_y, icon_size, [1.0, 1.0, 1.0, 1.0]);
 
-                // Stack count (if > 1)
+                // Stack count (if > 1, skip for tools which are always 1)
                 if stack.count > 1 {
                     self.add_stack_count(&mut vertices, x + slot_size - 4.0, y + slot_size - 4.0, stack.count);
+                }
+
+                // Durability bar for tools
+                if let Item::Tool { durability, material, .. } = &stack.item {
+                    let max_dur = material.durability();
+                    self.add_durability_bar(&mut vertices, x + 4.0, y + slot_size - 7.0, slot_size - 8.0, *durability, max_dur);
                 }
 
                 // Lock indicator
@@ -361,11 +366,15 @@ impl InventoryUI {
                         let icon_x = x + icon_padding;
                         let icon_y = y + icon_padding;
 
-                        let tex_index = stack.item.texture_index() as f32;
-                        self.add_textured_rect(&mut vertices, icon_x, icon_y, icon_size, icon_size, tex_index, [1.0, 1.0, 1.0, 1.0]);
+                        self.add_item_icon(&mut vertices, &stack.item, icon_x, icon_y, icon_size, [1.0, 1.0, 1.0, 1.0]);
 
                         if stack.count > 1 {
                             self.add_stack_count(&mut vertices, x + slot_size - 4.0, y + slot_size - 4.0, stack.count);
+                        }
+
+                        if let Item::Tool { durability, material, .. } = &stack.item {
+                            let max_dur = material.durability();
+                            self.add_durability_bar(&mut vertices, x + 4.0, y + slot_size - 7.0, slot_size - 8.0, *durability, max_dur);
                         }
 
                         if stack.locked {
@@ -382,8 +391,7 @@ impl InventoryUI {
                 let icon_x = mx - icon_size / 2.0;
                 let icon_y = my - icon_size / 2.0;
 
-                let tex_index = held.item.texture_index() as f32;
-                self.add_textured_rect(&mut vertices, icon_x, icon_y, icon_size, icon_size, tex_index, [1.0, 1.0, 1.0, 0.9]);
+                self.add_item_icon(&mut vertices, &held.item, icon_x, icon_y, icon_size, [1.0, 1.0, 1.0, 0.9]);
 
                 if held.count > 1 {
                     self.add_stack_count(&mut vertices, mx + icon_size / 2.0 - 4.0, my + icon_size / 2.0 - 4.0, held.count);
@@ -525,6 +533,128 @@ impl InventoryUI {
         // G - middle horizontal
         if segs[6] {
             self.add_rect(vertices, x + 1.0, y + h / 2.0 - seg_thickness / 2.0, seg_len_h, seg_thickness, color);
+        }
+    }
+
+    /// Add an item icon (handles both blocks and tools)
+    fn add_item_icon(&self, vertices: &mut Vec<InventoryVertex>, item: &Item, x: f32, y: f32, size: f32, tint: [f32; 4]) {
+        match item {
+            Item::Block(_) => {
+                let tex_index = item.texture_index() as f32;
+                self.add_textured_rect(vertices, x, y, size, size, tex_index, tint);
+            }
+            Item::Tool { kind, material, .. } => {
+                self.add_tool_icon(vertices, *kind, *material, x, y, size, tint[3]);
+            }
+        }
+    }
+
+    /// Render a tool icon: colored rectangle with tool letter overlay
+    fn add_tool_icon(
+        &self,
+        vertices: &mut Vec<InventoryVertex>,
+        kind: crate::inventory::item::ToolKind,
+        material: crate::inventory::item::ToolMaterial,
+        x: f32, y: f32, size: f32, alpha: f32,
+    ) {
+        // Material-colored background
+        let mut color = material.color();
+        color[3] = alpha;
+        self.add_rect(vertices, x, y, size, size, color);
+
+        // Darker border for definition
+        let mut border_color = [color[0] * 0.5, color[1] * 0.5, color[2] * 0.5, alpha];
+        border_color[3] = alpha;
+        self.add_rect_outline(vertices, x, y, size, size, 2.0, border_color);
+
+        // Tool letter (P/A/S/W) rendered using 7-segment style
+        let letter = kind.letter();
+        let letter_size = size * 0.5;
+        let letter_x = x + (size - letter_size) / 2.0;
+        let letter_y = y + (size - letter_size * 1.4) / 2.0;
+        self.add_tool_letter(vertices, letter_x, letter_y, letter_size, letter);
+    }
+
+    /// Render a tool letter using simple rect-based strokes
+    fn add_tool_letter(&self, vertices: &mut Vec<InventoryVertex>, x: f32, y: f32, size: f32, letter: char) {
+        let color = [1.0, 1.0, 1.0, 0.9]; // White letter
+        let t = (size * 0.18).max(2.0); // Stroke thickness
+        let h = size * 1.4; // Letter height
+        let w = size; // Letter width
+
+        match letter {
+            'P' => {
+                // Vertical left stroke
+                self.add_rect(vertices, x, y, t, h, color);
+                // Top horizontal
+                self.add_rect(vertices, x, y, w, t, color);
+                // Middle horizontal
+                self.add_rect(vertices, x, y + h * 0.5, w, t, color);
+                // Right top vertical (upper half only)
+                self.add_rect(vertices, x + w - t, y, t, h * 0.5 + t, color);
+            }
+            'A' => {
+                // Left vertical
+                self.add_rect(vertices, x, y, t, h, color);
+                // Right vertical
+                self.add_rect(vertices, x + w - t, y, t, h, color);
+                // Top horizontal
+                self.add_rect(vertices, x, y, w, t, color);
+                // Middle horizontal
+                self.add_rect(vertices, x, y + h * 0.5, w, t, color);
+            }
+            'S' => {
+                // Top horizontal
+                self.add_rect(vertices, x, y, w, t, color);
+                // Middle horizontal
+                self.add_rect(vertices, x, y + h * 0.5 - t / 2.0, w, t, color);
+                // Bottom horizontal
+                self.add_rect(vertices, x, y + h - t, w, t, color);
+                // Top-left vertical
+                self.add_rect(vertices, x, y, t, h * 0.5, color);
+                // Bottom-right vertical
+                self.add_rect(vertices, x + w - t, y + h * 0.5, t, h * 0.5, color);
+            }
+            'W' => {
+                // Left vertical
+                self.add_rect(vertices, x, y, t, h, color);
+                // Right vertical
+                self.add_rect(vertices, x + w - t, y, t, h, color);
+                // Center vertical (lower half)
+                self.add_rect(vertices, x + w / 2.0 - t / 2.0, y + h * 0.4, t, h * 0.6, color);
+                // Bottom horizontal
+                self.add_rect(vertices, x, y + h - t, w, t, color);
+            }
+            _ => {}
+        }
+    }
+
+    /// Render a durability bar below the item icon
+    fn add_durability_bar(&self, vertices: &mut Vec<InventoryVertex>, x: f32, y: f32, width: f32, durability: u16, max_durability: u16) {
+        if durability >= max_durability {
+            return; // Don't show bar when full durability
+        }
+
+        let ratio = durability as f32 / max_durability as f32;
+        let bar_height = 3.0;
+
+        // Background (dark)
+        self.add_rect(vertices, x, y, width, bar_height, [0.1, 0.1, 0.1, 0.8]);
+
+        // Durability fill (green -> yellow -> red gradient)
+        let fill_color = if ratio > 0.5 {
+            // Green to yellow
+            let t = (ratio - 0.5) * 2.0;
+            [1.0 - t, 0.8 + t * 0.2, 0.0, 0.9]
+        } else {
+            // Yellow to red
+            let t = ratio * 2.0;
+            [1.0, t * 0.8, 0.0, 0.9]
+        };
+
+        let fill_width = width * ratio;
+        if fill_width > 0.5 {
+            self.add_rect(vertices, x, y, fill_width, bar_height, fill_color);
         }
     }
 

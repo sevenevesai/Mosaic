@@ -24,29 +24,39 @@ Phase 5: Hunger + Farming
 
 ## Phase 1: Crafting + Tools + Mining Speed
 
-**Status:** NOT STARTED
+**Status:** IN PROGRESS — Tools + Mining backend DONE, rendering TODO
 **Impact:** Transforms creative sandbox into a resource economy. Makes all 16 ore types meaningful.
 
-### 1a. Item System Expansion
-- Extend `Item` enum beyond `Block(Block)` to support `Tool { kind, material, durability }`
-- Tool kinds: Pickaxe, Axe, Shovel, Sword (start with Pick + Axe)
-- Material tiers: Wood, Stone, Copper, Iron, Gold, Diamond (maps to existing ores)
-- Durability per tool (decrements on use, breaks at 0)
-- Tools stack to 1 (infrastructure already exists via `max_stack_size`)
+### 1a. Item System Expansion — DONE
+- `Item::Tool { kind: ToolKind, material: ToolMaterial, durability: u16 }` variant added
+- `ToolKind`: Pickaxe, Axe, Shovel, Sword with `letter()`, `to_id()`, `from_id()`
+- `ToolMaterial`: Wood, Stone, Copper, Iron, Gold, Diamond with `mining_speed()`, `durability()`, `harvest_level()`, `color()`
+- All `Item` methods updated: `max_stack_size(1)`, `tags(Tool/Weapon)`, `rarity()`, `display_name()` (24 static strings)
+- `Item::new_tool(kind, material)` constructor
+- Persistence: tool encoding in player.dat (item_id 128+, durability in count+flags bytes)
+- Persistence: item entities and chests save/load tools with durability
+- Starting inventory: wooden pickaxe + wooden axe + torches + chests
 
-### 1b. Mining Speed System
-- Replace instant-break with progressive block damage
-- Block hardness table: dirt/sand ~0.5s by hand, stone ~4s by hand, ores vary
-- Tool effectiveness multiplier: matching tool + higher tier = faster break
-- Visual crack overlay (4 stages) on block being mined
-- Audio feedback: mining tick sounds per hit
+### 1b. Mining Speed System — BACKEND DONE, VISUAL TODO
+- **DONE:** Hold LMB for progressive mining (replaces instant-break)
+- **DONE:** `Block::hardness()` — 0.0 instant, 0.75s soil, 1.5s stone, 3-5s ores, -1.0 bedrock
+- **DONE:** `Block::preferred_tool()` — Shovel/Axe/Pickaxe per block type
+- **DONE:** `Block::required_harvest_level()` — 0=any, 1=stone+, 2=iron+
+- **DONE:** `Player::get_mining_speed()` — correct tool=full speed, wrong=30%, sword/hand=1.0
+- **DONE:** `Player::consume_tool_durability()` — decrements on break, removes at 0
+- **DONE:** `Player::mining_progress()` and `mining_target()` exposed for renderer
+- **TODO:** Crack overlay texture (4 stages, procedural generation)
+- **TODO:** Crack overlay render pipeline (new GPU pipeline + WGSL shader)
+- **TODO:** Tool icons in hotbar (colored rect + letter + durability bar)
+- **TODO:** Wire `mining_progress` into renderer.render() call
+- **TODO:** Mining audio ticks (periodic hit sound while mining)
 
-### 1c. Block Drop Tables
+### 1c. Block Drop Tables — FUTURE
 - Blocks don't always drop themselves: stone -> cobblestone, ores -> raw ore item
 - Silk touch concept for later; for now, some blocks have transformed drops
 - Requires new item variants for raw materials (Raw Iron, Raw Copper, Coal, etc.)
 
-### 1d. Crafting System
+### 1d. Crafting System — FUTURE
 - 3x3 crafting grid UI (accessible via C key or crafting table block)
 - Shaped recipes: grid position matters (pick = 3 material + 2 sticks)
 - Recipe registry loaded at startup
@@ -54,18 +64,10 @@ Phase 5: Hunger + Farming
 - Crafting table block: 2x2 hand-craft for basics, 3x3 at table for tools
 - UI: recipe list sidebar showing available recipes based on inventory contents
 
-### 1e. New Items Required
+### 1e. New Items Required — FUTURE
 - **Materials:** Stick, Planks (oak/birch/pine/jungle), Cobblestone
 - **Raw ores:** Raw Iron, Raw Copper, Raw Tin, Raw Gold, Raw Silver, Coal
 - **Tools:** Wooden/Stone/Copper/Iron/Gold/Diamond Pickaxe, Axe, Shovel, Sword
-
-### Existing Infrastructure
-- `Item` enum has commented-out `Tool` variant ready to implement
-- `ItemTag::Tool`, `ItemTag::Weapon` already defined
-- `ItemRarity` tiers map directly to tool material tiers
-- `is_tool_block()` trait method exists as a stub
-- `max_stack_size` returns 1 for tool blocks already
-- `sort_priority()` already sorts tools first
 
 ---
 

@@ -162,6 +162,12 @@ pub struct Renderer {
     line_pipeline: wgpu::RenderPipeline,
     outline_vertex_buffer: wgpu::Buffer,
 
+    // Crack overlay rendering (mining progress)
+    crack_pipeline: wgpu::RenderPipeline,
+    crack_vertex_buffer: wgpu::Buffer,
+    crack_bind_group: wgpu::BindGroup,
+    crack_stage_buffer: wgpu::Buffer,
+
     // Debug overlay
     debug_overlay: DebugOverlay,
 
@@ -599,6 +605,102 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
+        // Create crack overlay texture (256x64 RGBA = 4 stages x 64x64)
+        let crack_texture_data = Self::generate_crack_texture();
+        let crack_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Crack Texture"),
+            size: wgpu::Extent3d { width: 256, height: 64, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &crack_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &crack_texture_data,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(256 * 4),
+                rows_per_image: Some(64),
+            },
+            wgpu::Extent3d { width: 256, height: 64, depth_or_array_layers: 1 },
+        );
+        let crack_texture_view = crack_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let crack_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Crack Sampler"),
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
+        // Crack stage uniform buffer (which crack stage 0-3)
+        let crack_stage_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Crack Stage Buffer"),
+            size: 16, // u32 + 3xu32 padding (16 bytes for uniform alignment)
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // Crack bind group layout + bind group
+        let crack_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Crack Bind Group Layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let crack_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Crack Bind Group"),
+            layout: &crack_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&crack_texture_view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&crack_sampler) },
+                wgpu::BindGroupEntry { binding: 2, resource: crack_stage_buffer.as_entire_binding() },
+            ],
+        });
+
+        // Crack pipeline
+        let crack_pipeline = pipeline::create_crack_pipeline(&device, surface_format, &camera_bind_group_layout, &crack_bind_group_layout);
+
+        // Crack vertex buffer (6 faces x 6 vertices = 36 vertices max)
+        let crack_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Crack Vertex Buffer"),
+            size: (36 * std::mem::size_of::<pipeline::CrackVertex>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         // Create depth texture
         let depth_texture = Self::create_depth_texture(&device, &config);
 
@@ -818,6 +920,10 @@ impl Renderer {
             crosshair_vertex_buffer,
             line_pipeline,
             outline_vertex_buffer,
+            crack_pipeline,
+            crack_vertex_buffer,
+            crack_bind_group,
+            crack_stage_buffer,
             debug_overlay,
             chunk_pool,
             gpu_culler,
@@ -2577,6 +2683,128 @@ impl Renderer {
         (size, size, data)
     }
 
+    /// Generate a 256x64 RGBA crack overlay texture (4 stages x 64x64)
+    /// Stage 0: faint cracks, Stage 3: dense shatter pattern
+    fn generate_crack_texture() -> Vec<u8> {
+        let mut data = vec![0u8; 256 * 64 * 4]; // RGBA
+
+        // Simple hash function for deterministic pseudo-random crack patterns
+        let hash = |x: u32, y: u32, seed: u32| -> u32 {
+            let mut h = x.wrapping_mul(374761393).wrapping_add(y.wrapping_mul(668265263)).wrapping_add(seed.wrapping_mul(1274126177));
+            h = (h ^ (h >> 13)).wrapping_mul(1103515245);
+            h ^ (h >> 16)
+        };
+
+        for stage in 0..4u32 {
+            let base_alpha = match stage {
+                0 => 38u8,   // ~0.15
+                1 => 64u8,   // ~0.25
+                2 => 102u8,  // ~0.40
+                _ => 153u8,  // ~0.60
+            };
+
+            // Number of crack lines increases with stage
+            let num_cracks = (stage + 1) * 3;
+            // Crack line thickness increases with stage
+            let thickness = (stage as f32 + 1.0) * 0.8;
+
+            for crack_idx in 0..num_cracks {
+                let seed = stage * 100 + crack_idx;
+                // Random start point within the 64x64 tile
+                let sx = (hash(seed, 0, 42) % 64) as f32;
+                let sy = (hash(seed, 1, 42) % 64) as f32;
+
+                // Random walk for crack path (8-16 segments)
+                let segments = 8 + (hash(seed, 2, 42) % 9) as usize;
+                let mut cx = sx;
+                let mut cy = sy;
+
+                for seg in 0..segments {
+                    let seg_seed = seed * 1000 + seg as u32;
+                    // Direction with some continuity
+                    let angle = (hash(seg_seed, 3, 42) % 628) as f32 / 100.0;
+                    let len = 3.0 + (hash(seg_seed, 4, 42) % 60) as f32 / 10.0;
+                    let nx = cx + angle.cos() * len;
+                    let ny = cy + angle.sin() * len;
+
+                    // Bresenham-ish line rasterization with thickness
+                    let steps = (len * 2.0) as usize + 1;
+                    for s in 0..steps {
+                        let t = s as f32 / steps as f32;
+                        let px = (cx + (nx - cx) * t) as i32;
+                        let py = (cy + (ny - cy) * t) as i32;
+
+                        // Draw with thickness
+                        let r = thickness as i32 + 1;
+                        for dy in -r..=r {
+                            for dx in -r..=r {
+                                let dist_sq = (dx * dx + dy * dy) as f32;
+                                if dist_sq > thickness * thickness { continue; }
+
+                                let fx = ((px + dx).rem_euclid(64)) as u32;
+                                let fy = ((py + dy).rem_euclid(64)) as u32;
+                                let pixel_x = stage * 64 + fx;
+                                let pixel_y = fy;
+                                let idx = ((pixel_y * 256 + pixel_x) * 4) as usize;
+                                if idx + 3 < data.len() {
+                                    // Darker toward center of crack line
+                                    let falloff = 1.0 - (dist_sq / (thickness * thickness)).sqrt();
+                                    let alpha = (base_alpha as f32 * falloff) as u8;
+                                    // Max blend alpha
+                                    data[idx] = 0;     // R
+                                    data[idx + 1] = 0; // G
+                                    data[idx + 2] = 0; // B
+                                    data[idx + 3] = data[idx + 3].max(alpha); // A
+                                }
+                            }
+                        }
+                    }
+                    cx = nx;
+                    cy = ny;
+                }
+            }
+        }
+
+        data
+    }
+
+    /// Build crack overlay quads for all 6 faces of a block at the given position
+    /// Returns 36 CrackVertex values (6 faces x 2 triangles x 3 vertices)
+    fn build_crack_quads(bx: f32, by: f32, bz: f32) -> Vec<pipeline::CrackVertex> {
+        let e = 0.001; // Slight offset to prevent z-fighting
+        let x0 = bx - e;
+        let y0 = by - e;
+        let z0 = bz - e;
+        let x1 = bx + 1.0 + e;
+        let y1 = by + 1.0 + e;
+        let z1 = bz + 1.0 + e;
+
+        let v = |px: f32, py: f32, pz: f32, u: f32, v: f32| -> pipeline::CrackVertex {
+            pipeline::CrackVertex { position: [px, py, pz], uv: [u, v] }
+        };
+
+        vec![
+            // Front face (Z+)  CCW: 0-2-1, 0-3-2
+            v(x0, y0, z1, 0.0, 1.0), v(x1, y1, z1, 1.0, 0.0), v(x1, y0, z1, 1.0, 1.0),
+            v(x0, y0, z1, 0.0, 1.0), v(x0, y1, z1, 0.0, 0.0), v(x1, y1, z1, 1.0, 0.0),
+            // Back face (Z-)
+            v(x1, y0, z0, 0.0, 1.0), v(x0, y1, z0, 1.0, 0.0), v(x0, y0, z0, 1.0, 1.0),
+            v(x1, y0, z0, 0.0, 1.0), v(x1, y1, z0, 0.0, 0.0), v(x0, y1, z0, 1.0, 0.0),
+            // Top face (Y+)
+            v(x0, y1, z0, 0.0, 0.0), v(x1, y1, z1, 1.0, 1.0), v(x0, y1, z1, 0.0, 1.0),
+            v(x0, y1, z0, 0.0, 0.0), v(x1, y1, z0, 1.0, 0.0), v(x1, y1, z1, 1.0, 1.0),
+            // Bottom face (Y-)
+            v(x0, y0, z1, 0.0, 1.0), v(x1, y0, z0, 1.0, 0.0), v(x0, y0, z0, 0.0, 0.0),
+            v(x0, y0, z1, 0.0, 1.0), v(x1, y0, z1, 1.0, 1.0), v(x1, y0, z0, 1.0, 0.0),
+            // Right face (X+)
+            v(x1, y0, z1, 0.0, 1.0), v(x1, y1, z0, 1.0, 0.0), v(x1, y0, z0, 1.0, 1.0),
+            v(x1, y0, z1, 0.0, 1.0), v(x1, y1, z1, 0.0, 0.0), v(x1, y1, z0, 1.0, 0.0),
+            // Left face (X-)
+            v(x0, y0, z0, 0.0, 1.0), v(x0, y1, z1, 1.0, 0.0), v(x0, y0, z1, 1.0, 1.0),
+            v(x0, y0, z0, 0.0, 1.0), v(x0, y1, z0, 0.0, 0.0), v(x0, y1, z1, 1.0, 0.0),
+        ]
+    }
+
     fn create_depth_texture(
         device: &wgpu::Device,
         config: &wgpu::SurfaceConfiguration,
@@ -2604,6 +2832,8 @@ impl Renderer {
         world: &mut WorldManager,
         _profiler: &FrameProfiler,
         target_block: Option<[i32; 3]>,
+        mining_target: Option<[i32; 3]>,
+        mining_progress: f32,
         debug_metrics: &DebugMetrics,
         held_light_emission: u8,  // Light emission of held item (0 = none, 14 = torch)
         settings_menu: &crate::settings_menu::SettingsMenu,
@@ -3387,6 +3617,48 @@ impl Renderer {
             render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
             render_pass.set_vertex_buffer(0, self.outline_vertex_buffer.slice(..));
             render_pass.draw(0..24, 0..1);
+        }
+
+        // === CRACK OVERLAY PASS ===
+        // Render crack texture on block being mined (needs depth testing)
+        if let Some([bx, by, bz]) = mining_target {
+            if mining_progress > 0.0 {
+                // Determine crack stage (0-3) from mining progress (0.0-1.0)
+                let stage = ((mining_progress * 4.0).floor() as u32).min(3);
+                self.queue.write_buffer(&self.crack_stage_buffer, 0, bytemuck::cast_slice(&[stage, 0u32, 0u32, 0u32]));
+
+                // Build crack quads for the target block
+                let crack_verts = Self::build_crack_quads(bx as f32, by as f32, bz as f32);
+                self.queue.write_buffer(&self.crack_vertex_buffer, 0, bytemuck::cast_slice(&crack_verts));
+
+                let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Crack Overlay Pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.scene_texture_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &self.depth_texture,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+
+                render_pass.set_pipeline(&self.crack_pipeline);
+                render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                render_pass.set_bind_group(1, &self.crack_bind_group, &[]);
+                render_pass.set_vertex_buffer(0, self.crack_vertex_buffer.slice(..));
+                render_pass.draw(0..36, 0..1);
+            }
         }
 
         // === SSAO (Screen-Space Ambient Occlusion) ===

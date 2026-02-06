@@ -288,6 +288,7 @@ impl ItemInstanceData {
     pub fn from_entity(entity: &ItemEntity) -> Self {
         let textures = match entity.item {
             Item::Block(block) => block.texture_indices(),
+            Item::Tool { .. } => [0, 0, 0, 0, 0, 0], // Tools use custom UI rendering, not 3D block textures
         };
 
         Self {

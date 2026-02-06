@@ -729,7 +729,7 @@ impl App {
         if self.cursor_grabbed {
             self.player.update(dt, Some(&self.world));
             // Process block break/place interactions
-            let interaction = self.player.process_block_interactions(&mut self.world);
+            let interaction = self.player.process_block_interactions(&mut self.world, dt.as_secs_f32());
             match interaction {
                 BlockInteraction::Break { x, y, z, block } => {
                     // If breaking a chest, drop its contents first
@@ -1078,7 +1078,9 @@ impl App {
         // Render
         self.profiler.begin_section("render");
         let held_light = self.player.selected_block().light_emission();
-        match self.renderer.render(&self.player.camera, &mut self.world, &self.profiler, target_block, &debug_metrics, held_light, &self.settings_menu, &self.player.inventory) {
+        let mining_target = self.player.mining_target();
+        let mining_progress = self.player.mining_progress();
+        match self.renderer.render(&self.player.camera, &mut self.world, &self.profiler, target_block, mining_target, mining_progress, &debug_metrics, held_light, &self.settings_menu, &self.player.inventory) {
             Ok(_) => {
                 // Update profiler with render stats
                 self.profiler.update_render_stats(self.renderer.stats.clone());

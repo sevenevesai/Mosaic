@@ -232,6 +232,18 @@ impl Inventory {
         self.slots.get_mut(index)
     }
 
+    /// Get a mutable reference to the ItemStack in a slot (for modifying durability)
+    pub fn get_slot_mut(&mut self, index: usize) -> Option<&mut ItemStack> {
+        self.slots.get_mut(index).and_then(|s| s.as_mut())
+    }
+
+    /// Clear a slot (set to None) — used when a tool breaks
+    pub fn clear_slot(&mut self, index: usize) {
+        if index < TOTAL_SLOTS {
+            self.slots[index] = None;
+        }
+    }
+
     // ========== DRAG AND DROP ==========
 
     /// Get the held item (for cursor dragging)

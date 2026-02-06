@@ -1741,6 +1741,150 @@ pub fn create_line_pipeline(
     })
 }
 
+/// Crack overlay vertex (position + UV for textured crack faces)
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct CrackVertex {
+    pub position: [f32; 3],
+    pub uv: [f32; 2],
+}
+
+impl CrackVertex {
+    pub fn desc() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<CrackVertex>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &[
+                wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 0,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+                wgpu::VertexAttribute {
+                    offset: 12,
+                    shader_location: 1,
+                    format: wgpu::VertexFormat::Float32x2,
+                },
+            ],
+        }
+    }
+}
+
+/// WGSL shader for crack overlay rendering
+const CRACK_SHADER: &str = r#"
+struct CameraUniform {
+    view_proj: mat4x4<f32>,
+    view_pos: vec4<f32>,
+};
+
+@group(0) @binding(0)
+var<uniform> camera: CameraUniform;
+
+@group(1) @binding(0)
+var crack_texture: texture_2d<f32>;
+
+@group(1) @binding(1)
+var crack_sampler: sampler;
+
+struct CrackUniform {
+    stage: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+};
+
+@group(1) @binding(2)
+var<uniform> crack_data: CrackUniform;
+
+struct VertexInput {
+    @location(0) position: vec3<f32>,
+    @location(1) uv: vec2<f32>,
+};
+
+struct VertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(in: VertexInput) -> VertexOutput {
+    var out: VertexOutput;
+    out.clip_position = camera.view_proj * vec4<f32>(in.position, 1.0);
+    out.uv = in.uv;
+    return out;
+}
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    // Sample from the correct stage column in the 4x1 atlas (256x64 = 4 stages x 64x64)
+    let stage_offset = f32(crack_data.stage) * 0.25;
+    let atlas_uv = vec2<f32>(in.uv.x * 0.25 + stage_offset, in.uv.y);
+    let crack_color = textureSample(crack_texture, crack_sampler, atlas_uv);
+    // Dark cracks with the texture's alpha
+    return vec4<f32>(0.0, 0.0, 0.0, crack_color.a);
+}
+"#;
+
+/// Create pipeline for crack overlay rendering
+pub fn create_crack_pipeline(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    camera_bind_group_layout: &wgpu::BindGroupLayout,
+    crack_bind_group_layout: &wgpu::BindGroupLayout,
+) -> wgpu::RenderPipeline {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("Crack Shader"),
+        source: wgpu::ShaderSource::Wgsl(CRACK_SHADER.into()),
+    });
+
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("Crack Pipeline Layout"),
+        bind_group_layouts: &[camera_bind_group_layout, crack_bind_group_layout],
+        push_constant_ranges: &[],
+    });
+
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("Crack Pipeline"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: "vs_main",
+            buffers: &[CrackVertex::desc()],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: "fs_main",
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None, // Render both sides for crack overlay
+            unclipped_depth: false,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            conservative: false,
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth32Float,
+            depth_write_enabled: false,
+            depth_compare: wgpu::CompareFunction::LessEqual,
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState {
+                constant: -3, // Stronger bias than outline to render on top of block faces
+                slope_scale: 0.0,
+                clamp: 0.0,
+            },
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+    })
+}
+
 // Note: Water shader moved to src/renderer/water.rs (ray-marched water system)
 
 // ═══════════════════════════════════════════════════════════════════════════

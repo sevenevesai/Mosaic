@@ -87,37 +87,174 @@ impl ItemRarity {
     }
 }
 
+/// Types of tools
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ToolKind {
+    Pickaxe,
+    Axe,
+    Shovel,
+    Sword,
+}
+
+impl ToolKind {
+    /// Single-character abbreviation for hotbar icon
+    pub fn letter(&self) -> char {
+        match self {
+            ToolKind::Pickaxe => 'P',
+            ToolKind::Axe => 'A',
+            ToolKind::Shovel => 'S',
+            ToolKind::Sword => 'W',
+        }
+    }
+
+    /// Decode from persistence ID
+    pub fn from_id(id: u8) -> Option<Self> {
+        match id {
+            0 => Some(ToolKind::Pickaxe),
+            1 => Some(ToolKind::Axe),
+            2 => Some(ToolKind::Shovel),
+            3 => Some(ToolKind::Sword),
+            _ => None,
+        }
+    }
+
+    /// Encode to persistence ID
+    pub fn to_id(self) -> u8 {
+        self as u8
+    }
+}
+
+/// Tool material tiers (ordered weakest to strongest)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[repr(u8)]
+pub enum ToolMaterial {
+    Wood = 0,
+    Stone = 1,
+    Copper = 2,
+    Iron = 3,
+    Gold = 4,
+    Diamond = 5,
+}
+
+impl ToolMaterial {
+    /// Mining speed multiplier (higher = faster mining)
+    pub fn mining_speed(&self) -> f32 {
+        match self {
+            ToolMaterial::Wood => 2.0,
+            ToolMaterial::Stone => 4.0,
+            ToolMaterial::Copper => 5.0,
+            ToolMaterial::Iron => 6.0,
+            ToolMaterial::Gold => 10.0,
+            ToolMaterial::Diamond => 8.0,
+        }
+    }
+
+    /// Maximum durability
+    pub fn durability(&self) -> u16 {
+        match self {
+            ToolMaterial::Wood => 60,
+            ToolMaterial::Stone => 132,
+            ToolMaterial::Copper => 200,
+            ToolMaterial::Iron => 250,
+            ToolMaterial::Gold => 33,
+            ToolMaterial::Diamond => 1562,
+        }
+    }
+
+    /// Harvest level (minimum required for certain blocks)
+    pub fn harvest_level(&self) -> u8 {
+        match self {
+            ToolMaterial::Wood => 0,
+            ToolMaterial::Stone => 1,
+            ToolMaterial::Copper => 1,
+            ToolMaterial::Iron => 2,
+            ToolMaterial::Gold => 0,
+            ToolMaterial::Diamond => 3,
+        }
+    }
+
+    /// Display color [R, G, B, A] for hotbar icon background
+    pub fn color(&self) -> [f32; 4] {
+        match self {
+            ToolMaterial::Wood => [0.55, 0.36, 0.17, 1.0],
+            ToolMaterial::Stone => [0.50, 0.50, 0.50, 1.0],
+            ToolMaterial::Copper => [0.72, 0.45, 0.20, 1.0],
+            ToolMaterial::Iron => [0.78, 0.78, 0.78, 1.0],
+            ToolMaterial::Gold => [1.00, 0.84, 0.0, 1.0],
+            ToolMaterial::Diamond => [0.30, 0.85, 0.90, 1.0],
+        }
+    }
+
+    /// Encode material as u8 for persistence
+    pub fn to_id(self) -> u8 {
+        self as u8
+    }
+
+    /// Decode from persistence ID
+    pub fn from_id(id: u8) -> Option<Self> {
+        match id {
+            0 => Some(ToolMaterial::Wood),
+            1 => Some(ToolMaterial::Stone),
+            2 => Some(ToolMaterial::Copper),
+            3 => Some(ToolMaterial::Iron),
+            4 => Some(ToolMaterial::Gold),
+            5 => Some(ToolMaterial::Diamond),
+            _ => None,
+        }
+    }
+
+    /// Display name for this material
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            ToolMaterial::Wood => "Wooden",
+            ToolMaterial::Stone => "Stone",
+            ToolMaterial::Copper => "Copper",
+            ToolMaterial::Iron => "Iron",
+            ToolMaterial::Gold => "Gold",
+            ToolMaterial::Diamond => "Diamond",
+        }
+    }
+}
+
 /// Items that can exist in inventory
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Item {
     /// A placeable block
     Block(Block),
-    // Future item types:
-    // Tool { tool_type: ToolType, material: Material, durability: u16 },
-    // Weapon { weapon_type: WeaponType, damage: u16, durability: u16 },
-    // Consumable { effect: ConsumableEffect, quantity: u8 },
+    /// A tool with kind, material, and remaining durability
+    Tool { kind: ToolKind, material: ToolMaterial, durability: u16 },
 }
 
 impl Item {
+    /// Create a new tool with full durability
+    pub fn new_tool(kind: ToolKind, material: ToolMaterial) -> Self {
+        Item::Tool {
+            kind,
+            material,
+            durability: material.durability(),
+        }
+    }
+
     /// Maximum stack size for this item type
     pub fn max_stack_size(&self) -> u8 {
         match self {
             Item::Block(block) => {
-                // Tools and special items don't stack as high
                 if block.is_tool_block() {
                     1
                 } else {
                     64
                 }
             }
+            Item::Tool { .. } => 1,
         }
     }
 
     /// Get texture index for rendering in UI
-    /// Uses the front face texture for block items
+    /// Uses the front face texture for block items; tools use custom rendering
     pub fn texture_index(&self) -> u32 {
         match self {
             Item::Block(block) => block.texture_indices()[2], // Front face
+            Item::Tool { .. } => 0, // Not used; tools render via colored rect + letter
         }
     }
 
@@ -125,6 +262,7 @@ impl Item {
     pub fn as_block(&self) -> Option<Block> {
         match self {
             Item::Block(block) => Some(*block),
+            Item::Tool { .. } => None,
         }
     }
 
@@ -143,9 +281,7 @@ impl Item {
 
         match self {
             Item::Block(block) => {
-                // Add appropriate tags based on block type
                 match block {
-                    // Ores
                     Block::CoalOre => {
                         tags.insert(ItemTag::Ore);
                         tags.insert(ItemTag::Combustible);
@@ -175,16 +311,12 @@ impl Item {
                         tags.insert(ItemTag::Ore);
                         tags.insert(ItemTag::RawMaterial);
                     }
-
-                    // Wood types
                     Block::Wood | Block::OakLog | Block::BirchLog |
                     Block::PineLog | Block::JungleLog => {
                         tags.insert(ItemTag::Wood);
                         tags.insert(ItemTag::Combustible);
                         tags.insert(ItemTag::BuildingBlock);
                     }
-
-                    // Stone types
                     Block::Stone | Block::StoneDirt | Block::StoneRubble2 |
                     Block::MossyStone | Block::CrackedStone | Block::Gravel => {
                         tags.insert(ItemTag::Stone);
@@ -194,8 +326,6 @@ impl Item {
                         tags.insert(ItemTag::Stone);
                         tags.insert(ItemTag::BuildingBlock);
                     }
-
-                    // Soil types
                     Block::Dirt | Block::Grass | Block::SnowGrass |
                     Block::JungleGrass | Block::MudBlock | Block::Peat => {
                         tags.insert(ItemTag::Soil);
@@ -205,8 +335,6 @@ impl Item {
                         tags.insert(ItemTag::Soil);
                         tags.insert(ItemTag::BuildingBlock);
                     }
-
-                    // Light sources
                     Block::Torch => {
                         tags.insert(ItemTag::LightSource);
                         tags.insert(ItemTag::Combustible);
@@ -216,35 +344,31 @@ impl Item {
                         tags.insert(ItemTag::Decoration);
                         tags.insert(ItemTag::Valuable);
                     }
-
-                    // Organic/plants
                     Block::Leaves | Block::JungleLeaves | Block::SpruceLeaves |
                     Block::Vines | Block::DeadBush | Block::Cactus => {
                         tags.insert(ItemTag::Organic);
                     }
-
-                    // Building materials
                     Block::Brick => {
                         tags.insert(ItemTag::BuildingBlock);
                         tags.insert(ItemTag::ProcessedMaterial);
                         tags.insert(ItemTag::Infrastructure);
                     }
-
-                    // Ice/Snow
                     Block::Snow | Block::Ice | Block::PackedIce => {
                         tags.insert(ItemTag::BuildingBlock);
                     }
-
-                    // Cave decorations
                     Block::Stalactite | Block::Stalagmite => {
                         tags.insert(ItemTag::Decoration);
                         tags.insert(ItemTag::Stone);
                     }
-
-                    // Default: building block
                     _ => {
                         tags.insert(ItemTag::BuildingBlock);
                     }
+                }
+            }
+            Item::Tool { kind, .. } => {
+                tags.insert(ItemTag::Tool);
+                if *kind == ToolKind::Sword {
+                    tags.insert(ItemTag::Weapon);
                 }
             }
         }
@@ -262,25 +386,28 @@ impl Item {
         match self {
             Item::Block(block) => {
                 match block {
-                    // Legendary
                     Block::DiamondOre | Block::TitaniumOre | Block::UraniumOre => {
                         ItemRarity::Legendary
                     }
-                    // Epic
                     Block::EmeraldOre | Block::SapphireOre => {
                         ItemRarity::Epic
                     }
-                    // Rare
                     Block::GoldOre | Block::SilverOre | Block::AmethystOre |
                     Block::CrystalAmethyst | Block::CrystalQuartz => {
                         ItemRarity::Rare
                     }
-                    // Uncommon
                     Block::IronOre | Block::CopperOre | Block::RedstoneOre |
                     Block::QuartzOre | Block::NickelOre | Block::LeadOre => {
                         ItemRarity::Uncommon
                     }
-                    // Common
+                    _ => ItemRarity::Common,
+                }
+            }
+            Item::Tool { material, .. } => {
+                match material {
+                    ToolMaterial::Diamond => ItemRarity::Legendary,
+                    ToolMaterial::Gold => ItemRarity::Rare,
+                    ToolMaterial::Iron | ToolMaterial::Copper => ItemRarity::Uncommon,
                     _ => ItemRarity::Common,
                 }
             }
@@ -291,6 +418,35 @@ impl Item {
     pub fn display_name(&self) -> &'static str {
         match self {
             Item::Block(block) => block.display_name(),
+            Item::Tool { kind, material, .. } => {
+                // Static str lookup table for all 24 combinations
+                match (material, kind) {
+                    (ToolMaterial::Wood, ToolKind::Pickaxe) => "Wooden Pickaxe",
+                    (ToolMaterial::Wood, ToolKind::Axe) => "Wooden Axe",
+                    (ToolMaterial::Wood, ToolKind::Shovel) => "Wooden Shovel",
+                    (ToolMaterial::Wood, ToolKind::Sword) => "Wooden Sword",
+                    (ToolMaterial::Stone, ToolKind::Pickaxe) => "Stone Pickaxe",
+                    (ToolMaterial::Stone, ToolKind::Axe) => "Stone Axe",
+                    (ToolMaterial::Stone, ToolKind::Shovel) => "Stone Shovel",
+                    (ToolMaterial::Stone, ToolKind::Sword) => "Stone Sword",
+                    (ToolMaterial::Copper, ToolKind::Pickaxe) => "Copper Pickaxe",
+                    (ToolMaterial::Copper, ToolKind::Axe) => "Copper Axe",
+                    (ToolMaterial::Copper, ToolKind::Shovel) => "Copper Shovel",
+                    (ToolMaterial::Copper, ToolKind::Sword) => "Copper Sword",
+                    (ToolMaterial::Iron, ToolKind::Pickaxe) => "Iron Pickaxe",
+                    (ToolMaterial::Iron, ToolKind::Axe) => "Iron Axe",
+                    (ToolMaterial::Iron, ToolKind::Shovel) => "Iron Shovel",
+                    (ToolMaterial::Iron, ToolKind::Sword) => "Iron Sword",
+                    (ToolMaterial::Gold, ToolKind::Pickaxe) => "Gold Pickaxe",
+                    (ToolMaterial::Gold, ToolKind::Axe) => "Gold Axe",
+                    (ToolMaterial::Gold, ToolKind::Shovel) => "Gold Shovel",
+                    (ToolMaterial::Gold, ToolKind::Sword) => "Gold Sword",
+                    (ToolMaterial::Diamond, ToolKind::Pickaxe) => "Diamond Pickaxe",
+                    (ToolMaterial::Diamond, ToolKind::Axe) => "Diamond Axe",
+                    (ToolMaterial::Diamond, ToolKind::Shovel) => "Diamond Shovel",
+                    (ToolMaterial::Diamond, ToolKind::Sword) => "Diamond Sword",
+                }
+            }
         }
     }
 
@@ -614,5 +770,124 @@ mod tests {
         assert!(stack1.can_merge_with(&stack2));
         assert!(!stack1.can_merge_with(&stack3)); // Different items
         assert!(!full_stack.can_merge_with(&stack2)); // Full stack
+    }
+
+    // === Tool-specific tests ===
+
+    #[test]
+    fn test_tool_creation() {
+        let pick = Item::new_tool(ToolKind::Pickaxe, ToolMaterial::Iron);
+        match pick {
+            Item::Tool { kind, material, durability } => {
+                assert_eq!(kind, ToolKind::Pickaxe);
+                assert_eq!(material, ToolMaterial::Iron);
+                assert_eq!(durability, 250); // Iron durability
+            }
+            _ => panic!("Expected Tool variant"),
+        }
+    }
+
+    #[test]
+    fn test_tool_stack_size() {
+        let pick = Item::new_tool(ToolKind::Pickaxe, ToolMaterial::Wood);
+        assert_eq!(pick.max_stack_size(), 1);
+
+        // Tools can't stack
+        let stack = ItemStack::new(pick, 5);
+        assert_eq!(stack.count, 1); // Clamped to max
+    }
+
+    #[test]
+    fn test_tool_tags() {
+        let pick = Item::new_tool(ToolKind::Pickaxe, ToolMaterial::Stone);
+        assert!(pick.has_tag(ItemTag::Tool));
+        assert!(!pick.has_tag(ItemTag::Weapon));
+
+        let sword = Item::new_tool(ToolKind::Sword, ToolMaterial::Iron);
+        assert!(sword.has_tag(ItemTag::Tool));
+        assert!(sword.has_tag(ItemTag::Weapon));
+    }
+
+    #[test]
+    fn test_tool_rarity() {
+        assert_eq!(Item::new_tool(ToolKind::Pickaxe, ToolMaterial::Wood).rarity(), ItemRarity::Common);
+        assert_eq!(Item::new_tool(ToolKind::Pickaxe, ToolMaterial::Stone).rarity(), ItemRarity::Common);
+        assert_eq!(Item::new_tool(ToolKind::Pickaxe, ToolMaterial::Iron).rarity(), ItemRarity::Uncommon);
+        assert_eq!(Item::new_tool(ToolKind::Pickaxe, ToolMaterial::Gold).rarity(), ItemRarity::Rare);
+        assert_eq!(Item::new_tool(ToolKind::Pickaxe, ToolMaterial::Diamond).rarity(), ItemRarity::Legendary);
+    }
+
+    #[test]
+    fn test_tool_display_name() {
+        assert_eq!(Item::new_tool(ToolKind::Pickaxe, ToolMaterial::Iron).display_name(), "Iron Pickaxe");
+        assert_eq!(Item::new_tool(ToolKind::Axe, ToolMaterial::Wood).display_name(), "Wooden Axe");
+        assert_eq!(Item::new_tool(ToolKind::Sword, ToolMaterial::Diamond).display_name(), "Diamond Sword");
+        assert_eq!(Item::new_tool(ToolKind::Shovel, ToolMaterial::Gold).display_name(), "Gold Shovel");
+    }
+
+    #[test]
+    fn test_tool_as_block_returns_none() {
+        let pick = Item::new_tool(ToolKind::Pickaxe, ToolMaterial::Iron);
+        assert_eq!(pick.as_block(), None);
+    }
+
+    #[test]
+    fn test_tool_kind_letter() {
+        assert_eq!(ToolKind::Pickaxe.letter(), 'P');
+        assert_eq!(ToolKind::Axe.letter(), 'A');
+        assert_eq!(ToolKind::Shovel.letter(), 'S');
+        assert_eq!(ToolKind::Sword.letter(), 'W');
+    }
+
+    #[test]
+    fn test_tool_kind_persistence_roundtrip() {
+        for kind in [ToolKind::Pickaxe, ToolKind::Axe, ToolKind::Shovel, ToolKind::Sword] {
+            let id = kind.to_id();
+            assert_eq!(ToolKind::from_id(id), Some(kind));
+        }
+        assert_eq!(ToolKind::from_id(255), None);
+    }
+
+    #[test]
+    fn test_tool_material_persistence_roundtrip() {
+        for mat in [ToolMaterial::Wood, ToolMaterial::Stone, ToolMaterial::Copper,
+                     ToolMaterial::Iron, ToolMaterial::Gold, ToolMaterial::Diamond] {
+            let id = mat.to_id();
+            assert_eq!(ToolMaterial::from_id(id), Some(mat));
+        }
+        assert_eq!(ToolMaterial::from_id(255), None);
+    }
+
+    #[test]
+    fn test_tool_material_properties() {
+        // Higher tier = more durability (except gold)
+        assert!(ToolMaterial::Iron.durability() > ToolMaterial::Stone.durability());
+        assert!(ToolMaterial::Diamond.durability() > ToolMaterial::Iron.durability());
+        // Gold is fragile
+        assert!(ToolMaterial::Gold.durability() < ToolMaterial::Wood.durability());
+
+        // Higher tier = higher harvest level (except gold)
+        assert!(ToolMaterial::Iron.harvest_level() > ToolMaterial::Wood.harvest_level());
+        assert!(ToolMaterial::Diamond.harvest_level() > ToolMaterial::Iron.harvest_level());
+        assert_eq!(ToolMaterial::Gold.harvest_level(), 0); // Gold can't harvest hard blocks
+
+        // Mining speed: gold is fastest
+        assert!(ToolMaterial::Gold.mining_speed() > ToolMaterial::Diamond.mining_speed());
+    }
+
+    #[test]
+    fn test_tools_dont_merge() {
+        let pick1 = ItemStack::new(Item::new_tool(ToolKind::Pickaxe, ToolMaterial::Iron), 1);
+        let pick2 = ItemStack::new(Item::new_tool(ToolKind::Pickaxe, ToolMaterial::Iron), 1);
+        // Tools are always full (stack size 1), can't merge
+        assert!(!pick1.can_merge_with(&pick2));
+    }
+
+    #[test]
+    fn test_tool_sort_priority() {
+        let pick = Item::new_tool(ToolKind::Pickaxe, ToolMaterial::Iron);
+        let stone = Item::Block(Block::Stone);
+        // Tools should sort before building blocks
+        assert!(pick.sort_priority() < stone.sort_priority());
     }
 }

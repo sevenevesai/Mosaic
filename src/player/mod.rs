@@ -118,6 +118,16 @@ pub struct Player {
     place_requested: bool,
     drop_requested: bool,
 
+    // Mining state
+    /// Whether LMB is currently held down
+    lmb_held: bool,
+    /// Current mining progress (0.0 to 1.0)
+    mining_progress: f32,
+    /// Block currently being mined (world coords)
+    mining_target: Option<[i32; 3]>,
+    /// Block type being mined (for crack overlay)
+    mining_block: Option<Block>,
+
     /// Player inventory (holds items, manages selection)
     pub inventory: Inventory,
 
@@ -175,12 +185,17 @@ impl Player {
             break_requested: false,
             place_requested: false,
             drop_requested: false,
+            lmb_held: false,
+            mining_progress: 0.0,
+            mining_target: None,
+            mining_block: None,
             inventory: {
+                use crate::inventory::{ToolKind, ToolMaterial};
                 let mut inv = Inventory::new_empty();
-                // Give player a chest for testing
-                inv.add_item(crate::inventory::Item::Block(Block::Chest), 5);
-                // Give player torches for lighting
-                inv.add_item(crate::inventory::Item::Block(Block::Torch), 64);
+                inv.add_item(Item::new_tool(ToolKind::Pickaxe, ToolMaterial::Wood), 1);
+                inv.add_item(Item::new_tool(ToolKind::Axe, ToolMaterial::Wood), 1);
+                inv.add_item(Item::Block(Block::Torch), 64);
+                inv.add_item(Item::Block(Block::Chest), 5);
                 inv
             },
             on_ground: false,
@@ -361,22 +376,25 @@ impl Player {
     }
 
     pub fn handle_mouse_button(&mut self, button: MouseButton, pressed: bool) {
-        if !pressed {
-            return;
-        }
-
-        // If inventory is open, don't process world clicks here
-        // (inventory clicks are handled separately)
-        if self.inventory.is_open {
-            return;
-        }
-
         match button {
             MouseButton::Left => {
-                self.break_requested = true;
+                // Track hold state for progressive mining
+                if self.inventory.is_open {
+                    // Inventory handles its own clicks
+                    return;
+                }
+                self.lmb_held = pressed;
+                if !pressed {
+                    // Released LMB: reset mining progress
+                    self.mining_progress = 0.0;
+                    self.mining_target = None;
+                    self.mining_block = None;
+                }
             }
             MouseButton::Right => {
-                self.place_requested = true;
+                if pressed && !self.inventory.is_open {
+                    self.place_requested = true;
+                }
             }
             _ => {}
         }
@@ -386,10 +404,9 @@ impl Player {
     ///
     /// Returns the type of interaction that occurred (Break, Place, HarvestProp, or None),
     /// including the world position of the affected block/prop for voxel GI updates.
-    pub fn process_block_interactions(&mut self, world: &mut WorldManager) -> BlockInteraction {
-        if self.break_requested {
-            self.break_requested = false;
-
+    pub fn process_block_interactions(&mut self, world: &mut WorldManager, dt: f32) -> BlockInteraction {
+        // Progressive mining: hold LMB to break blocks
+        if self.lmb_held && !self.inventory.is_open {
             let origin = self.camera.position;
             let direction = self.camera.forward();
 
@@ -400,32 +417,80 @@ impl Player {
                 raycast_props(origin, direction, PLAYER_REACH, &chunks)
             };
 
-            // Determine which is closer
             let block_dist = block_hit.as_ref().map(|h| h.distance).unwrap_or(f32::MAX);
             let prop_dist = prop_hit.as_ref().map(|h| h.distance).unwrap_or(f32::MAX);
 
-            // Prop is closer - harvest it
+            // Prop is closer - instant harvest (props don't use mining)
             if prop_dist < block_dist {
                 if let Some(hit) = prop_hit {
                     let [x, y, z] = hit.world_pos;
-                    // Remove the prop from the world
                     if let Some(removed) = world.try_remove_prop(x, y, z, 0.5) {
                         tracing::debug!("Harvested prop {} at ({:.2}, {:.2}, {:.2})", removed.prop_id, x, y, z);
+                        self.mining_progress = 0.0;
+                        self.mining_target = None;
+                        self.mining_block = None;
+                        self.lmb_held = false; // Consume click
                         return BlockInteraction::HarvestProp { x, y, z, prop_id: removed.prop_id };
                     }
                 }
             }
-            // Block is closer - break it
+            // Block mining
             else if let Some(hit) = block_hit {
-                let [x, y, z] = hit.block_pos;
-                if let Some(block) = world.get_block(x, y, z) {
-                    if block != Block::Bedrock {
-                        world.set_block(x, y, z, Block::Air);
-                        tracing::debug!("Broke {:?} at ({}, {}, {})", block, x, y, z);
-                        return BlockInteraction::Break { x, y, z, block };
+                let pos = hit.block_pos;
+                if let Some(block) = world.get_block(pos[0], pos[1], pos[2]) {
+                    let hardness = block.hardness();
+
+                    if hardness < 0.0 {
+                        // Unbreakable (bedrock)
+                        self.mining_progress = 0.0;
+                        self.mining_target = None;
+                        self.mining_block = None;
+                    } else if hardness <= 0.0 {
+                        // Instant break (torches, dead bush, etc.)
+                        world.set_block(pos[0], pos[1], pos[2], Block::Air);
+                        tracing::debug!("Broke {:?} at ({}, {}, {})", block, pos[0], pos[1], pos[2]);
+                        self.mining_progress = 0.0;
+                        self.mining_target = None;
+                        self.mining_block = None;
+                        self.lmb_held = false; // Prevent repeat-breaking on single click
+                        return BlockInteraction::Break { x: pos[0], y: pos[1], z: pos[2], block };
+                    } else {
+                        // Progressive mining
+                        // Check if target changed (player looked at a different block)
+                        if self.mining_target != Some(pos) {
+                            self.mining_progress = 0.0;
+                            self.mining_target = Some(pos);
+                            self.mining_block = Some(block);
+                        }
+
+                        // Accumulate progress
+                        let tool_speed = self.get_mining_speed(block);
+                        let progress_rate = tool_speed / hardness;
+                        self.mining_progress += progress_rate * dt;
+
+                        if self.mining_progress >= 1.0 {
+                            // Mining complete
+                            world.set_block(pos[0], pos[1], pos[2], Block::Air);
+                            tracing::debug!("Mined {:?} at ({}, {}, {})", block, pos[0], pos[1], pos[2]);
+                            self.consume_tool_durability();
+                            self.mining_progress = 0.0;
+                            self.mining_target = None;
+                            self.mining_block = None;
+                            return BlockInteraction::Break { x: pos[0], y: pos[1], z: pos[2], block };
+                        }
                     }
                 }
+            } else {
+                // Looking at nothing: reset progress
+                self.mining_progress = 0.0;
+                self.mining_target = None;
+                self.mining_block = None;
             }
+        } else if self.mining_target.is_some() {
+            // LMB released or inventory opened: reset mining
+            self.mining_progress = 0.0;
+            self.mining_target = None;
+            self.mining_block = None;
         }
 
         if self.place_requested {
@@ -436,6 +501,50 @@ impl Player {
         }
 
         BlockInteraction::None
+    }
+
+    /// Get mining speed based on held tool vs block's preferred tool.
+    fn get_mining_speed(&self, block: Block) -> f32 {
+        use crate::inventory::ToolKind;
+        if let Some(stack) = self.inventory.selected_item() {
+            if let Item::Tool { kind, material, .. } = stack.item {
+                let base = material.mining_speed();
+                // Correct tool type: full speed
+                if block.preferred_tool() == Some(kind) {
+                    return base;
+                }
+                // Sword doesn't help mining
+                if kind == ToolKind::Sword {
+                    return 1.0;
+                }
+                // Wrong tool type: partial speed bonus
+                return base * 0.3;
+            }
+        }
+        1.0 // Hand speed
+    }
+
+    /// Consume 1 durability from the selected tool. Remove tool if durability reaches 0.
+    fn consume_tool_durability(&mut self) {
+        let slot = self.inventory.selected_index();
+        if let Some(stack) = self.inventory.get_slot_mut(slot) {
+            if let Item::Tool { ref mut durability, .. } = stack.item {
+                *durability = durability.saturating_sub(1);
+                if *durability == 0 {
+                    self.inventory.clear_slot(slot);
+                }
+            }
+        }
+    }
+
+    /// Get current mining progress (0.0-1.0) for crack overlay rendering
+    pub fn mining_progress(&self) -> f32 {
+        self.mining_progress
+    }
+
+    /// Get the block currently being mined (for crack overlay rendering)
+    pub fn mining_target(&self) -> Option<[i32; 3]> {
+        self.mining_target
     }
 
     /// Process drop request (Q key)
@@ -1029,26 +1138,20 @@ mod tests {
     fn test_player_selected_block() {
         let mut player = Player::new(Vec3::new(0.0, 100.0, 0.0));
 
-        // Empty inventory returns Air
+        // Slot 0 has a wooden pickaxe (tool, not a block) so selected_block returns Air
         assert_eq!(player.selected_block(), Block::Air);
 
-        // Add stone and check selection
-        player.inventory.add_block(Block::Stone);
-        assert_eq!(player.selected_block(), Block::Stone);
+        // Select slot with torches (slot 2) and verify it returns Torch
+        player.inventory.select_slot(2);
+        assert_eq!(player.selected_block(), Block::Torch);
     }
 
     #[test]
     fn test_player_inventory_integration() {
         let mut player = Player::new(Vec3::new(0.0, 100.0, 0.0));
 
-        // Add items to inventory
-        player.inventory.add_block(Block::Stone);
-        player.inventory.add_block(Block::Torch);
-
-        // First slot has stone
-        assert_eq!(player.selected_block(), Block::Stone);
-
-        // Can add more items
+        // Starting inventory has tools + blocks; add more
+        assert!(player.inventory.add_block(Block::Stone));
         assert!(player.inventory.add_block(Block::DiamondOre));
     }
 
@@ -1124,20 +1227,23 @@ mod tests {
     fn test_player_mouse_button_handling() {
         let mut player = Player::new(Vec3::ZERO);
 
-        // Left click requests break
-        assert!(!player.break_requested);
+        // Left click sets lmb_held (progressive mining)
+        assert!(!player.lmb_held);
         player.handle_mouse_button(MouseButton::Left, true);
-        assert!(player.break_requested);
+        assert!(player.lmb_held);
+
+        // Release clears lmb_held and resets mining state
+        player.mining_progress = 0.5;
+        player.mining_target = Some([1, 2, 3]);
+        player.handle_mouse_button(MouseButton::Left, false);
+        assert!(!player.lmb_held);
+        assert_eq!(player.mining_progress, 0.0);
+        assert!(player.mining_target.is_none());
 
         // Right click requests place
         assert!(!player.place_requested);
         player.handle_mouse_button(MouseButton::Right, true);
         assert!(player.place_requested);
-
-        // Release doesn't trigger
-        player.break_requested = false;
-        player.handle_mouse_button(MouseButton::Left, false);
-        assert!(!player.break_requested);
     }
 
     #[test]

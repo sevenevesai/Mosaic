@@ -85,12 +85,22 @@ impl PlayerData {
 
         for (i, slot) in inventory.all_slots().iter().enumerate() {
             if let Some(stack) = slot {
-                // Encode item - for Block items, use block_id + 1 (0 = empty)
-                let item_id = match stack.item {
-                    Item::Block(block) => (block as u8 as u16) + 1,
+                let (item_id, count, flags) = match stack.item {
+                    Item::Block(block) => {
+                        let id = (block as u8 as u16) + 1;
+                        let f = if stack.locked { 0x01u8 } else { 0x00u8 };
+                        (id, stack.count, f)
+                    }
+                    Item::Tool { kind, material, durability } => {
+                        let id = 128u16 + (kind.to_id() as u16) * 6 + material.to_id() as u16;
+                        // Encode durability: count = low 8 bits, flags bits 1-7 = high 7 bits, bit 0 = locked
+                        let dur_low = (durability & 0xFF) as u8;
+                        let dur_high = ((durability >> 8) & 0x7F) as u8;
+                        let f = (dur_high << 1) | if stack.locked { 0x01u8 } else { 0x00u8 };
+                        (id, dur_low, f)
+                    }
                 };
-                let flags = if stack.locked { 0x01 } else { 0x00 };
-                inv_data[i] = (item_id, stack.count, flags);
+                inv_data[i] = (item_id, count, flags);
             }
         }
 
@@ -106,9 +116,40 @@ impl PlayerData {
 
     /// Apply saved data to an inventory
     pub fn apply_to_inventory(&self, inventory: &mut Inventory) {
+        use crate::inventory::{ToolKind, ToolMaterial};
+
         for (i, &(item_id, count, flags)) in self.inventory.iter().enumerate() {
-            if item_id == 0 || count == 0 {
-                // Empty slot
+            if item_id == 0 {
+                if let Some(slot) = inventory.slot_mut(i) {
+                    *slot = None;
+                }
+            } else if item_id >= 128 {
+                // Tool item: decode kind and material from id
+                let tool_idx = (item_id - 128) as u8;
+                let kind_id = tool_idx / 6;
+                let mat_id = tool_idx % 6;
+
+                if let (Some(kind), Some(material)) = (ToolKind::from_id(kind_id), ToolMaterial::from_id(mat_id)) {
+                    // Decode durability from count (low 8) + flags bits 1-7 (high 7)
+                    let durability = count as u16 | (((flags >> 1) & 0x7F) as u16) << 8;
+                    let locked = (flags & 0x01) != 0;
+                    let item = Item::Tool { kind, material, durability };
+
+                    if let Some(slot) = inventory.slot_mut(i) {
+                        let mut stack = ItemStack::new(item, 1);
+                        if locked {
+                            stack.locked = true;
+                        }
+                        *slot = Some(stack);
+                    }
+                } else {
+                    // Invalid tool encoding, clear slot
+                    if let Some(slot) = inventory.slot_mut(i) {
+                        *slot = None;
+                    }
+                }
+            } else if count == 0 {
+                // Block item with zero count = empty
                 if let Some(slot) = inventory.slot_mut(i) {
                     *slot = None;
                 }
