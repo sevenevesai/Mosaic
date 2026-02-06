@@ -565,11 +565,11 @@ impl App {
                     // Handle menu scrolling
                     self.settings_menu.scroll(scroll);
                 } else if !self.player.is_inventory_open() {
-                    if self.player.is_third_person() {
-                        // In third person, scroll adjusts camera distance
+                    if self.player.is_third_person() && self.player.is_sprinting() {
+                        // Ctrl+scroll in third person: adjust camera distance
                         self.player.adjust_camera_zoom(scroll);
                     } else {
-                        // In first person, scroll cycles hotbar
+                        // Normal scroll: cycle hotbar slots
                         self.player.handle_scroll(scroll);
                     }
                 }

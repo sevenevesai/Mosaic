@@ -38,6 +38,12 @@ const CAMERA_TRANSITION_DURATION: f32 = 0.3;
 const FIRST_PERSON_FOV: f32 = 75.0;
 /// Third-person FOV (standard).
 const THIRD_PERSON_FOV: f32 = 70.0;
+/// Zoom lerp speed (higher = snappier). ~8 gives a smooth ~0.2s feel.
+const ZOOM_LERP_SPEED: f32 = 8.0;
+/// Over-the-shoulder horizontal offset (blocks to the right of center).
+const THIRD_PERSON_SHOULDER_OFFSET: f32 = 1.5;
+/// Over-the-shoulder vertical offset (slightly above center).
+const THIRD_PERSON_SHOULDER_UP: f32 = 0.3;
 
 /// Player movement state for animation selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,7 +133,9 @@ pub struct Player {
     third_person: bool,
     /// Character model facing direction (yaw in radians). Updated from movement.
     facing_yaw: f32,
-    /// Third-person camera distance (adjustable via scroll wheel).
+    /// Third-person camera distance target (set by scroll, smoothly approached).
+    third_person_distance_target: f32,
+    /// Third-person camera distance (current, smoothly lerped toward target).
     third_person_distance: f32,
     /// Camera mode transition timer (counts down to 0). 0 = no transition.
     camera_transition_t: f32,
@@ -180,6 +188,7 @@ impl Player {
             fly_mode: false,
             third_person: true,
             facing_yaw: 0.0,
+            third_person_distance_target: THIRD_PERSON_DISTANCE_DEFAULT,
             third_person_distance: THIRD_PERSON_DISTANCE_DEFAULT,
             camera_transition_t: 0.0,
             camera_transition_from: Vec3::ZERO,
@@ -248,8 +257,9 @@ impl Player {
 
     /// Adjust third-person camera distance via scroll wheel.
     /// Positive delta = zoom in, negative delta = zoom out.
+    /// Actual distance smoothly lerps toward target each frame.
     pub fn adjust_camera_zoom(&mut self, delta: f32) {
-        self.third_person_distance = (self.third_person_distance - delta * 1.5)
+        self.third_person_distance_target = (self.third_person_distance_target - delta * 1.5)
             .clamp(THIRD_PERSON_MIN_ZOOM, THIRD_PERSON_MAX_DISTANCE);
     }
 
@@ -541,6 +551,17 @@ impl Player {
             self.facing_yaw = self.camera.yaw;
         }
 
+        // Smoothly lerp zoom distance toward target
+        if (self.third_person_distance - self.third_person_distance_target).abs() > 0.01 {
+            self.third_person_distance = lerp(
+                self.third_person_distance,
+                self.third_person_distance_target,
+                (ZOOM_LERP_SPEED * dt_secs).min(1.0),
+            );
+        } else {
+            self.third_person_distance = self.third_person_distance_target;
+        }
+
         // Compute target camera position and FOV for current mode
         let target_fov;
         let target_pos;
@@ -548,13 +569,14 @@ impl Player {
         if self.third_person {
             target_fov = THIRD_PERSON_FOV.to_radians();
 
-            // 3rd person: camera orbits behind player
+            // 3rd person: camera orbits behind player with over-the-shoulder offset
             let center = Vec3::new(
                 self.feet_pos.x,
                 self.feet_pos.y + PLAYER_HEIGHT * 0.5 + THIRD_PERSON_HEIGHT_OFFSET,
                 self.feet_pos.z,
             );
             let forward = self.camera.forward();
+            let right = self.camera.right();
             let desired_pos = center - forward * self.third_person_distance;
 
             // Camera-terrain collision: raycast from center toward desired camera position
@@ -578,7 +600,15 @@ impl Player {
                 }
             }
 
-            target_pos = center + cam_dir * cam_dist;
+            // Over-the-shoulder: offset right and slightly up.
+            // Scale offset down as camera gets closer to avoid clipping.
+            let offset_scale = ((cam_dist - THIRD_PERSON_MIN_DISTANCE)
+                / (THIRD_PERSON_DISTANCE_DEFAULT - THIRD_PERSON_MIN_DISTANCE))
+                .clamp(0.0, 1.0);
+            let shoulder = right * THIRD_PERSON_SHOULDER_OFFSET * offset_scale
+                + Vec3::Y * THIRD_PERSON_SHOULDER_UP * offset_scale;
+
+            target_pos = center + cam_dir * cam_dist + shoulder;
         } else {
             target_fov = FIRST_PERSON_FOV.to_radians();
 
@@ -1186,27 +1216,35 @@ mod tests {
     fn test_camera_zoom_adjustment() {
         let mut player = Player::new(Vec3::new(0.0, 100.0, 0.0));
 
-        let initial_dist = player.third_person_distance;
+        let initial_target = player.third_person_distance_target;
 
-        // Zoom in (positive delta)
+        // Zoom in (positive delta) changes the target
         player.adjust_camera_zoom(1.0);
-        assert!(player.third_person_distance < initial_dist);
+        assert!(player.third_person_distance_target < initial_target);
 
-        // Zoom out (negative delta)
+        // Zoom out (negative delta) restores target
         player.adjust_camera_zoom(-1.0);
-        assert!((player.third_person_distance - initial_dist).abs() < 0.01);
+        assert!((player.third_person_distance_target - initial_target).abs() < 0.01);
 
-        // Clamp to min
+        // Clamp target to min
         for _ in 0..50 {
             player.adjust_camera_zoom(1.0);
         }
-        assert!(player.third_person_distance >= THIRD_PERSON_MIN_ZOOM);
+        assert!(player.third_person_distance_target >= THIRD_PERSON_MIN_ZOOM);
 
-        // Clamp to max
+        // Clamp target to max
         for _ in 0..50 {
             player.adjust_camera_zoom(-1.0);
         }
-        assert!(player.third_person_distance <= THIRD_PERSON_MAX_DISTANCE);
+        assert!(player.third_person_distance_target <= THIRD_PERSON_MAX_DISTANCE);
+
+        // Actual distance smoothly approaches target after update
+        player.third_person_distance_target = 5.0;
+        player.third_person_distance = THIRD_PERSON_DISTANCE_DEFAULT;
+        player.update(Duration::from_millis(100), None);
+        // Should have moved toward 5.0 but not reached it yet
+        assert!(player.third_person_distance < THIRD_PERSON_DISTANCE_DEFAULT);
+        assert!(player.third_person_distance > 5.0);
     }
 
     #[test]
