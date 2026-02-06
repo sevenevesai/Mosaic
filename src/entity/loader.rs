@@ -307,7 +307,7 @@ pub fn load_animations(
         let baked = ufbx::bake_anim(&scene, &anim_stack.anim, bake_opts)
             .map_err(|e| format!("Failed to bake animation '{}': {:?}", clip_name, e))?;
 
-        let duration = baked.playback_duration;
+        let nominal_duration = baked.playback_duration;
 
         // Build a name -> target_bone_index map from the target skeleton
         let mut name_to_bone: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
@@ -358,49 +358,38 @@ pub fn load_animations(
             }
         }
 
-        // Find minimum keyframe time across ALL bone tracks to normalize timeline.
-        // ufbx gives absolute FBX timeline times, so we need to subtract the global
-        // minimum to start at 0.0.
-        let mut global_min_time = f64::MAX;
-        for track in bone_tracks.iter().flatten() {
-            for k in &track.translation_keys {
-                global_min_time = global_min_time.min(k.time);
-            }
-            for k in &track.rotation_keys {
-                global_min_time = global_min_time.min(k.time);
-            }
-            for k in &track.scale_keys {
-                global_min_time = global_min_time.min(k.time);
-            }
-        }
+        // Normalize keyframe times: subtract root bone's first rotation key time
+        // since ufbx gives absolute FBX timeline times.
+        let min_time = bone_tracks.get(0)
+            .and_then(|t| t.as_ref())
+            .and_then(|t| t.rotation_keys.first().map(|k| k.time))
+            .unwrap_or(0.0);
 
-        // Normalize keyframe times if offset
-        if global_min_time > 0.01 && global_min_time < f64::MAX {
-            tracing::info!("Animation '{}': normalizing times (subtracting {:.2}s)", clip_name, global_min_time);
+        if min_time > 0.1 {
+            tracing::info!("Animation '{}': normalizing times (subtracting {:.2}s)", clip_name, min_time);
             for track in bone_tracks.iter_mut().flatten() {
-                for k in &mut track.translation_keys { k.time -= global_min_time; }
-                for k in &mut track.rotation_keys { k.time -= global_min_time; }
-                for k in &mut track.scale_keys { k.time -= global_min_time; }
+                for k in &mut track.translation_keys { k.time -= min_time; }
+                for k in &mut track.rotation_keys { k.time -= min_time; }
+                for k in &mut track.scale_keys { k.time -= min_time; }
             }
         }
 
-        // Use baked.playback_duration as the clip duration - this reflects the
-        // intended animation length from the FBX stack. After trimming keyframes
-        // beyond this duration, the animation will loop cleanly.
-        let clip_duration = duration;
+        // Detect actual animation duration by finding where bones stop moving.
+        // Many FBX pipelines embed the same timeline length for all clips,
+        // causing animations to "freeze" on their last pose for the remainder.
+        let clip_duration = detect_animation_end(&bone_tracks, nominal_duration);
 
-        // Trim keyframes that extend beyond the clip duration (some FBX bakers
-        // emit extra samples beyond the intended playback range).
+        // Trim keyframes beyond detected duration
         for track in bone_tracks.iter_mut().flatten() {
-            track.translation_keys.retain(|k| k.time <= clip_duration + 0.01);
-            track.rotation_keys.retain(|k| k.time <= clip_duration + 0.01);
-            track.scale_keys.retain(|k| k.time <= clip_duration + 0.01);
+            track.translation_keys.retain(|k| k.time <= clip_duration + 0.02);
+            track.rotation_keys.retain(|k| k.time <= clip_duration + 0.02);
+            track.scale_keys.retain(|k| k.time <= clip_duration + 0.02);
         }
 
         let matched = bone_tracks.iter().filter(|t| t.is_some()).count();
         tracing::info!(
-            "Animation '{}': duration={:.2}s, {}/{} bones matched, {} baked nodes",
-            clip_name, clip_duration, matched, bone_count, baked.nodes.len()
+            "Animation '{}': duration={:.3}s (nominal={:.2}s), {}/{} bones, {} nodes",
+            clip_name, clip_duration, nominal_duration, matched, bone_count, baked.nodes.len()
         );
 
         clips.push(AnimationClip {
@@ -411,6 +400,58 @@ pub fn load_animations(
     }
 
     Ok(clips)
+}
+
+/// Detect where an animation actually ends by finding when bones stop moving.
+/// Many FBX exporters pad animations to a fixed timeline length. This function
+/// scans rotation tracks (most reliable for detecting motion) and finds the
+/// latest time where any bone is still actively changing.
+fn detect_animation_end(bone_tracks: &[Option<BoneTrack>], nominal_duration: f64) -> f64 {
+    let mut last_active_time = 0.0f64;
+
+    for track in bone_tracks.iter().flatten() {
+        // Check rotation keys - most reliable indicator of animation activity
+        let keys = &track.rotation_keys;
+        if keys.len() < 2 {
+            continue;
+        }
+
+        // Find the last keyframe that differs meaningfully from the one before it
+        for i in (1..keys.len()).rev() {
+            let q0 = keys[i - 1].value;
+            let q1 = keys[i].value;
+            // Quaternion dot product: 1.0 = identical, check if actually different
+            let dot = q0.dot(q1).abs();
+            if dot < 0.9999 {
+                // This keyframe has actual motion
+                last_active_time = last_active_time.max(keys[i].time);
+                break;
+            }
+        }
+
+        // Also check translation keys for root motion
+        let tkeys = &track.translation_keys;
+        if tkeys.len() >= 2 {
+            for i in (1..tkeys.len()).rev() {
+                let diff = (tkeys[i].value - tkeys[i - 1].value).length();
+                if diff > 0.001 {
+                    last_active_time = last_active_time.max(tkeys[i].time);
+                    break;
+                }
+            }
+        }
+    }
+
+    // Use detected end, but clamp to nominal duration as upper bound.
+    // Add a small buffer (~1 frame at 30fps) for the final pose to settle.
+    if last_active_time > 0.05 {
+        let detected = (last_active_time + 0.04).min(nominal_duration);
+        tracing::info!("  -> detected end at {:.3}s (nominal {:.2}s)", detected, nominal_duration);
+        detected
+    } else {
+        // No motion detected, use nominal
+        nominal_duration
+    }
 }
 
 /// Diagnostic: print info about what an FBX file contains.

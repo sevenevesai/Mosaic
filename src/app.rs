@@ -439,6 +439,9 @@ impl App {
                                 self.toggle_cursor_grab();
                             }
                         }
+                        KeyCode::F5 if pressed => {
+                            self.player.toggle_camera_mode();
+                        }
                         // Body part editor controls
                         KeyCode::F4 if pressed => {
                             self.body_part_editor.toggle();
@@ -562,7 +565,13 @@ impl App {
                     // Handle menu scrolling
                     self.settings_menu.scroll(scroll);
                 } else if !self.player.is_inventory_open() {
-                    self.player.handle_scroll(scroll);
+                    if self.player.is_third_person() {
+                        // In third person, scroll adjusts camera distance
+                        self.player.adjust_camera_zoom(scroll);
+                    } else {
+                        // In first person, scroll cycles hotbar
+                        self.player.handle_scroll(scroll);
+                    }
                 }
             }
 
@@ -1216,6 +1225,14 @@ impl App {
         let player_feet = self.player.feet_position();
         let player_facing = self.player.facing_yaw();
         let movement_state = self.player.movement_state();
+        let is_third_person = self.player.is_third_person();
+
+        // Show/hide player entity based on camera mode
+        if let Some(player_key) = self.entity_manager.player_entity {
+            if let Some(base) = self.entity_manager.entities.get_mut(player_key) {
+                base.active = is_third_person;
+            }
+        }
 
         // Select animation clip and speed based on player movement state
         let clip_count = self.entity_manager.animation_clips.len();

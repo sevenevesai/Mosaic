@@ -22,12 +22,22 @@ use crate::inventory::{Inventory, Item};
 use crate::renderer::Camera;
 use crate::world::{Block, WorldManager, raycast, raycast_props};
 
-/// Third-person camera distance behind the player (blocks).
-const THIRD_PERSON_DISTANCE: f32 = 10.0;
+/// Default third-person camera distance behind the player (blocks).
+const THIRD_PERSON_DISTANCE_DEFAULT: f32 = 10.0;
 /// Minimum camera distance when colliding with terrain.
 const THIRD_PERSON_MIN_DISTANCE: f32 = 1.0;
+/// Maximum third-person camera distance (scroll zoom limit).
+const THIRD_PERSON_MAX_DISTANCE: f32 = 20.0;
+/// Minimum third-person camera distance (scroll zoom limit).
+const THIRD_PERSON_MIN_ZOOM: f32 = 2.0;
 /// Height offset above player center for camera target point.
 const THIRD_PERSON_HEIGHT_OFFSET: f32 = 0.5;
+/// Duration of camera mode transition (seconds).
+const CAMERA_TRANSITION_DURATION: f32 = 0.3;
+/// First-person FOV (wider for immersion).
+const FIRST_PERSON_FOV: f32 = 75.0;
+/// Third-person FOV (standard).
+const THIRD_PERSON_FOV: f32 = 70.0;
 
 /// Player movement state for animation selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,11 +122,19 @@ pub struct Player {
     // Mode
     fly_mode: bool,
 
-    // Third-person camera
+    // Camera mode
     /// Whether third-person camera is active (true) or first-person (false).
     third_person: bool,
     /// Character model facing direction (yaw in radians). Updated from movement.
     facing_yaw: f32,
+    /// Third-person camera distance (adjustable via scroll wheel).
+    third_person_distance: f32,
+    /// Camera mode transition timer (counts down to 0). 0 = no transition.
+    camera_transition_t: f32,
+    /// Camera position at start of transition (for smooth lerp).
+    camera_transition_from: Vec3,
+    /// FOV at start of transition (for smooth lerp).
+    camera_transition_fov_from: f32,
 }
 
 impl Player {
@@ -133,7 +151,7 @@ impl Player {
             feet_pos.z,
         );
         let forward = camera.forward();
-        camera.position = center - forward * THIRD_PERSON_DISTANCE;
+        camera.position = center - forward * THIRD_PERSON_DISTANCE_DEFAULT;
 
         Self {
             camera,
@@ -162,6 +180,10 @@ impl Player {
             fly_mode: false,
             third_person: true,
             facing_yaw: 0.0,
+            third_person_distance: THIRD_PERSON_DISTANCE_DEFAULT,
+            camera_transition_t: 0.0,
+            camera_transition_from: Vec3::ZERO,
+            camera_transition_fov_from: THIRD_PERSON_FOV.to_radians(),
         }
     }
 
@@ -211,6 +233,24 @@ impl Player {
     /// Whether 3rd person camera is active.
     pub fn is_third_person(&self) -> bool {
         self.third_person
+    }
+
+    /// Toggle between first-person and third-person camera.
+    pub fn toggle_camera_mode(&mut self) {
+        // Save current camera state for smooth transition
+        self.camera_transition_from = self.camera.position;
+        self.camera_transition_fov_from = self.camera.fov;
+        self.camera_transition_t = CAMERA_TRANSITION_DURATION;
+
+        self.third_person = !self.third_person;
+        tracing::info!("Camera mode: {}", if self.third_person { "THIRD PERSON" } else { "FIRST PERSON" });
+    }
+
+    /// Adjust third-person camera distance via scroll wheel.
+    /// Positive delta = zoom in, negative delta = zoom out.
+    pub fn adjust_camera_zoom(&mut self, delta: f32) {
+        self.third_person_distance = (self.third_person_distance - delta * 1.5)
+            .clamp(THIRD_PERSON_MIN_ZOOM, THIRD_PERSON_MAX_DISTANCE);
     }
 
     /// Current movement state for animation selection.
@@ -471,36 +511,43 @@ impl Player {
             self.update_normal_mode(dt_secs, world);
         }
 
-        // Update facing direction from WASD input relative to camera.
-        // Smoothly interpolate to avoid jarring snaps when changing direction.
-        let mut input_dir = Vec3::ZERO;
-        if self.move_forward { input_dir += self.camera.forward(); }
-        if self.move_backward { input_dir -= self.camera.forward(); }
-        if self.move_left { input_dir -= self.camera.right(); }
-        if self.move_right { input_dir += self.camera.right(); }
-        input_dir.y = 0.0;
-        if input_dir.length_squared() > 0.01 {
-            // atan2(x, z) gives clockwise angle from +Z axis (model's default forward).
-            // Negate because Quat::from_rotation_y uses CCW convention.
-            let target_yaw = (-input_dir.x).atan2(-input_dir.z);
-            // Smoothly rotate toward target (shortest path around the circle)
-            let mut diff = target_yaw - self.facing_yaw;
-            // Wrap to [-PI, PI]
-            if diff > std::f32::consts::PI { diff -= 2.0 * std::f32::consts::PI; }
-            if diff < -std::f32::consts::PI { diff += 2.0 * std::f32::consts::PI; }
-            let rotation_speed = 15.0; // radians/sec - fast but smooth
-            let max_step = rotation_speed * dt_secs;
-            if diff.abs() < max_step {
-                self.facing_yaw = target_yaw;
-            } else {
-                self.facing_yaw += diff.signum() * max_step;
+        // Update facing direction based on camera mode.
+        if self.third_person {
+            // Third person: facing direction from WASD input relative to camera.
+            // Smoothly interpolate to avoid jarring snaps when changing direction.
+            let mut input_dir = Vec3::ZERO;
+            if self.move_forward { input_dir += self.camera.forward(); }
+            if self.move_backward { input_dir -= self.camera.forward(); }
+            if self.move_left { input_dir -= self.camera.right(); }
+            if self.move_right { input_dir += self.camera.right(); }
+            input_dir.y = 0.0;
+            if input_dir.length_squared() > 0.01 {
+                let target_yaw = input_dir.x.atan2(input_dir.z);
+                let mut diff = target_yaw - self.facing_yaw;
+                if diff > std::f32::consts::PI { diff -= 2.0 * std::f32::consts::PI; }
+                if diff < -std::f32::consts::PI { diff += 2.0 * std::f32::consts::PI; }
+                let rotation_speed = 15.0;
+                let max_step = rotation_speed * dt_secs;
+                if diff.abs() < max_step {
+                    self.facing_yaw = target_yaw;
+                } else {
+                    self.facing_yaw += diff.signum() * max_step;
+                }
+                if self.facing_yaw > std::f32::consts::PI { self.facing_yaw -= 2.0 * std::f32::consts::PI; }
+                if self.facing_yaw < -std::f32::consts::PI { self.facing_yaw += 2.0 * std::f32::consts::PI; }
             }
-            // Keep in [-PI, PI]
-            if self.facing_yaw > std::f32::consts::PI { self.facing_yaw -= 2.0 * std::f32::consts::PI; }
-            if self.facing_yaw < -std::f32::consts::PI { self.facing_yaw += 2.0 * std::f32::consts::PI; }
+        } else {
+            // First person: character faces camera direction (horizontal component of yaw).
+            self.facing_yaw = self.camera.yaw;
         }
 
+        // Compute target camera position and FOV for current mode
+        let target_fov;
+        let target_pos;
+
         if self.third_person {
+            target_fov = THIRD_PERSON_FOV.to_radians();
+
             // 3rd person: camera orbits behind player
             let center = Vec3::new(
                 self.feet_pos.x,
@@ -508,17 +555,16 @@ impl Player {
                 self.feet_pos.z,
             );
             let forward = self.camera.forward();
-            let desired_pos = center - forward * THIRD_PERSON_DISTANCE;
+            let desired_pos = center - forward * self.third_person_distance;
 
             // Camera-terrain collision: raycast from center toward desired camera position
             let cam_dir = (desired_pos - center).normalize_or_zero();
-            let mut cam_dist = THIRD_PERSON_DISTANCE;
+            let mut cam_dist = self.third_person_distance;
 
             if let Some(world) = world {
-                // Check if camera would be inside a block by sampling along the ray
                 let steps = 10;
                 for i in 1..=steps {
-                    let t = (i as f32 / steps as f32) * THIRD_PERSON_DISTANCE;
+                    let t = (i as f32 / steps as f32) * self.third_person_distance;
                     let sample = center + cam_dir * t;
                     let bx = sample.x.floor() as i32;
                     let by = sample.y.floor() as i32;
@@ -532,14 +578,29 @@ impl Player {
                 }
             }
 
-            self.camera.position = center + cam_dir * cam_dist;
+            target_pos = center + cam_dir * cam_dist;
         } else {
+            target_fov = FIRST_PERSON_FOV.to_radians();
+
             // 1st person: camera at eye height
-            self.camera.position = Vec3::new(
+            target_pos = Vec3::new(
                 self.feet_pos.x,
                 self.feet_pos.y + PLAYER_EYE_HEIGHT,
                 self.feet_pos.z,
             );
+        }
+
+        // Smooth camera transition between modes
+        if self.camera_transition_t > 0.0 {
+            self.camera_transition_t = (self.camera_transition_t - dt_secs).max(0.0);
+            let t = 1.0 - (self.camera_transition_t / CAMERA_TRANSITION_DURATION);
+            // Smoothstep for eased transition
+            let t = t * t * (3.0 - 2.0 * t);
+            self.camera.position = self.camera_transition_from.lerp(target_pos, t);
+            self.camera.fov = self.camera_transition_fov_from + (target_fov - self.camera_transition_fov_from) * t;
+        } else {
+            self.camera.position = target_pos;
+            self.camera.fov = target_fov;
         }
     }
 
@@ -1090,5 +1151,111 @@ mod tests {
 
         // Should have fallen (no collision without world)
         assert!(player.feet_pos.y < initial_y);
+    }
+
+    #[test]
+    fn test_camera_mode_toggle() {
+        let mut player = Player::new(Vec3::new(0.0, 100.0, 0.0));
+
+        // Defaults to third person
+        assert!(player.is_third_person());
+
+        // Toggle to first person
+        player.toggle_camera_mode();
+        assert!(!player.is_third_person());
+
+        // Toggle back to third person
+        player.toggle_camera_mode();
+        assert!(player.is_third_person());
+    }
+
+    #[test]
+    fn test_camera_mode_transition() {
+        let mut player = Player::new(Vec3::new(0.0, 100.0, 0.0));
+
+        // Toggle triggers a transition timer
+        player.toggle_camera_mode();
+        assert!(player.camera_transition_t > 0.0);
+
+        // After enough time, transition completes
+        player.update(Duration::from_millis(500), None);
+        assert!((player.camera_transition_t - 0.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_camera_zoom_adjustment() {
+        let mut player = Player::new(Vec3::new(0.0, 100.0, 0.0));
+
+        let initial_dist = player.third_person_distance;
+
+        // Zoom in (positive delta)
+        player.adjust_camera_zoom(1.0);
+        assert!(player.third_person_distance < initial_dist);
+
+        // Zoom out (negative delta)
+        player.adjust_camera_zoom(-1.0);
+        assert!((player.third_person_distance - initial_dist).abs() < 0.01);
+
+        // Clamp to min
+        for _ in 0..50 {
+            player.adjust_camera_zoom(1.0);
+        }
+        assert!(player.third_person_distance >= THIRD_PERSON_MIN_ZOOM);
+
+        // Clamp to max
+        for _ in 0..50 {
+            player.adjust_camera_zoom(-1.0);
+        }
+        assert!(player.third_person_distance <= THIRD_PERSON_MAX_DISTANCE);
+    }
+
+    #[test]
+    fn test_first_person_camera_position() {
+        let mut player = Player::new(Vec3::new(0.0, 100.0, 0.0));
+
+        // Switch to first person
+        player.third_person = false;
+        player.camera_transition_t = 0.0; // Skip transition
+
+        player.update(Duration::from_millis(16), None);
+
+        // Camera should be at eye height above feet
+        let expected_y = player.feet_pos.y + PLAYER_EYE_HEIGHT;
+        assert!((player.camera.position.y - expected_y).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_first_person_facing_follows_camera() {
+        let mut player = Player::new(Vec3::new(0.0, 100.0, 0.0));
+
+        // Switch to first person
+        player.third_person = false;
+        player.camera_transition_t = 0.0;
+
+        // Rotate camera
+        player.camera.yaw = 1.5;
+        player.update(Duration::from_millis(16), None);
+
+        // Facing should match camera yaw
+        assert!((player.facing_yaw - 1.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_fov_differs_by_mode() {
+        let mut player = Player::new(Vec3::new(0.0, 100.0, 0.0));
+
+        // Third person FOV
+        player.third_person = true;
+        player.camera_transition_t = 0.0;
+        player.update(Duration::from_millis(16), None);
+        let tp_fov = player.camera.fov;
+
+        // First person FOV (should be wider)
+        player.third_person = false;
+        player.camera_transition_t = 0.0;
+        player.update(Duration::from_millis(16), None);
+        let fp_fov = player.camera.fov;
+
+        assert!(fp_fov > tp_fov);
     }
 }
