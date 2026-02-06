@@ -124,7 +124,7 @@ impl CharacterRenderer {
             ],
         });
 
-        // Texture bind group layout (character texture)
+        // Texture bind group layout (character texture array)
         let texture_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Character Texture Bind Group Layout"),
             entries: &[
@@ -133,7 +133,7 @@ impl CharacterRenderer {
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
                         multisampled: false,
                     },
                     count: None,
@@ -192,6 +192,12 @@ impl CharacterRenderer {
                     offset: 36,
                     shader_location: 4,
                     format: wgpu::VertexFormat::Unorm8x4,
+                },
+                // texture_layer: u32
+                wgpu::VertexAttribute {
+                    offset: 40,
+                    shader_location: 10,
+                    format: wgpu::VertexFormat::Uint32,
                 },
             ],
         };
@@ -344,26 +350,54 @@ impl CharacterRenderer {
         slot_index
     }
 
-    /// Load and set a character texture from a PNG file.
-    pub fn load_texture(
+    /// Load multiple character textures into a texture array.
+    /// All textures must be the same size. If sizes differ, they will be resized to match the first.
+    pub fn load_texture_array(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        path: &std::path::Path,
+        paths: &[std::path::PathBuf],
     ) -> Result<(), String> {
-        let img_data = std::fs::read(path)
-            .map_err(|e| format!("Failed to read texture '{}': {}", path.display(), e))?;
-        let img = image::load_from_memory(&img_data)
-            .map_err(|e| format!("Failed to decode texture '{}': {}", path.display(), e))?;
-        let rgba = img.to_rgba8();
-        let dimensions = rgba.dimensions();
+        if paths.is_empty() {
+            return Err("No texture paths provided".to_string());
+        }
 
+        // Load all images and determine the target size from the first one
+        let mut images: Vec<image::RgbaImage> = Vec::with_capacity(paths.len());
+        let mut target_width = 0u32;
+        let mut target_height = 0u32;
+
+        for (i, path) in paths.iter().enumerate() {
+            let img_data = std::fs::read(path)
+                .map_err(|e| format!("Failed to read texture '{}': {}", path.display(), e))?;
+            let img = image::load_from_memory(&img_data)
+                .map_err(|e| format!("Failed to decode texture '{}': {}", path.display(), e))?;
+            let rgba = img.to_rgba8();
+
+            if i == 0 {
+                target_width = rgba.width();
+                target_height = rgba.height();
+            }
+
+            // Resize if needed to match first texture
+            let final_rgba = if rgba.width() != target_width || rgba.height() != target_height {
+                image::imageops::resize(&rgba, target_width, target_height, image::imageops::FilterType::Lanczos3)
+            } else {
+                rgba
+            };
+
+            images.push(final_rgba);
+        }
+
+        let layer_count = images.len() as u32;
+
+        // Create texture array
         let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Character Texture"),
+            label: Some("Character Texture Array"),
             size: wgpu::Extent3d {
-                width: dimensions.0,
-                height: dimensions.1,
-                depth_or_array_layers: 1,
+                width: target_width,
+                height: target_height,
+                depth_or_array_layers: layer_count,
             },
             mip_level_count: 1,
             sample_count: 1,
@@ -373,29 +407,35 @@ impl CharacterRenderer {
             view_formats: &[],
         });
 
-        queue.write_texture(
-            wgpu::ImageCopyTexture {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &rgba,
-            wgpu::ImageDataLayout {
-                offset: 0,
-                bytes_per_row: Some(4 * dimensions.0),
-                rows_per_image: Some(dimensions.1),
-            },
-            wgpu::Extent3d {
-                width: dimensions.0,
-                height: dimensions.1,
-                depth_or_array_layers: 1,
-            },
-        );
+        // Upload each layer
+        for (i, rgba) in images.iter().enumerate() {
+            queue.write_texture(
+                wgpu::ImageCopyTexture {
+                    texture: &texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d { x: 0, y: 0, z: i as u32 },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                rgba.as_raw(),
+                wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4 * target_width),
+                    rows_per_image: Some(target_height),
+                },
+                wgpu::Extent3d {
+                    width: target_width,
+                    height: target_height,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
 
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let view = texture.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("Character Texture Sampler"),
+            label: Some("Character Texture Array Sampler"),
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
             mipmap_filter: wgpu::FilterMode::Nearest,
@@ -403,7 +443,7 @@ impl CharacterRenderer {
         });
 
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Character Texture Bind Group"),
+            label: Some("Character Texture Array Bind Group"),
             layout: &self.texture_bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
@@ -418,21 +458,22 @@ impl CharacterRenderer {
         });
 
         self.texture_bind_group = Some(bind_group);
+        tracing::info!("Loaded character texture array: {} layers at {}x{}", layer_count, target_width, target_height);
         Ok(())
     }
 
-    /// Create a placeholder white texture for untextured models.
+    /// Create a placeholder texture array for untextured models.
     pub fn create_placeholder_texture(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
     ) {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Character Placeholder Texture"),
+            label: Some("Character Placeholder Texture Array"),
             size: wgpu::Extent3d {
                 width: 4,
                 height: 4,
-                depth_or_array_layers: 1,
+                depth_or_array_layers: 1, // Single layer placeholder
             },
             mip_level_count: 1,
             sample_count: 1,
@@ -460,7 +501,10 @@ impl CharacterRenderer {
             wgpu::Extent3d { width: 4, height: 4, depth_or_array_layers: 1 },
         );
 
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let view = texture.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("Character Placeholder Sampler"),
             mag_filter: wgpu::FilterMode::Nearest,
@@ -583,7 +627,7 @@ var<storage, read> bone_matrices: array<mat4x4<f32>>;
 var<uniform> light: LightUniform;
 
 @group(2) @binding(0)
-var char_texture: texture_2d<f32>;
+var char_texture: texture_2d_array<f32>;
 @group(2) @binding(1)
 var char_sampler: sampler;
 
@@ -594,6 +638,7 @@ struct VertexInput {
     @location(2) tex_coords: vec2<f32>,
     @location(3) bone_indices: vec4<u32>,
     @location(4) bone_weights: vec4<f32>,  // Unorm8x4 auto-converts to 0.0-1.0
+    @location(10) texture_layer: u32,
 }
 
 // Per-instance attributes
@@ -610,6 +655,7 @@ struct VertexOutput {
     @location(0) tex_coords: vec2<f32>,
     @location(1) world_normal: vec3<f32>,
     @location(2) world_position: vec3<f32>,
+    @location(3) @interpolate(flat) texture_layer: u32,
 }
 
 @vertex
@@ -642,6 +688,7 @@ fn vs_character(vertex: VertexInput, instance: InstanceInput) -> VertexOutput {
     out.clip_position = camera.view_proj * world_pos;
     out.tex_coords = vertex.tex_coords;
     out.world_position = world_pos.xyz;
+    out.texture_layer = vertex.texture_layer;
 
     // Transform normal (using upper-left 3x3 of skin * model)
     let skin_normal = (skin_mat * vec4<f32>(vertex.normal, 0.0)).xyz;
@@ -653,8 +700,8 @@ fn vs_character(vertex: VertexInput, instance: InstanceInput) -> VertexOutput {
 
 @fragment
 fn fs_character(in: VertexOutput) -> @location(0) vec4<f32> {
-    // Sample character texture
-    let albedo = textureSample(char_texture, char_sampler, in.tex_coords);
+    // Sample character texture from array using per-vertex layer index
+    let albedo = textureSample(char_texture, char_sampler, in.tex_coords, in.texture_layer);
 
     // Discard transparent pixels
     if albedo.a < 0.5 {

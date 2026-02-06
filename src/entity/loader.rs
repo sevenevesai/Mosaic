@@ -26,6 +26,8 @@ pub struct CharacterVertex {
     pub bone_indices: [u8; 4],
     /// Bone weights (normalized, sum to 255).
     pub bone_weights: [u8; 4],
+    /// Index into texture array for per-part textures.
+    pub texture_layer: u32,
 }
 
 /// Result of loading an FBX model.
@@ -186,6 +188,7 @@ fn extract_mesh_data(
                 tex_coords,
                 bone_indices,
                 bone_weights,
+                texture_layer: 0,
             });
         }
     }
@@ -523,7 +526,7 @@ pub fn load_skeleton_from_fbx(path: &Path) -> Result<Skeleton, String> {
 pub struct MergedCharacterMesh {
     pub vertices: Vec<CharacterVertex>,
     pub indices: Vec<u32>,
-    /// Texture paths for each body part (in order they were merged).
+    /// Unique texture paths (indices match texture_layer in vertices).
     pub texture_paths: Vec<std::path::PathBuf>,
 }
 
@@ -537,20 +540,30 @@ pub struct BodyPart {
     pub bone_names: &'static [&'static str],
     /// Optional texture file (relative to assets/char/textures/)
     pub texture: Option<&'static str>,
+    /// Mirror this part on X axis (for left-side limbs)
+    pub mirror: bool,
 }
 
 /// Default humanoid body parts for a complete character.
 /// Uses the Avatar_for_Animation skeleton naming: Root_M, Hip_R/L, Spine1_M, Chest_M, etc.
+/// Paired limbs (Hip, Shoulder, Elbow, Knee) have both right and left entries.
 pub const HUMANOID_BODY_PARTS: &[BodyPart] = &[
-    BodyPart { folder: "Root", file: "Root001.fbx", bone_names: &["Root_M", "Root"], texture: Some("Characters/002.png") },
-    BodyPart { folder: "Hip", file: "Hip001.fbx", bone_names: &["Hip_R", "Hip_L", "Hip"], texture: Some("Characters/002.png") },
-    BodyPart { folder: "Spine", file: "Spine001.fbx", bone_names: &["Spine1_M", "Spine"], texture: Some("Characters/002.png") },
-    BodyPart { folder: "Chest", file: "Chest001.fbx", bone_names: &["Chest_M", "Chest"], texture: Some("Characters/002.png") },
-    BodyPart { folder: "Head", file: "Head001.fbx", bone_names: &["Head_M", "Head"], texture: Some("Characters/002.png") },
-    BodyPart { folder: "Shoulder", file: "Shoulder001.fbx", bone_names: &["Shoulder_R", "Shoulder_L", "Scapula_R"], texture: Some("Characters/002.png") },
-    BodyPart { folder: "Elbow", file: "Elbow001.fbx", bone_names: &["Elbow_R", "Elbow_L", "Forearm"], texture: Some("Characters/002.png") },
-    BodyPart { folder: "Knee", file: "Knee001.fbx", bone_names: &["Knee_R", "Knee_L", "Calf"], texture: Some("Characters/002.png") },
-    BodyPart { folder: "Hair", file: "Hair001.fbx", bone_names: &["Head_M", "Head"], texture: Some("Characters/002.png") },
+    // Center/spine parts
+    BodyPart { folder: "Root", file: "Root001.fbx", bone_names: &["Root_M", "Root"], texture: Some("Characters/002.png"), mirror: false },
+    BodyPart { folder: "Spine", file: "Spine001.fbx", bone_names: &["Spine1_M", "Spine"], texture: Some("Characters/002.png"), mirror: false },
+    BodyPart { folder: "Chest", file: "Chest001.fbx", bone_names: &["Chest_M", "Chest"], texture: Some("Characters/002.png"), mirror: false },
+    BodyPart { folder: "Head", file: "Head001.fbx", bone_names: &["Head_M", "Head"], texture: Some("Characters/002.png"), mirror: false },
+    BodyPart { folder: "Hair", file: "Hair001.fbx", bone_names: &["Head_M", "Head"], texture: Some("Characters/002.png"), mirror: false },
+    // Right side limbs
+    BodyPart { folder: "Hip", file: "Hip001.fbx", bone_names: &["Hip_R"], texture: Some("Characters/002.png"), mirror: false },
+    BodyPart { folder: "Knee", file: "Knee001.fbx", bone_names: &["Knee_R"], texture: Some("Characters/002.png"), mirror: false },
+    BodyPart { folder: "Shoulder", file: "Shoulder001.fbx", bone_names: &["Shoulder_R"], texture: Some("Characters/002.png"), mirror: false },
+    BodyPart { folder: "Elbow", file: "Elbow001.fbx", bone_names: &["Elbow_R"], texture: Some("Characters/002.png"), mirror: false },
+    // Left side limbs (mirrored from right side meshes)
+    BodyPart { folder: "Hip", file: "Hip001.fbx", bone_names: &["Hip_L"], texture: Some("Characters/002.png"), mirror: true },
+    BodyPart { folder: "Knee", file: "Knee001.fbx", bone_names: &["Knee_L"], texture: Some("Characters/002.png"), mirror: true },
+    BodyPart { folder: "Shoulder", file: "Shoulder001.fbx", bone_names: &["Shoulder_L"], texture: Some("Characters/002.png"), mirror: true },
+    BodyPart { folder: "Elbow", file: "Elbow001.fbx", bone_names: &["Elbow_L"], texture: Some("Characters/002.png"), mirror: true },
 ];
 
 /// Find bone index by name (case-insensitive partial match).
@@ -569,6 +582,7 @@ fn find_bone_index(skeleton: &Skeleton, names: &[&str]) -> Option<u8> {
 /// Load and merge multiple body part meshes into a single skinned mesh.
 ///
 /// Each body part is assigned 100% weight to its designated bone(s).
+/// Vertices are transformed to align with the bone's rest position.
 pub fn merge_body_parts(
     models_dir: &Path,
     skeleton: &Skeleton,
@@ -577,6 +591,11 @@ pub fn merge_body_parts(
     let mut all_vertices: Vec<CharacterVertex> = Vec::new();
     let mut all_indices: Vec<u32> = Vec::new();
     let mut texture_paths: Vec<std::path::PathBuf> = Vec::new();
+    // Map texture path to layer index for deduplication
+    let mut texture_to_layer: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+
+    // Pre-compute bone world positions for alignment
+    let bone_world_positions = skeleton.get_bone_world_positions();
 
     for part in parts {
         let mesh_path = models_dir.join(part.folder).join(part.file);
@@ -600,33 +619,93 @@ pub fn merge_body_parts(
             }
         };
 
+        // Compute mesh centroid for alignment (account for mirroring)
+        let mut centroid = Vec3::ZERO;
+        for v in &model.vertices {
+            let mut pos = Vec3::from_array(v.position);
+            if part.mirror {
+                pos.x = -pos.x;
+            }
+            centroid += pos;
+        }
+        if !model.vertices.is_empty() {
+            centroid /= model.vertices.len() as f32;
+        }
+
+        // Get bone's world position from rest pose
+        let bone_world_pos = bone_world_positions.get(bone_idx as usize)
+            .copied()
+            .unwrap_or(Vec3::ZERO);
+
+        // Compute offset to align mesh centroid to bone position
+        let offset = bone_world_pos - centroid;
+
+        // Determine texture layer for this part (deduplicated)
+        let texture_layer = if let Some(tex) = part.texture {
+            let tex_key = tex.to_string();
+            if let Some(&existing_layer) = texture_to_layer.get(&tex_key) {
+                existing_layer
+            } else {
+                let new_layer = texture_paths.len() as u32;
+                texture_to_layer.insert(tex_key, new_layer);
+                texture_paths.push(std::path::PathBuf::from("assets/char/textures").join(tex));
+                new_layer
+            }
+        } else {
+            0 // Default to layer 0 if no texture specified
+        };
+
         let base_vertex = all_vertices.len() as u32;
         let vert_count = model.vertices.len();
 
-        // Add vertices with bone weight assignment
+        // Add vertices with bone weight assignment, position offset, and texture layer
         for mut v in model.vertices {
+            let mut pos = Vec3::from_array(v.position);
+            let mut normal = Vec3::from_array(v.normal);
+
+            // Mirror on X axis for left-side limbs
+            if part.mirror {
+                pos.x = -pos.x;
+                normal.x = -normal.x;
+            }
+
+            // Transform vertex to bone's rest position
+            pos += offset;
+            v.position = pos.to_array();
+            v.normal = normal.to_array();
+
             // Override bone weights: 100% to the assigned bone
             v.bone_indices = [bone_idx, 0, 0, 0];
             v.bone_weights = [255, 0, 0, 0];
+            v.texture_layer = texture_layer;
             all_vertices.push(v);
         }
 
         // Add indices (offset by base vertex)
-        for idx in model.indices {
-            all_indices.push(base_vertex + idx);
+        // For mirrored parts, reverse winding order (swap v1 and v2 of each triangle)
+        if part.mirror {
+            for chunk in model.indices.chunks(3) {
+                if chunk.len() == 3 {
+                    all_indices.push(base_vertex + chunk[0]);
+                    all_indices.push(base_vertex + chunk[2]);
+                    all_indices.push(base_vertex + chunk[1]);
+                }
+            }
+        } else {
+            for idx in model.indices {
+                all_indices.push(base_vertex + idx);
+            }
         }
 
-        // Track texture
-        if let Some(tex) = part.texture {
-            texture_paths.push(std::path::PathBuf::from("assets/char/textures").join(tex));
-        }
-
+        let mirror_str = if part.mirror { " [mirrored]" } else { "" };
         tracing::info!(
-            "Merged {}/{}: {} verts -> bone {} '{}'",
+            "Merged {}/{}: {} verts -> bone {} '{}'{} (offset: [{:.1}, {:.1}, {:.1}])",
             part.folder, part.file,
             vert_count,
             bone_idx,
             skeleton.bone_names.get(bone_idx as usize).unwrap_or(&"?".to_string()),
+            mirror_str,
+            offset.x, offset.y, offset.z,
         );
     }
 

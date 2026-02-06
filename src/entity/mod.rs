@@ -69,6 +69,18 @@ pub struct Skeleton {
 }
 
 impl Skeleton {
+    /// Get the world-space rest positions of all bones.
+    /// Uses inverse of inverse_bind_matrices for exact bind pose positions.
+    pub fn get_bone_world_positions(&self) -> Vec<Vec3> {
+        // inverse_bind = inverse(bone_world_transform_at_bind_time)
+        // So bone_world_transform = inverse(inverse_bind)
+        // And bone_world_pos = translation component of that
+        self.inverse_bind_matrices.iter().map(|inv_bind| {
+            let world_transform = inv_bind.inverse();
+            world_transform.w_axis.truncate()
+        }).collect()
+    }
+
     /// Compute world-space bone matrices in T-pose (identity skinning).
     /// Returns matrices suitable for GPU upload: global * inverse_bind.
     pub fn compute_tpose_matrices(&self) -> Vec<Mat4> {

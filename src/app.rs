@@ -961,23 +961,35 @@ impl App {
             }
         }
 
-        // Load character texture
-        let texture_path = std::path::Path::new("assets/char/textures/Characters/002.png");
-        if texture_path.exists() {
-            if let Err(e) = char_renderer.load_texture(&device, &queue, texture_path) {
-                tracing::warn!("Failed to load character texture: {}", e);
+        // Load character textures from merged mesh into texture array
+        if !merged.texture_paths.is_empty() {
+            // Filter to only existing paths
+            let valid_paths: Vec<_> = merged.texture_paths.iter()
+                .filter(|p| p.exists())
+                .cloned()
+                .collect();
+
+            if !valid_paths.is_empty() {
+                if let Err(e) = char_renderer.load_texture_array(&device, &queue, &valid_paths) {
+                    tracing::warn!("Failed to load character textures: {}", e);
+                    char_renderer.create_placeholder_texture(&device, &queue);
+                }
             } else {
-                tracing::info!("Loaded character texture: {}", texture_path.display());
+                tracing::warn!("No character textures found, using placeholder");
+                char_renderer.create_placeholder_texture(&device, &queue);
             }
+        } else {
+            tracing::warn!("No texture paths from merged mesh, using placeholder");
+            char_renderer.create_placeholder_texture(&device, &queue);
         }
 
-        // Spawn entity
+        // Spawn entity (2x smaller, 1 block lower, 1 block further away, facing player)
         let key = entity_manager.spawn(
             EntityType::Npc,
             Transform {
-                position: glam::Vec3::ZERO,
-                rotation: glam::Quat::IDENTITY,
-                scale: 0.2,
+                position: glam::Vec3::new(0.0, -1.0, 1.0),
+                rotation: glam::Quat::from_rotation_y(std::f32::consts::PI), // 180° to face player
+                scale: 0.1,
             },
         );
 
