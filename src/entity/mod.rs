@@ -258,6 +258,8 @@ pub struct AnimationComponent {
     blend_factor: f64,
     /// Duration of the crossfade transition in seconds.
     blend_duration: f64,
+    /// Whether the current clip should loop. If false, clamps at the last frame.
+    pub looping: bool,
 }
 
 impl AnimationComponent {
@@ -273,6 +275,7 @@ impl AnimationComponent {
             prev_playback_time: 0.0,
             blend_factor: 1.0,
             blend_duration: 0.2,
+            looping: true,
         }
     }
 
@@ -303,9 +306,14 @@ impl AnimationComponent {
 
         let clip = &clips[self.current_clip];
 
-        // Wrap playback time to prevent float precision drift on long sessions
+        // Wrap or clamp playback time depending on looping mode
         if clip.duration > 0.0 {
-            self.playback_time = self.playback_time % clip.duration;
+            if self.looping {
+                self.playback_time = self.playback_time % clip.duration;
+            } else {
+                // Clamp at last frame (hold final pose)
+                self.playback_time = self.playback_time.min(clip.duration - 0.001);
+            }
         }
 
         // Advance blend factor toward 1.0 (fully current clip)

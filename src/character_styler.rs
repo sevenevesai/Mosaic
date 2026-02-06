@@ -179,11 +179,11 @@ impl Default for CharacterStyle {
             head_texture: 1,
             hair_model: 1,
             hair_color: 0,
-            skin_texture: 20,
-            chest_model: 20,
-            root_model: 20,
-            hip_model: 20,
-            shoulder_model: 20,
+            skin_texture: 10,
+            chest_model: 10,
+            root_model: 10,
+            hip_model: 10,
+            shoulder_model: 10,
             accessory_model: 0,
         }
     }

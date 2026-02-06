@@ -1368,12 +1368,13 @@ impl App {
                         }
                         anim.speed = 1.0;
                     } else {
-                        let (target_clip, target_speed, blend_time) = match movement_state {
-                            MovementState::Idle => (0, 1.0, 0.25),       // Idle - smooth blend in
-                            MovementState::Walking => (1.min(clip_count - 1), 1.0, 0.2),  // Move
-                            MovementState::Sprinting => (1.min(clip_count - 1), 1.5, 0.15), // Move faster
-                            MovementState::Airborne => (3.min(clip_count - 1), 1.0, 0.1),  // Jump - fast blend
-                            MovementState::Swimming => (1.min(clip_count - 1), 0.8, 0.3),  // Move slow
+                        let (target_clip, target_speed, blend_time, looping) = match movement_state {
+                            MovementState::Idle => (0, 1.0, 0.2, true),
+                            MovementState::Walking => (1.min(clip_count - 1), 1.0, 0.2, true),
+                            MovementState::Sprinting => (1.min(clip_count - 1), 1.5, 0.15, true),
+                            MovementState::Jumping => (3.min(clip_count - 1), 1.0, 0.1, false),  // Play once, clamp at peak
+                            MovementState::Falling => (3.min(clip_count - 1), 0.3, 0.15, false),  // Slow to near-freeze, clamp
+                            MovementState::Swimming => (1.min(clip_count - 1), 0.8, 0.3, true),
                         };
 
                         // Crossfade to new clip if changed
@@ -1381,6 +1382,7 @@ impl App {
                             anim.transition_to(target_clip, blend_time);
                         }
                         anim.speed = target_speed;
+                        anim.looping = looping;
                     }
                 }
 

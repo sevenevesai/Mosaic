@@ -51,7 +51,8 @@ pub enum MovementState {
     Idle,
     Walking,
     Sprinting,
-    Airborne,
+    Jumping,   // Rising (velocity.y > 0)
+    Falling,   // Descending or at apex (velocity.y <= 0)
     Swimming,
 }
 
@@ -284,7 +285,11 @@ impl Player {
             return MovementState::Swimming;
         }
         if !self.on_ground && !self.fly_mode {
-            return MovementState::Airborne;
+            if self.velocity.y > 0.5 {
+                return MovementState::Jumping;
+            } else {
+                return MovementState::Falling;
+            }
         }
         let horiz_speed = self.horizontal_speed();
         if horiz_speed > 0.5 {
@@ -947,6 +952,16 @@ impl Player {
             self.feet_pos.y -= delta.y;
             if self.velocity.y < 0.0 {
                 self.on_ground = true;
+                // Binary search to find exact ground contact point
+                // Without this, fast falls leave the player floating above ground
+                let mut step = delta.y * 0.5;
+                for _ in 0..8 {
+                    self.feet_pos.y += step;
+                    if self.check_collision(world) {
+                        self.feet_pos.y -= step;
+                    }
+                    step *= 0.5;
+                }
             }
             self.velocity.y = 0.0;
         } else {
