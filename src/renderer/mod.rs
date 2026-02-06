@@ -3453,8 +3453,9 @@ impl Renderer {
             self.gpu_profiler.write_timestamp(&mut encoder, idx);
         }
 
-        // === MENU BLUR PASS (if menu is open, blur scene before UI) ===
-        if menu_data.is_some() {
+        // === MENU BLUR PASS (if menu or styler is open, blur scene before UI) ===
+        let styler_active = debug_metrics.styler_overlay.is_some();
+        if menu_data.is_some() || styler_active {
             // Pass 1: Blur scene_texture → menu_blur_texture
             {
                 let mut blur_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -3524,8 +3525,8 @@ impl Renderer {
                 occlusion_query_set: None,
             });
 
-            // Render crosshair (UI, no depth) - hide when inventory or menu is open
-            if !inventory.is_open && menu_data.is_none() {
+            // Render crosshair (UI, no depth) - hide when inventory, menu, or styler is open
+            if !inventory.is_open && menu_data.is_none() && !styler_active {
                 render_pass.set_pipeline(&self.ui_pipeline);
                 render_pass.set_vertex_buffer(0, self.crosshair_vertex_buffer.slice(..));
                 render_pass.draw(0..12, 0..1);

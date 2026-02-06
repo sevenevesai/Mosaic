@@ -590,14 +590,14 @@ pub fn load_skeleton_from_fbx(path: &Path) -> Result<Skeleton, String> {
 /// The body part FBX files and the skeleton FBX often use different unit scales.
 /// We detect this by comparing the FBX unit_meters settings from both files.
 /// Fallback: measure the vertex height range vs skeleton bone height range.
-fn compute_mesh_to_skeleton_scale(
+fn compute_mesh_to_skeleton_scale<P: BodyPartInfo>(
     models_dir: &Path,
     skeleton: &Skeleton,
-    parts: &[BodyPart],
+    parts: &[P],
 ) -> f32 {
     // Strategy 1: Compare FBX scene unit_meters between body part and skeleton files.
     if let Some(part) = parts.first() {
-        let mesh_path = models_dir.join(part.folder).join(part.file);
+        let mesh_path = models_dir.join(part.folder()).join(part.file());
         if let Some(path_str) = mesh_path.to_str() {
             if let Ok(scene) = ufbx::load_file(path_str, ufbx::LoadOpts::default()) {
                 let mesh_unit = scene.settings.unit_meters as f32;
@@ -651,9 +651,9 @@ fn compute_mesh_to_skeleton_scale(
     let mut mesh_min_y = f32::MAX;
     let mut mesh_max_y = f32::MIN;
     for part in parts {
-        let key = format!("{}/{}", part.folder, part.file);
+        let key = format!("{}/{}", part.folder(), part.file());
         if !seen_files.insert(key) { continue; }
-        let mesh_path = models_dir.join(part.folder).join(part.file);
+        let mesh_path = models_dir.join(part.folder()).join(part.file());
         if !mesh_path.exists() { continue; }
         if let Ok(model) = load_fbx(&mesh_path) {
             for v in &model.vertices {
@@ -687,6 +687,15 @@ pub struct MergedCharacterMesh {
     pub texture_paths: Vec<std::path::PathBuf>,
 }
 
+/// Trait for body part types (static or dynamically constructed).
+pub trait BodyPartInfo {
+    fn folder(&self) -> &str;
+    fn file(&self) -> &str;
+    fn bone_name_strs(&self) -> Vec<&str>;
+    fn texture_str(&self) -> Option<&str>;
+    fn is_mirror(&self) -> bool;
+}
+
 /// Body part definition for mesh merging.
 pub struct BodyPart {
     /// Folder name under assets/char/models/ (e.g., "Root", "Chest")
@@ -699,6 +708,22 @@ pub struct BodyPart {
     pub texture: Option<&'static str>,
     /// Mirror this part on X axis (for left-side limbs)
     pub mirror: bool,
+}
+
+impl BodyPartInfo for BodyPart {
+    fn folder(&self) -> &str { self.folder }
+    fn file(&self) -> &str { self.file }
+    fn bone_name_strs(&self) -> Vec<&str> { self.bone_names.to_vec() }
+    fn texture_str(&self) -> Option<&str> { self.texture }
+    fn is_mirror(&self) -> bool { self.mirror }
+}
+
+impl BodyPartInfo for crate::character_styler::OwnedBodyPart {
+    fn folder(&self) -> &str { &self.folder }
+    fn file(&self) -> &str { &self.file }
+    fn bone_name_strs(&self) -> Vec<&str> { self.bone_names.iter().map(|s| s.as_str()).collect() }
+    fn texture_str(&self) -> Option<&str> { self.texture.as_deref() }
+    fn is_mirror(&self) -> bool { self.mirror }
 }
 
 /// Per-body-part position/scale adjustment for the in-game editor.
@@ -801,10 +826,10 @@ fn find_bone_index(skeleton: &Skeleton, names: &[&str]) -> Option<u8> {
 ///
 /// If `adjustments` is provided, per-part offset and scale tweaks are applied.
 /// Adjustments index 0..8 map to the 9 unique parts; mirrored parts (9..12) auto-mirror.
-pub fn merge_body_parts(
+pub fn merge_body_parts<P: BodyPartInfo>(
     models_dir: &Path,
     skeleton: &Skeleton,
-    parts: &[BodyPart],
+    parts: &[P],
     adjustments: Option<&[BodyPartAdjustment]>,
 ) -> Result<MergedCharacterMesh, String> {
     let mut all_vertices: Vec<CharacterVertex> = Vec::new();
@@ -836,15 +861,17 @@ pub fn merge_body_parts(
             .cloned()
             .unwrap_or_default();
 
-        let mesh_path = models_dir.join(part.folder).join(part.file);
+        let mesh_path = models_dir.join(part.folder()).join(part.file());
         if !mesh_path.exists() {
             tracing::warn!("Body part mesh not found: {}", mesh_path.display());
             continue;
         }
 
         // Find the bone to bind this part to
-        let bone_idx = find_bone_index(skeleton, part.bone_names).unwrap_or_else(|| {
-            tracing::warn!("No bone match for {}, using bone 0", part.folder);
+        let bone_name_refs = part.bone_name_strs();
+        let bone_name_slices: Vec<&str> = bone_name_refs.iter().copied().collect();
+        let bone_idx = find_bone_index(skeleton, &bone_name_slices).unwrap_or_else(|| {
+            tracing::warn!("No bone match for {}, using bone 0", part.folder());
             0
         });
 
@@ -858,7 +885,7 @@ pub fn merge_body_parts(
         };
 
         // Determine texture layer for this part (deduplicated)
-        let texture_layer = if let Some(tex) = part.texture {
+        let texture_layer = if let Some(tex) = part.texture_str() {
             let tex_key = tex.to_string();
             if let Some(&existing_layer) = texture_to_layer.get(&tex_key) {
                 existing_layer
@@ -892,7 +919,7 @@ pub fn merge_body_parts(
             .unwrap_or(Mat4::IDENTITY);
         let bone_pos = bone_bind_transform.w_axis.truncate();
 
-        let effective_mesh_center = if part.mirror {
+        let effective_mesh_center = if part.is_mirror() {
             Vec3::new(-mesh_center.x, mesh_center.y, mesh_center.z)
         } else {
             mesh_center
@@ -900,7 +927,7 @@ pub fn merge_body_parts(
 
         tracing::info!(
             "  {} center=[{:.1},{:.1},{:.1}] bone=[{:.1},{:.1},{:.1}] scale={:.3}",
-            part.file,
+            part.file(),
             effective_mesh_center.x, effective_mesh_center.y, effective_mesh_center.z,
             bone_pos.x, bone_pos.y, bone_pos.z,
             mesh_to_skeleton_scale,
@@ -919,7 +946,7 @@ pub fn merge_body_parts(
             let mut normal = Vec3::from_array(v.normal);
 
             // Mirror on X axis for right-side limbs (mirrored parts)
-            if part.mirror {
+            if part.is_mirror() {
                 pos.x = -pos.x;
                 normal.x = -normal.x;
             }
@@ -946,7 +973,7 @@ pub fn merge_body_parts(
 
         // Add indices (offset by base vertex)
         // For mirrored parts, reverse winding order (swap v1 and v2 of each triangle)
-        if part.mirror {
+        if part.is_mirror() {
             for chunk in model.indices.chunks(3) {
                 if chunk.len() == 3 {
                     all_indices.push(base_vertex + chunk[0]);
@@ -960,10 +987,10 @@ pub fn merge_body_parts(
             }
         }
 
-        let mirror_str = if part.mirror { " [mirrored]" } else { "" };
+        let mirror_str = if part.is_mirror() { " [mirrored]" } else { "" };
         tracing::info!(
             "Merged {}/{}: {} verts -> bone {} '{}'{} (bone pos: [{:.1}, {:.1}, {:.1}])",
-            part.folder, part.file,
+            part.folder(), part.file(),
             vert_count,
             bone_idx,
             skeleton.bone_names.get(bone_idx as usize).unwrap_or(&"?".to_string()),

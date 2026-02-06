@@ -106,6 +106,9 @@ pub struct DebugMetrics {
 
     // Body part editor overlay lines (rendered on right side when non-empty)
     pub body_part_editor_lines: Vec<String>,
+
+    // Character styler overlay (when open)
+    pub styler_overlay: Option<crate::character_styler::StylerOverlay>,
 }
 
 /// Debug overlay rendering system
@@ -801,6 +804,150 @@ impl DebugOverlay {
             if !menu_vertices.is_empty() {
                 let vertex_count = menu_vertices.len().min(self.max_chars * 6);
                 queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&menu_vertices[..vertex_count]));
+
+                render_pass.set_pipeline(&self.pipeline);
+                render_pass.set_bind_group(0, &self.font_bind_group, &[]);
+                render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+                render_pass.draw(0..vertex_count as u32, 0..1);
+            }
+        }
+
+        // Render character styler overlay
+        if let Some(ref styler) = metrics.styler_overlay {
+            // Use dimmer for background darkening
+            if let Some(dimmer) = dimmer_pipeline {
+                render_pass.set_pipeline(dimmer);
+                render_pass.draw(0..3, 0..1);
+            }
+
+            let mut styler_verts = Vec::new();
+            let line_height = char_h * 1.4;
+
+            // Title: "CHARACTER" centered at top
+            {
+                let title = "CHARACTER";
+                let title_w = title.len() as f32 * char_w;
+                let mut x = -title_w / 2.0;
+                let y = 0.90;
+                for ch in title.chars() {
+                    if let Some((u0, v0, u1, v1)) = self.char_uvs(ch) {
+                        styler_verts.push(TextVertex { position: [x, y - char_h], uv: [u0, v1] });
+                        styler_verts.push(TextVertex { position: [x + char_w, y - char_h], uv: [u1, v1] });
+                        styler_verts.push(TextVertex { position: [x + char_w, y], uv: [u1, v0] });
+                        styler_verts.push(TextVertex { position: [x, y - char_h], uv: [u0, v1] });
+                        styler_verts.push(TextVertex { position: [x + char_w, y], uv: [u1, v0] });
+                        styler_verts.push(TextVertex { position: [x, y], uv: [u0, v0] });
+                    }
+                    x += char_w;
+                }
+            }
+
+            // Category tabs (left side, vertically stacked)
+            {
+                let tab_x_start = -0.92; // Left edge
+                let mut y = 0.70;
+                for (label, is_selected) in &styler.tabs {
+                    // Selected tab gets a marker
+                    let display = if *is_selected {
+                        format!("> {} <", label)
+                    } else {
+                        format!("  {}  ", label)
+                    };
+
+                    let mut x = tab_x_start;
+                    for ch in display.chars() {
+                        if let Some((u0, v0, u1, v1)) = self.char_uvs(ch) {
+                            styler_verts.push(TextVertex { position: [x, y - char_h], uv: [u0, v1] });
+                            styler_verts.push(TextVertex { position: [x + char_w, y - char_h], uv: [u1, v1] });
+                            styler_verts.push(TextVertex { position: [x + char_w, y], uv: [u1, v0] });
+                            styler_verts.push(TextVertex { position: [x, y - char_h], uv: [u0, v1] });
+                            styler_verts.push(TextVertex { position: [x + char_w, y], uv: [u1, v0] });
+                            styler_verts.push(TextVertex { position: [x, y], uv: [u0, v0] });
+                        }
+                        x += char_w;
+                    }
+                    y -= line_height;
+                }
+            }
+
+            // Primary selection row (centered, lower-mid area)
+            {
+                let line = &styler.primary_label;
+                let line_w = line.len() as f32 * char_w;
+                let mut x = -line_w / 2.0;
+                let y = -0.40;
+                for ch in line.chars() {
+                    if let Some((u0, v0, u1, v1)) = self.char_uvs(ch) {
+                        styler_verts.push(TextVertex { position: [x, y - char_h], uv: [u0, v1] });
+                        styler_verts.push(TextVertex { position: [x + char_w, y - char_h], uv: [u1, v1] });
+                        styler_verts.push(TextVertex { position: [x + char_w, y], uv: [u1, v0] });
+                        styler_verts.push(TextVertex { position: [x, y - char_h], uv: [u0, v1] });
+                        styler_verts.push(TextVertex { position: [x + char_w, y], uv: [u1, v0] });
+                        styler_verts.push(TextVertex { position: [x, y], uv: [u0, v0] });
+                    }
+                    x += char_w;
+                }
+            }
+
+            // Secondary selection row (if applicable, e.g., hair color)
+            if let Some(ref sec_label) = styler.secondary_label {
+                let line_w = sec_label.len() as f32 * char_w;
+                let mut x = -line_w / 2.0;
+                let y = -0.50;
+                for ch in sec_label.chars() {
+                    if let Some((u0, v0, u1, v1)) = self.char_uvs(ch) {
+                        styler_verts.push(TextVertex { position: [x, y - char_h], uv: [u0, v1] });
+                        styler_verts.push(TextVertex { position: [x + char_w, y - char_h], uv: [u1, v1] });
+                        styler_verts.push(TextVertex { position: [x + char_w, y], uv: [u1, v0] });
+                        styler_verts.push(TextVertex { position: [x, y - char_h], uv: [u0, v1] });
+                        styler_verts.push(TextVertex { position: [x + char_w, y], uv: [u1, v0] });
+                        styler_verts.push(TextVertex { position: [x, y], uv: [u0, v0] });
+                    }
+                    x += char_w;
+                }
+            }
+
+            // "Done" button (centered below selection)
+            {
+                let done = "[ DONE ]";
+                let done_w = done.len() as f32 * char_w;
+                let mut x = -done_w / 2.0;
+                let y = -0.65;
+                for ch in done.chars() {
+                    if let Some((u0, v0, u1, v1)) = self.char_uvs(ch) {
+                        styler_verts.push(TextVertex { position: [x, y - char_h], uv: [u0, v1] });
+                        styler_verts.push(TextVertex { position: [x + char_w, y - char_h], uv: [u1, v1] });
+                        styler_verts.push(TextVertex { position: [x + char_w, y], uv: [u1, v0] });
+                        styler_verts.push(TextVertex { position: [x, y - char_h], uv: [u0, v1] });
+                        styler_verts.push(TextVertex { position: [x + char_w, y], uv: [u1, v0] });
+                        styler_verts.push(TextVertex { position: [x, y], uv: [u0, v0] });
+                    }
+                    x += char_w;
+                }
+            }
+
+            // Keyboard hint
+            {
+                let hint = "Arrows=nav  [/]=color  Drag=rotate  ESC=cancel";
+                let hint_w = hint.len() as f32 * char_w;
+                let mut x = -hint_w / 2.0;
+                let y = -0.78;
+                for ch in hint.chars() {
+                    if let Some((u0, v0, u1, v1)) = self.char_uvs(ch) {
+                        styler_verts.push(TextVertex { position: [x, y - char_h], uv: [u0, v1] });
+                        styler_verts.push(TextVertex { position: [x + char_w, y - char_h], uv: [u1, v1] });
+                        styler_verts.push(TextVertex { position: [x + char_w, y], uv: [u1, v0] });
+                        styler_verts.push(TextVertex { position: [x, y - char_h], uv: [u0, v1] });
+                        styler_verts.push(TextVertex { position: [x + char_w, y], uv: [u1, v0] });
+                        styler_verts.push(TextVertex { position: [x, y], uv: [u0, v0] });
+                    }
+                    x += char_w;
+                }
+            }
+
+            if !styler_verts.is_empty() {
+                let vertex_count = styler_verts.len().min(self.max_chars * 6);
+                queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&styler_verts[..vertex_count]));
 
                 render_pass.set_pipeline(&self.pipeline);
                 render_pass.set_bind_group(0, &self.font_bind_group, &[]);

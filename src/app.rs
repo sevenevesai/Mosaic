@@ -16,7 +16,8 @@ use crate::inventory::Item;
 use crate::player::{Player, PlayerData, BlockInteraction};
 use crate::renderer::{DisplayMode, Renderer, DebugMetrics};
 use crate::settings::Settings;
-use crate::settings_menu::SettingsMenu;
+use crate::settings_menu::{SettingsMenu, MenuAction};
+use crate::character_styler::{StylerUI, AssetCatalog, CharacterStyle};
 use crate::utils::profiler::FrameProfiler;
 use crate::entity::{EntityManager, EntityType, Transform, AnimationComponent};
 use crate::entity::loader::{BodyPartAdjustment, BODY_PART_NAMES, default_adjustments};
@@ -129,6 +130,8 @@ pub struct App {
     lod_log_counter: u32,
     /// Body part position/scale editor
     body_part_editor: BodyPartEditor,
+    /// Character appearance styler GUI
+    character_styler: StylerUI,
 }
 
 impl App {
@@ -215,9 +218,13 @@ impl App {
             tracing::warn!("Failed to load item entities: {}", e);
         }
 
+        // Load character style (or use default)
+        let style_path = save_dir.join("character.cfg");
+        let character_style = CharacterStyle::load(&style_path).unwrap_or_default();
+
         // Initialize entity manager and load player character
         let mut entity_manager = EntityManager::new();
-        Self::load_player_character(&mut entity_manager, &mut renderer);
+        Self::load_player_character(&mut entity_manager, &mut renderer, &character_style);
 
         // Initialize chest manager
         // TODO: Load chests from disk
@@ -240,6 +247,12 @@ impl App {
             quit_requested: false,
             lod_log_counter: 0,
             body_part_editor: BodyPartEditor::new(),
+            character_styler: {
+                let mut styler = StylerUI::new(AssetCatalog::scan());
+                styler.style = character_style;
+                styler.saved_style = styler.style.clone();
+                styler
+            },
         };
 
         tracing::info!("Engine initialized successfully");
@@ -331,11 +344,29 @@ impl App {
                     .camera
                     .update_aspect(new_size.width as f32 / new_size.height as f32);
                 self.settings_menu.update_screen_size(new_size.width as f32, new_size.height as f32);
+                self.character_styler.update_screen_size(new_size.width as f32, new_size.height as f32);
             }
 
             WindowEvent::KeyboardInput { event, .. } => {
                 if let PhysicalKey::Code(key_code) = event.physical_key {
                     let pressed = event.state == ElementState::Pressed;
+
+                    // Character styler gets first priority for input
+                    if self.character_styler.open {
+                        if key_code == KeyCode::Escape && pressed {
+                            // ESC closes styler, reverts changes
+                            let needs_remesh = self.character_styler.close_revert();
+                            if needs_remesh {
+                                self.remesh_character();
+                            }
+                            // Re-open the main menu
+                            self.settings_menu.is_open = true;
+                            self.settings_menu.on_open();
+                            return;
+                        }
+                        self.character_styler.handle_key(key_code, pressed);
+                        return;
+                    }
 
                     match key_code {
                         KeyCode::Escape if pressed => {
@@ -516,12 +547,44 @@ impl App {
 
             WindowEvent::MouseInput { state, button, .. } => {
                 use winit::event::MouseButton;
+                if self.character_styler.open {
+                    if button == MouseButton::Left {
+                        if state == ElementState::Pressed {
+                            // Check for Done button click
+                            let mx = self.character_styler.last_mouse_x;
+                            let my = self.character_styler.last_mouse_y;
+                            if self.character_styler.was_done_clicked(mx, my) {
+                                // Save style and close
+                                self.character_styler.close_save();
+                                let style_path = std::path::PathBuf::from("saves/world1/character.cfg");
+                                if let Err(e) = self.character_styler.style.save(&style_path) {
+                                    tracing::warn!("Failed to save character style: {}", e);
+                                }
+                                // Re-open main menu
+                                self.settings_menu.is_open = true;
+                                self.settings_menu.on_open();
+                            } else {
+                                self.character_styler.handle_mouse_press(mx, my);
+                            }
+                        } else {
+                            self.character_styler.handle_mouse_release();
+                        }
+                    }
+                    return;
+                }
                 if self.settings_menu.is_open {
                     // Handle menu clicks
                     if state == ElementState::Pressed && button == MouseButton::Left {
-                        let quit = self.settings_menu.click(&mut self.renderer);
-                        if quit {
-                            self.quit_requested = true;
+                        let action = self.settings_menu.click(&mut self.renderer);
+                        match action {
+                            MenuAction::Quit => {
+                                self.quit_requested = true;
+                            }
+                            MenuAction::OpenCharacterStyler => {
+                                self.settings_menu.is_open = false;
+                                self.character_styler.open();
+                            }
+                            MenuAction::None => {}
                         }
                         // Save settings immediately after each toggle
                         let settings = self.renderer.collect_settings((self.windowed_size.width, self.windowed_size.height));
@@ -577,6 +640,9 @@ impl App {
 
             WindowEvent::CursorMoved { position, .. } => {
                 let (x, y) = (position.x as f32, position.y as f32);
+                if self.character_styler.open {
+                    self.character_styler.handle_mouse_move(x, y);
+                }
                 if self.settings_menu.is_open {
                     self.settings_menu.update_mouse(x, y);
                 }
@@ -991,11 +1057,21 @@ impl App {
             pass_times: render_stats.pass_times.clone(),
             // Body part editor overlay
             body_part_editor_lines: self.body_part_editor.overlay_lines(),
+            // Character styler overlay
+            styler_overlay: if self.character_styler.open {
+                Some(self.character_styler.overlay_data())
+            } else {
+                None
+            },
         };
 
-        // Re-merge character mesh if body part editor changed values
+        // Re-merge character mesh if body part editor or styler changed values
         if self.body_part_editor.dirty {
             self.body_part_editor.dirty = false;
+            self.remesh_character();
+        }
+        if self.character_styler.dirty {
+            self.character_styler.dirty = false;
             self.remesh_character();
         }
 
@@ -1024,7 +1100,7 @@ impl App {
     }
 
     /// Load the player character model from assets.
-    fn load_player_character(entity_manager: &mut EntityManager, renderer: &mut Renderer) {
+    fn load_player_character(entity_manager: &mut EntityManager, renderer: &mut Renderer, style: &CharacterStyle) {
         use crate::entity::loader;
         use crate::entity::RenderComponent;
         use std::sync::Arc;
@@ -1062,7 +1138,8 @@ impl App {
         // Step 2: Merge body part meshes into a single skinned mesh
         let models_dir = std::path::Path::new("assets/char/models");
         let defaults = loader::default_adjustments();
-        let merged = match loader::merge_body_parts(models_dir, &skeleton, loader::HUMANOID_BODY_PARTS, Some(&defaults)) {
+        let body_parts = style.build_body_parts();
+        let merged = match loader::merge_body_parts(models_dir, &skeleton, &body_parts, Some(&defaults)) {
             Ok(m) => m,
             Err(e) => {
                 tracing::warn!("Failed to merge body parts: {}", e);
@@ -1188,7 +1265,8 @@ impl App {
         }
     }
 
-    /// Re-merge character body parts with current editor adjustments and re-upload to GPU.
+    /// Re-merge character body parts with current adjustments and re-upload to GPU.
+    /// Uses the character styler's current style for body part selection.
     fn remesh_character(&mut self) {
         use crate::entity::loader;
 
@@ -1198,10 +1276,11 @@ impl App {
         let skeleton = &self.entity_manager.skeletons[0];
         let models_dir = std::path::Path::new("assets/char/models");
 
+        let body_parts = self.character_styler.style.build_body_parts();
         let merged = match loader::merge_body_parts(
             models_dir,
             skeleton,
-            loader::HUMANOID_BODY_PARTS,
+            &body_parts,
             Some(&self.body_part_editor.adjustments),
         ) {
             Ok(m) => m,
@@ -1213,8 +1292,29 @@ impl App {
 
         // Re-upload mesh to GPU (replace slot 0)
         let device = self.renderer.device().clone();
+        let queue = self.renderer.queue().clone();
         let char_renderer = self.renderer.character_renderer_mut();
         char_renderer.replace_mesh(&device, 0, &merged.vertices, &merged.indices);
+
+        // Update render component index count
+        if let Some(player_key) = self.entity_manager.player_entity {
+            if let Some(render) = self.entity_manager.render.get_mut(player_key) {
+                render.index_count = merged.indices.len() as u32;
+            }
+        }
+
+        // Reload textures if they changed
+        if !merged.texture_paths.is_empty() {
+            let valid_paths: Vec<_> = merged.texture_paths.iter()
+                .filter(|p| p.exists())
+                .cloned()
+                .collect();
+            if !valid_paths.is_empty() {
+                if let Err(e) = char_renderer.load_texture_array(&device, &queue, &valid_paths) {
+                    tracing::warn!("Failed to reload character textures: {}", e);
+                }
+            }
+        }
     }
 
     /// Update character entity rendering data each frame.
@@ -1227,11 +1327,31 @@ impl App {
         let movement_state = self.player.movement_state();
         let is_third_person = self.player.is_third_person();
 
-        // Show/hide player entity based on camera mode
+        let styler_open = self.character_styler.open;
+
+        // Show/hide player entity based on camera mode (always visible in styler)
         if let Some(player_key) = self.entity_manager.player_entity {
             if let Some(base) = self.entity_manager.entities.get_mut(player_key) {
-                base.active = is_third_person;
+                base.active = is_third_person || styler_open;
             }
+        }
+
+        // When styler is open, override camera to orbit around player
+        if styler_open {
+            let orbit_yaw = self.character_styler.orbit_yaw;
+            let orbit_distance = 5.0_f32;
+            let orbit_height = 1.0_f32;
+            let center = player_feet + glam::Vec3::new(0.0, 0.9, 0.0); // Chest height
+
+            let cam_x = center.x + orbit_distance * orbit_yaw.sin();
+            let cam_z = center.z + orbit_distance * orbit_yaw.cos();
+            let cam_y = center.y + orbit_height;
+
+            self.player.camera.position = glam::Vec3::new(cam_x, cam_y, cam_z);
+            // Look at the character center
+            let look_dir = (center - self.player.camera.position).normalize();
+            self.player.camera.yaw = look_dir.x.atan2(look_dir.z);
+            self.player.camera.pitch = (-look_dir.y).asin();
         }
 
         // Select animation clip and speed based on player movement state
@@ -1239,25 +1359,38 @@ impl App {
         if clip_count > 0 {
             if let Some(player_key) = self.entity_manager.player_entity {
                 if let Some(anim) = self.entity_manager.animations.get_mut(player_key) {
-                    let (target_clip, target_speed, blend_time) = match movement_state {
-                        MovementState::Idle => (0, 1.0, 0.25),       // Idle - smooth blend in
-                        MovementState::Walking => (1.min(clip_count - 1), 1.0, 0.2),  // Move
-                        MovementState::Sprinting => (1.min(clip_count - 1), 1.5, 0.15), // Move faster
-                        MovementState::Airborne => (3.min(clip_count - 1), 1.0, 0.1),  // Jump - fast blend
-                        MovementState::Swimming => (1.min(clip_count - 1), 0.8, 0.3),  // Move slow
-                    };
+                    if styler_open {
+                        // In styler: idle animation
+                        if anim.current_clip != 0 {
+                            anim.transition_to(0, 0.3);
+                        }
+                        anim.speed = 1.0;
+                    } else {
+                        let (target_clip, target_speed, blend_time) = match movement_state {
+                            MovementState::Idle => (0, 1.0, 0.25),       // Idle - smooth blend in
+                            MovementState::Walking => (1.min(clip_count - 1), 1.0, 0.2),  // Move
+                            MovementState::Sprinting => (1.min(clip_count - 1), 1.5, 0.15), // Move faster
+                            MovementState::Airborne => (3.min(clip_count - 1), 1.0, 0.1),  // Jump - fast blend
+                            MovementState::Swimming => (1.min(clip_count - 1), 0.8, 0.3),  // Move slow
+                        };
 
-                    // Crossfade to new clip if changed
-                    if anim.current_clip != target_clip {
-                        anim.transition_to(target_clip, blend_time);
+                        // Crossfade to new clip if changed
+                        if anim.current_clip != target_clip {
+                            anim.transition_to(target_clip, blend_time);
+                        }
+                        anim.speed = target_speed;
                     }
-                    anim.speed = target_speed;
                 }
 
                 // Update player entity transform from Player position
                 if let Some(transform) = self.entity_manager.transforms.get_mut(player_key) {
                     transform.position = player_feet;
-                    transform.rotation = glam::Quat::from_rotation_y(player_facing);
+                    if styler_open {
+                        // In styler: face toward camera
+                        transform.rotation = glam::Quat::from_rotation_y(self.character_styler.orbit_yaw);
+                    } else {
+                        transform.rotation = glam::Quat::from_rotation_y(player_facing);
+                    }
                 }
             }
         }

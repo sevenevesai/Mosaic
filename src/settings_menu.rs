@@ -18,6 +18,7 @@ pub enum MenuMode {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MainMenuButton {
     Settings,
+    Character,
     SaveAndQuit,
 }
 
@@ -25,13 +26,22 @@ impl MainMenuButton {
     pub fn label(&self) -> &'static str {
         match self {
             MainMenuButton::Settings => "SETTINGS",
+            MainMenuButton::Character => "CHARACTER",
             MainMenuButton::SaveAndQuit => "SAVE & QUIT",
         }
     }
 
     pub fn all() -> &'static [MainMenuButton] {
-        &[MainMenuButton::Settings, MainMenuButton::SaveAndQuit]
+        &[MainMenuButton::Settings, MainMenuButton::Character, MainMenuButton::SaveAndQuit]
     }
+}
+
+/// Result of a menu click action.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MenuAction {
+    None,
+    Quit,
+    OpenCharacterStyler,
 }
 
 /// Data returned by generate_lines for rendering
@@ -971,7 +981,7 @@ impl SettingsMenu {
     }
 
     /// Handle a click event. Returns true if quit was requested.
-    pub fn click(&mut self, renderer: &mut Renderer) -> bool {
+    pub fn click(&mut self, renderer: &mut Renderer) -> MenuAction {
         let region = self.hit_test(self.mouse_x, self.mouse_y);
 
         match region {
@@ -983,8 +993,11 @@ impl SettingsMenu {
                             self.menu_mode = MenuMode::Settings;
                             self.recalculate_layout();
                         }
+                        MainMenuButton::Character => {
+                            return MenuAction::OpenCharacterStyler;
+                        }
                         MainMenuButton::SaveAndQuit => {
-                            return true; // Signal quit
+                            return MenuAction::Quit;
                         }
                     }
                 }
@@ -1028,7 +1041,7 @@ impl SettingsMenu {
             }
             ClickRegion::Outside | ClickRegion::None => {}
         }
-        false
+        MenuAction::None
     }
 
     /// Handle scroll wheel input. Returns true if scroll was consumed.

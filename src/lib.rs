@@ -4,6 +4,7 @@
 
 pub mod app;
 pub mod audio;
+pub mod character_styler;
 pub mod entity;
 pub mod inventory;
 pub mod renderer;
