@@ -19,7 +19,92 @@ use crate::settings::Settings;
 use crate::settings_menu::SettingsMenu;
 use crate::utils::profiler::FrameProfiler;
 use crate::entity::{EntityManager, EntityType, Transform, AnimationComponent};
+use crate::entity::loader::{BodyPartAdjustment, BODY_PART_NAMES, default_adjustments};
 use crate::world::{WorldManager, ChunkPos, ItemEntityManager, ChestManager, Block, MESH_STATS, save_items, load_items};
+
+/// In-game body part position/scale editor.
+/// Toggle with F4. Adjusts per-part offsets and scale, re-merges mesh live.
+struct BodyPartEditor {
+    active: bool,
+    selected: usize, // 0..8 index into BODY_PART_NAMES
+    adjustments: Vec<BodyPartAdjustment>, // 13 entries (9 unique + 4 right-side)
+    dirty: bool, // needs re-merge
+    shift_held: bool, // for fine adjustment
+}
+
+impl BodyPartEditor {
+    fn new() -> Self {
+        Self {
+            active: false,
+            selected: 0,
+            adjustments: default_adjustments(),
+            dirty: false,
+            shift_held: false,
+        }
+    }
+
+    fn toggle(&mut self) {
+        self.active = !self.active;
+        tracing::info!("Body part editor: {}", if self.active { "ON" } else { "OFF" });
+    }
+
+    fn select_next(&mut self) {
+        self.selected = (self.selected + 1) % BODY_PART_NAMES.len();
+    }
+
+    fn select_prev(&mut self) {
+        self.selected = if self.selected == 0 { BODY_PART_NAMES.len() - 1 } else { self.selected - 1 };
+    }
+
+    fn adjust_offset(&mut self, dx: f32, dy: f32, dz: f32) {
+        let adj = &mut self.adjustments[self.selected];
+        adj.offset.x += dx;
+        adj.offset.y += dy;
+        adj.offset.z += dz;
+        self.dirty = true;
+    }
+
+    fn adjust_scale(&mut self, ds: f32) {
+        let adj = &mut self.adjustments[self.selected];
+        adj.scale = (adj.scale + ds).max(0.1);
+        self.dirty = true;
+    }
+
+    fn overlay_lines(&self) -> Vec<String> {
+        if !self.active {
+            return Vec::new();
+        }
+        let mut lines = Vec::new();
+        lines.push("== BODY PART EDITOR (F4) ==".to_string());
+        lines.push("[/] part  Arrows X/Z".to_string());
+        lines.push("PgUp/Dn Y  +/- scale".to_string());
+        lines.push("Shift=fine  Enter=log".to_string());
+        lines.push(String::new());
+
+        for (i, name) in BODY_PART_NAMES.iter().enumerate() {
+            let adj = &self.adjustments[i];
+            let marker = if i == self.selected { ">" } else { " " };
+            lines.push(format!(
+                "{} {:<11} X:{:+.1} Y:{:+.1} Z:{:+.1} S:{:.2}",
+                marker, name,
+                adj.offset.x, adj.offset.y, adj.offset.z, adj.scale
+            ));
+        }
+        lines
+    }
+
+    fn log_values(&self) {
+        tracing::info!("=== Body Part Editor Values ===");
+        for (i, name) in BODY_PART_NAMES.iter().enumerate() {
+            let adj = &self.adjustments[i];
+            tracing::info!(
+                "  {}: offset=({:.2}, {:.2}, {:.2}), scale={:.3}",
+                name, adj.offset.x, adj.offset.y, adj.offset.z, adj.scale
+            );
+        }
+        tracing::info!("=== End Editor Values ===");
+    }
+}
 
 /// Main application state
 pub struct App {
@@ -41,6 +126,8 @@ pub struct App {
     quit_requested: bool,
     /// Counter for periodic LOD stats logging
     lod_log_counter: u32,
+    /// Body part position/scale editor
+    body_part_editor: BodyPartEditor,
 }
 
 impl App {
@@ -151,6 +238,7 @@ impl App {
             windowed_size: window_size,
             quit_requested: false,
             lod_log_counter: 0,
+            body_part_editor: BodyPartEditor::new(),
         };
 
         tracing::info!("Engine initialized successfully");
@@ -349,6 +437,56 @@ impl App {
                                 // Inventory closed: re-grab cursor
                                 self.toggle_cursor_grab();
                             }
+                        }
+                        // Body part editor controls
+                        KeyCode::F4 if pressed => {
+                            self.body_part_editor.toggle();
+                        }
+                        KeyCode::ShiftLeft | KeyCode::ShiftRight if self.body_part_editor.active => {
+                            self.body_part_editor.shift_held = pressed;
+                            // Also pass to player for normal gameplay
+                            self.player.handle_key(key_code, pressed);
+                        }
+                        KeyCode::BracketRight if pressed && self.body_part_editor.active => {
+                            self.body_part_editor.select_next();
+                        }
+                        KeyCode::BracketLeft if pressed && self.body_part_editor.active => {
+                            self.body_part_editor.select_prev();
+                        }
+                        KeyCode::ArrowRight if pressed && self.body_part_editor.active => {
+                            let step = if self.body_part_editor.shift_held { 0.1 } else { 0.5 };
+                            self.body_part_editor.adjust_offset(step, 0.0, 0.0);
+                        }
+                        KeyCode::ArrowLeft if pressed && self.body_part_editor.active => {
+                            let step = if self.body_part_editor.shift_held { 0.1 } else { 0.5 };
+                            self.body_part_editor.adjust_offset(-step, 0.0, 0.0);
+                        }
+                        KeyCode::ArrowUp if pressed && self.body_part_editor.active => {
+                            let step = if self.body_part_editor.shift_held { 0.1 } else { 0.5 };
+                            self.body_part_editor.adjust_offset(0.0, 0.0, step);
+                        }
+                        KeyCode::ArrowDown if pressed && self.body_part_editor.active => {
+                            let step = if self.body_part_editor.shift_held { 0.1 } else { 0.5 };
+                            self.body_part_editor.adjust_offset(0.0, 0.0, -step);
+                        }
+                        KeyCode::PageUp if pressed && self.body_part_editor.active => {
+                            let step = if self.body_part_editor.shift_held { 0.1 } else { 0.5 };
+                            self.body_part_editor.adjust_offset(0.0, step, 0.0);
+                        }
+                        KeyCode::PageDown if pressed && self.body_part_editor.active => {
+                            let step = if self.body_part_editor.shift_held { 0.1 } else { 0.5 };
+                            self.body_part_editor.adjust_offset(0.0, -step, 0.0);
+                        }
+                        KeyCode::Equal if pressed && self.body_part_editor.active => {
+                            let step = if self.body_part_editor.shift_held { 0.01 } else { 0.05 };
+                            self.body_part_editor.adjust_scale(step);
+                        }
+                        KeyCode::Minus if pressed && self.body_part_editor.active => {
+                            let step = if self.body_part_editor.shift_held { 0.01 } else { 0.05 };
+                            self.body_part_editor.adjust_scale(-step);
+                        }
+                        KeyCode::Enter if pressed && self.body_part_editor.active => {
+                            self.body_part_editor.log_values();
                         }
                         _ => {
                             self.player.handle_key(key_code, pressed);
@@ -826,7 +964,15 @@ impl App {
             settings_context: self.profiler.settings().as_compact_string(),
             // Per-pass timing breakdown
             pass_times: render_stats.pass_times.clone(),
+            // Body part editor overlay
+            body_part_editor_lines: self.body_part_editor.overlay_lines(),
         };
+
+        // Re-merge character mesh if body part editor changed values
+        if self.body_part_editor.dirty {
+            self.body_part_editor.dirty = false;
+            self.remesh_character();
+        }
 
         // Render
         self.profiler.begin_section("render");
@@ -890,7 +1036,8 @@ impl App {
 
         // Step 2: Merge body part meshes into a single skinned mesh
         let models_dir = std::path::Path::new("assets/char/models");
-        let merged = match loader::merge_body_parts(models_dir, &skeleton, loader::HUMANOID_BODY_PARTS) {
+        let defaults = loader::default_adjustments();
+        let merged = match loader::merge_body_parts(models_dir, &skeleton, loader::HUMANOID_BODY_PARTS, Some(&defaults)) {
             Ok(m) => m,
             Err(e) => {
                 tracing::warn!("Failed to merge body parts: {}", e);
@@ -1014,6 +1161,35 @@ impl App {
         } else {
             tracing::info!("Character spawned (no animations loaded, T-pose)");
         }
+    }
+
+    /// Re-merge character body parts with current editor adjustments and re-upload to GPU.
+    fn remesh_character(&mut self) {
+        use crate::entity::loader;
+
+        if self.entity_manager.skeletons.is_empty() {
+            return;
+        }
+        let skeleton = &self.entity_manager.skeletons[0];
+        let models_dir = std::path::Path::new("assets/char/models");
+
+        let merged = match loader::merge_body_parts(
+            models_dir,
+            skeleton,
+            loader::HUMANOID_BODY_PARTS,
+            Some(&self.body_part_editor.adjustments),
+        ) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!("Remesh failed: {}", e);
+                return;
+            }
+        };
+
+        // Re-upload mesh to GPU (replace slot 0)
+        let device = self.renderer.device().clone();
+        let char_renderer = self.renderer.character_renderer_mut();
+        char_renderer.replace_mesh(&device, 0, &merged.vertices, &merged.indices);
     }
 
     /// Update character entity rendering data each frame.

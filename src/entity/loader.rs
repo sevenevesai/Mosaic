@@ -638,6 +638,52 @@ pub struct BodyPart {
     pub mirror: bool,
 }
 
+/// Per-body-part position/scale adjustment for the in-game editor.
+#[derive(Clone, Debug)]
+pub struct BodyPartAdjustment {
+    /// Offset applied after scaling (in skeleton bind-pose space).
+    pub offset: Vec3,
+    /// Scale multiplier (applied to the part's shape around the bone).
+    pub scale: f32,
+}
+
+impl Default for BodyPartAdjustment {
+    fn default() -> Self {
+        Self { offset: Vec3::ZERO, scale: 1.0 }
+    }
+}
+
+/// Names for all 13 body parts (9 unique + 4 right-side), matching HUMANOID_BODY_PARTS order.
+pub const BODY_PART_NAMES: &[&str] = &[
+    "Root", "Spine", "Chest", "Head", "Hair",
+    "Hip_L", "Knee_L", "Shoulder_L", "Elbow_L",
+    "Hip_R", "Knee_R", "Shoulder_R", "Elbow_R",
+];
+
+/// Default body part adjustments baked from in-game editor tuning.
+/// Right-side defaults are initialized as X-mirrored left-side values;
+/// they can be independently fine-tuned since skeleton bones may not be perfectly symmetric.
+pub fn default_adjustments() -> Vec<BodyPartAdjustment> {
+    vec![
+        // Center/spine parts
+        BodyPartAdjustment { offset: Vec3::new( 0.0, -2.5,  0.0), scale: 1.0 }, // Root
+        BodyPartAdjustment { offset: Vec3::new( 0.0, -1.5,  0.0), scale: 1.0 }, // Spine
+        BodyPartAdjustment { offset: Vec3::new( 0.0,  0.0,  0.0), scale: 1.0 }, // Chest
+        BodyPartAdjustment { offset: Vec3::new( 0.0,  1.0,  0.0), scale: 1.0 }, // Head
+        BodyPartAdjustment { offset: Vec3::new( 0.0,  0.0,  0.0), scale: 1.0 }, // Hair
+        // Left side
+        BodyPartAdjustment { offset: Vec3::new(-2.5, -4.0, -1.0), scale: 1.0 }, // Hip_L
+        BodyPartAdjustment { offset: Vec3::new(-2.0, -4.0, -0.5), scale: 1.0 }, // Knee_L
+        BodyPartAdjustment { offset: Vec3::new( 1.0, -3.5,  0.0), scale: 1.0 }, // Shoulder_L
+        BodyPartAdjustment { offset: Vec3::new( 0.5, -4.0,  0.0), scale: 1.0 }, // Elbow_L
+        // Right side (mirrored X from left, independently adjustable)
+        BodyPartAdjustment { offset: Vec3::new( 2.5, -4.0, -1.0), scale: 1.0 }, // Hip_R
+        BodyPartAdjustment { offset: Vec3::new( 2.0, -4.0, -0.5), scale: 1.0 }, // Knee_R
+        BodyPartAdjustment { offset: Vec3::new(-1.0, -3.5,  0.0), scale: 1.0 }, // Shoulder_R
+        BodyPartAdjustment { offset: Vec3::new(-0.5, -4.0,  0.0), scale: 1.0 }, // Elbow_R
+    ]
+}
+
 /// Default humanoid body parts for a complete character.
 /// Uses the Avatar_for_Animation skeleton naming: Root_M, Hip_R/L, Spine1_M, Chest_M, etc.
 /// Paired limbs (Hip, Shoulder, Elbow, Knee) have both right and left entries.
@@ -689,10 +735,14 @@ fn find_bone_index(skeleton: &Skeleton, names: &[&str]) -> Option<u8> {
 /// Each body part is assigned 100% weight to its designated bone(s).
 /// Vertices are scaled from mesh space into skeleton bind-pose space so that
 /// the standard skinning equation (global * inverse_bind * vertex) works correctly.
+///
+/// If `adjustments` is provided, per-part offset and scale tweaks are applied.
+/// Adjustments index 0..8 map to the 9 unique parts; mirrored parts (9..12) auto-mirror.
 pub fn merge_body_parts(
     models_dir: &Path,
     skeleton: &Skeleton,
     parts: &[BodyPart],
+    adjustments: Option<&[BodyPartAdjustment]>,
 ) -> Result<MergedCharacterMesh, String> {
     let mut all_vertices: Vec<CharacterVertex> = Vec::new();
     let mut all_indices: Vec<u32> = Vec::new();
@@ -715,7 +765,14 @@ pub fn merge_body_parts(
     let mesh_to_skeleton_scale = compute_mesh_to_skeleton_scale(models_dir, skeleton, parts);
     tracing::info!("Mesh-to-skeleton scale factor: {:.4}", mesh_to_skeleton_scale);
 
-    for part in parts {
+    for (part_index, part) in parts.iter().enumerate() {
+        // Each part has its own adjustment slot (13 total: 9 unique + 4 right-side).
+        // Right-side parts (9..12) have independent adjustments for asymmetric tuning.
+        let adj = adjustments
+            .and_then(|a| a.get(part_index))
+            .cloned()
+            .unwrap_or_default();
+
         let mesh_path = models_dir.join(part.folder).join(part.file);
         if !mesh_path.exists() {
             tracing::warn!("Body part mesh not found: {}", mesh_path.display());
@@ -777,19 +834,23 @@ pub fn merge_body_parts(
         } else {
             mesh_center
         };
-        let scaled_center = effective_mesh_center * mesh_to_skeleton_scale;
 
         tracing::info!(
-            "  {} scaled=[{:.1},{:.1},{:.1}] bone=[{:.1},{:.1},{:.1}]",
+            "  {} center=[{:.1},{:.1},{:.1}] bone=[{:.1},{:.1},{:.1}] scale={:.3}",
             part.file,
-            scaled_center.x, scaled_center.y, scaled_center.z,
+            effective_mesh_center.x, effective_mesh_center.y, effective_mesh_center.z,
             bone_pos.x, bone_pos.y, bone_pos.z,
+            mesh_to_skeleton_scale,
         );
 
-        // Add vertices: uniform scale from mesh space into skeleton bind-pose space.
-        // No per-bone offset — the mesh's own proportions define the visual shape.
-        // The skeleton bone pivots may not perfectly match mesh centers, but this
-        // preserves the artist's intended proportions for the stylized character.
+        // Per-bone centering with scale: each part is centered on its bone pivot,
+        // with the part's shape scaled to fit the skeleton's coordinate proportions.
+        // Formula: bind_pos = bone_pos + (vertex - mesh_center) * scale
+        //
+        // This ensures:
+        // 1. Each part is centered on its bone pivot (animation rotates correctly)
+        // 2. Each part's shape is scaled to fit the skeleton's coordinate range
+        // 3. In bind pose (bone_matrix = identity), vertices appear at these positions
         for mut v in model.vertices {
             let mut pos = Vec3::from_array(v.position);
             let mut normal = Vec3::from_array(v.normal);
@@ -800,8 +861,12 @@ pub fn merge_body_parts(
                 normal.x = -normal.x;
             }
 
-            // Uniform scale only — preserve mesh proportions
-            let bind_pos = pos * mesh_to_skeleton_scale;
+            // Center on bone, scale part shape to skeleton proportions.
+            // Per-part adjustment: offset shifts the part, scale multiplies the shape.
+            // Right-side parts have independent adjustments (no auto X-negation).
+            let part_offset = adj.offset;
+            let bind_pos = bone_pos + part_offset
+                + (pos - effective_mesh_center) * mesh_to_skeleton_scale * adj.scale;
 
             v.position = bind_pos.to_array();
             // Normal direction is unchanged by uniform scale

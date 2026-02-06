@@ -103,6 +103,9 @@ pub struct DebugMetrics {
 
     // Per-pass GPU timing
     pub pass_times: Vec<(String, f64)>,  // (pass_name, time_ms)
+
+    // Body part editor overlay lines (rendered on right side when non-empty)
+    pub body_part_editor_lines: Vec<String>,
 }
 
 /// Debug overlay rendering system
@@ -667,6 +670,30 @@ impl DebugOverlay {
 
             for line in &lines {
                 let mut x = start_x;
+                for ch in line.chars() {
+                    if let Some((u0, v0, u1, v1)) = self.char_uvs(ch) {
+                        vertices.push(TextVertex { position: [x, y - char_h], uv: [u0, v1] });
+                        vertices.push(TextVertex { position: [x + char_w, y - char_h], uv: [u1, v1] });
+                        vertices.push(TextVertex { position: [x + char_w, y], uv: [u1, v0] });
+                        vertices.push(TextVertex { position: [x, y - char_h], uv: [u0, v1] });
+                        vertices.push(TextVertex { position: [x + char_w, y], uv: [u1, v0] });
+                        vertices.push(TextVertex { position: [x, y], uv: [u0, v0] });
+                    }
+                    x += char_w;
+                }
+                y -= line_height;
+            }
+        }
+
+        // Body part editor overlay (right side of screen)
+        if !metrics.body_part_editor_lines.is_empty() {
+            let line_height = char_h * 1.2;
+            let mut y = 0.95;
+            for line in &metrics.body_part_editor_lines {
+                // Right-align: compute line width and start from right edge
+                let line_w = line.len() as f32 * char_w;
+                let x_start = 0.98 - line_w;
+                let mut x = x_start;
                 for ch in line.chars() {
                     if let Some((u0, v0, u1, v1)) = self.char_uvs(ch) {
                         vertices.push(TextVertex { position: [x, y - char_h], uv: [u0, v1] });

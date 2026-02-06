@@ -350,6 +350,35 @@ impl CharacterRenderer {
         slot_index
     }
 
+    /// Replace an existing mesh slot with new data (for live editing).
+    pub fn replace_mesh(
+        &mut self,
+        device: &wgpu::Device,
+        slot: usize,
+        vertices: &[CharacterVertex],
+        indices: &[u32],
+    ) {
+        if slot >= self.mesh_slots.len() {
+            return;
+        }
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Character Vertex Buffer"),
+            contents: bytemuck::cast_slice(vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Character Index Buffer"),
+            contents: bytemuck::cast_slice(indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        self.mesh_slots[slot] = CharacterMeshSlot {
+            vertex_buffer,
+            index_buffer,
+            index_count: indices.len() as u32,
+            vertex_count: vertices.len() as u32,
+        };
+    }
+
     /// Load multiple character textures into a texture array.
     /// All textures must be the same size. If sizes differ, they will be resized to match the first.
     pub fn load_texture_array(
