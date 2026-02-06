@@ -990,7 +990,7 @@ impl App {
             Transform {
                 position: glam::Vec3::new(0.0, 50.0, 5003.0),
                 rotation: glam::Quat::from_rotation_y(std::f32::consts::PI),
-                scale: 0.05, // Small scale for testing
+                scale: 0.12, // Skeleton is ~17 units tall, 0.12 * 17 ≈ 2 blocks
             },
         );
 

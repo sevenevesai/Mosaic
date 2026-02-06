@@ -548,26 +548,37 @@ pub struct BodyPart {
 /// Uses the Avatar_for_Animation skeleton naming: Root_M, Hip_R/L, Spine1_M, Chest_M, etc.
 /// Paired limbs (Hip, Shoulder, Elbow, Knee) have both right and left entries.
 pub const HUMANOID_BODY_PARTS: &[BodyPart] = &[
-    // Center/spine parts
-    BodyPart { folder: "Root", file: "Root001.fbx", bone_names: &["Root_M", "Root"], texture: Some("Characters/001.png"), mirror: false },
-    BodyPart { folder: "Spine", file: "Spine001.fbx", bone_names: &["Spine1_M", "Spine"], texture: Some("Characters/001.png"), mirror: false },
-    BodyPart { folder: "Chest", file: "Chest001.fbx", bone_names: &["Chest_M", "Chest"], texture: Some("Characters/001.png"), mirror: false },
-    BodyPart { folder: "Head", file: "Head001.fbx", bone_names: &["Head_M", "Head"], texture: Some("Characters/001.png"), mirror: false },
-    BodyPart { folder: "Hair", file: "Hair001.fbx", bone_names: &["Head_M", "Head"], texture: Some("Characters/001.png"), mirror: false },
+    // Center/spine parts - body texture for torso parts, separate textures for head/hair
+    BodyPart { folder: "Root", file: "Root001.fbx", bone_names: &["Root_M", "Root"], texture: Some("Characters/002.png"), mirror: false },
+    BodyPart { folder: "Spine", file: "Spine001.fbx", bone_names: &["Spine1_M", "Spine"], texture: Some("Characters/002.png"), mirror: false },
+    BodyPart { folder: "Chest", file: "Chest001.fbx", bone_names: &["Chest_M", "Chest"], texture: Some("Characters/002.png"), mirror: false },
+    BodyPart { folder: "Head", file: "Head001.fbx", bone_names: &["Head_M", "Head"], texture: Some("Head/Head001.png"), mirror: false },
+    BodyPart { folder: "Hair", file: "Hair001.fbx", bone_names: &["Head_M", "Head"], texture: Some("Hair/Hair001.png"), mirror: false },
     // Left side limbs (FBX meshes are at positive X, which matches left side)
-    BodyPart { folder: "Hip", file: "Hip001.fbx", bone_names: &["Hip_L"], texture: Some("Characters/001.png"), mirror: false },
-    BodyPart { folder: "Knee", file: "Knee001.fbx", bone_names: &["Knee_L"], texture: Some("Characters/001.png"), mirror: false },
-    BodyPart { folder: "Shoulder", file: "Shoulder001.fbx", bone_names: &["Shoulder_L"], texture: Some("Characters/001.png"), mirror: false },
-    BodyPart { folder: "Elbow", file: "Elbow001.fbx", bone_names: &["Elbow_L"], texture: Some("Characters/001.png"), mirror: false },
+    BodyPart { folder: "Hip", file: "Hip001.fbx", bone_names: &["Hip_L"], texture: Some("Characters/002.png"), mirror: false },
+    BodyPart { folder: "Knee", file: "Knee001.fbx", bone_names: &["Knee_L"], texture: Some("Characters/002.png"), mirror: false },
+    BodyPart { folder: "Shoulder", file: "Shoulder001.fbx", bone_names: &["Shoulder_L"], texture: Some("Characters/002.png"), mirror: false },
+    BodyPart { folder: "Elbow", file: "Elbow001.fbx", bone_names: &["Elbow_L"], texture: Some("Characters/002.png"), mirror: false },
     // Right side limbs (mirrored from left side meshes to negative X)
-    BodyPart { folder: "Hip", file: "Hip001.fbx", bone_names: &["Hip_R"], texture: Some("Characters/001.png"), mirror: true },
-    BodyPart { folder: "Knee", file: "Knee001.fbx", bone_names: &["Knee_R"], texture: Some("Characters/001.png"), mirror: true },
-    BodyPart { folder: "Shoulder", file: "Shoulder001.fbx", bone_names: &["Shoulder_R"], texture: Some("Characters/001.png"), mirror: true },
-    BodyPart { folder: "Elbow", file: "Elbow001.fbx", bone_names: &["Elbow_R"], texture: Some("Characters/001.png"), mirror: true },
+    BodyPart { folder: "Hip", file: "Hip001.fbx", bone_names: &["Hip_R"], texture: Some("Characters/002.png"), mirror: true },
+    BodyPart { folder: "Knee", file: "Knee001.fbx", bone_names: &["Knee_R"], texture: Some("Characters/002.png"), mirror: true },
+    BodyPart { folder: "Shoulder", file: "Shoulder001.fbx", bone_names: &["Shoulder_R"], texture: Some("Characters/002.png"), mirror: true },
+    BodyPart { folder: "Elbow", file: "Elbow001.fbx", bone_names: &["Elbow_R"], texture: Some("Characters/002.png"), mirror: true },
 ];
 
-/// Find bone index by name (case-insensitive partial match).
+/// Find bone index by name. Tries exact match first (case-insensitive),
+/// then falls back to substring match for flexibility.
 fn find_bone_index(skeleton: &Skeleton, names: &[&str]) -> Option<u8> {
+    // First pass: exact match (case-insensitive)
+    for name in names {
+        let needle = name.to_lowercase();
+        for (i, bone_name) in skeleton.bone_names.iter().enumerate() {
+            if bone_name.to_lowercase() == needle {
+                return Some(i.min(255) as u8);
+            }
+        }
+    }
+    // Second pass: substring match as fallback
     for name in names {
         let needle = name.to_lowercase();
         for (i, bone_name) in skeleton.bone_names.iter().enumerate() {
@@ -641,45 +652,59 @@ pub fn merge_body_parts(
         let base_vertex = all_vertices.len() as u32;
         let vert_count = model.vertices.len();
 
-        // Debug: log raw mesh bounds before any transform
-        if !model.vertices.is_empty() {
-            let mut min = Vec3::splat(f32::MAX);
-            let mut max = Vec3::splat(f32::MIN);
-            for v in &model.vertices {
-                let p = Vec3::from_array(v.position);
-                min = min.min(p);
-                max = max.max(p);
-            }
-            let center = (min + max) * 0.5;
-            tracing::info!(
-                "  RAW mesh {}/{}: center=[{:.1},{:.1},{:.1}] size=[{:.1},{:.1},{:.1}]",
-                part.folder, part.file,
-                center.x, center.y, center.z,
-                max.x - min.x, max.y - min.y, max.z - min.z
-            );
+        // Compute mesh center for alignment
+        let mut mesh_min = Vec3::splat(f32::MAX);
+        let mut mesh_max = Vec3::splat(f32::MIN);
+        for v in &model.vertices {
+            let p = Vec3::from_array(v.position);
+            mesh_min = mesh_min.min(p);
+            mesh_max = mesh_max.max(p);
         }
+        let mesh_center = (mesh_min + mesh_max) * 0.5;
+
+        // Get bone's bind-pose position
+        let bone_pos = bone_bind_transform.w_axis.truncate();
+
+        // Offset to align mesh center with bone position
+        // This makes the mesh "attach" to the bone properly for skinning
+        let effective_mesh_center = if part.mirror { Vec3::new(-mesh_center.x, mesh_center.y, mesh_center.z) } else { mesh_center };
+        let align_offset = bone_pos - effective_mesh_center;
+
+        tracing::info!(
+            "  {} mesh_center=[{:.1},{:.1},{:.1}] bone=[{:.1},{:.1},{:.1}] offset=[{:.1},{:.1},{:.1}]",
+            part.file,
+            mesh_center.x, mesh_center.y, mesh_center.z,
+            bone_pos.x, bone_pos.y, bone_pos.z,
+            align_offset.x, align_offset.y, align_offset.z
+        );
 
         // Add vertices with bone weight assignment, position transform, and texture layer
         for mut v in model.vertices {
             let mut pos = Vec3::from_array(v.position);
             let mut normal = Vec3::from_array(v.normal);
 
-            // Mirror on X axis for left-side limbs
+            // Mirror on X axis for right-side limbs (mirrored parts)
             if part.mirror {
                 pos.x = -pos.x;
                 normal.x = -normal.x;
             }
 
-            // Translate vertex to bone position (translation only, no rotation)
-            // The mesh parts are already oriented correctly in the FBX files,
-            // they just need to be offset to their bone's bind-pose position.
-            // Using full transform would incorrectly rotate the mesh.
-            let world_pos = pos;
+            // Translate-only alignment: move mesh center to skeleton bone position.
+            //
+            // The mesh and skeleton have different coordinate systems (~2x scale diff),
+            // but both are Y-up with the same orientation. We only translate (no rotation)
+            // so the mesh shape is preserved and the skinning rotation pivot matches
+            // the mesh center. This ensures animated bone rotations swing the part
+            // around its visual center rather than a mismatched skeleton position.
+            //
+            // bone_pos comes from the skeleton's bind pose (translation only).
+            // effective_mesh_center is the mesh's centroid (mirrored for right-side parts).
+            let bind_pos = pos + align_offset;
 
-            v.position = world_pos.to_array();
-            v.normal = normal.to_array();
+            v.position = bind_pos.to_array();
+            // Normal stays unchanged (no rotation applied)
 
-            // Flip V coordinate for Unity FBX compatibility (different UV origin convention)
+            // FBX UV origin is bottom-left, wgpu expects top-left: flip V coordinate
             v.tex_coords[1] = 1.0 - v.tex_coords[1];
 
             // Override bone weights: 100% to the assigned bone
