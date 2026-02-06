@@ -616,8 +616,38 @@ pub fn merge_body_parts(
             }
         };
 
-        // No offset - meshes are positioned by the skinning system via bone matrices
-        let offset = Vec3::ZERO;
+        // Body parts are designed to be parented to bones with local position zero.
+        // Get bone's world position (translation only, no rotation) from rest pose.
+        let bone_rest_transform = skeleton.inverse_bind_matrices
+            .get(bone_idx as usize)
+            .map(|inv_bind| inv_bind.inverse())
+            .unwrap_or(Mat4::IDENTITY);
+        let bone_world_pos = bone_rest_transform.w_axis.truncate();
+
+        // For limbs (parts with _R or _L bones), center the mesh X on the bone X
+        // For center parts, just use bone position directly
+        let is_limb = part.bone_names.iter().any(|n| n.ends_with("_R") || n.ends_with("_L"));
+
+        let x_offset = if is_limb {
+            // Compute mesh X centroid to center limbs on bone X position
+            let mut x_sum = 0.0f32;
+            for v in &model.vertices {
+                let mut x = v.position[0];
+                if part.mirror {
+                    x = -x;
+                }
+                x_sum += x;
+            }
+            let x_centroid = if !model.vertices.is_empty() {
+                x_sum / model.vertices.len() as f32
+            } else {
+                0.0
+            };
+            bone_world_pos.x - x_centroid
+        } else {
+            // Center parts: just use bone X position
+            bone_world_pos.x
+        };
 
         // Determine texture layer for this part (deduplicated)
         let texture_layer = if let Some(tex) = part.texture {
@@ -637,7 +667,7 @@ pub fn merge_body_parts(
         let base_vertex = all_vertices.len() as u32;
         let vert_count = model.vertices.len();
 
-        // Add vertices with bone weight assignment, position offset, and texture layer
+        // Add vertices with bone weight assignment, position transform, and texture layer
         for mut v in model.vertices {
             let mut pos = Vec3::from_array(v.position);
             let mut normal = Vec3::from_array(v.normal);
@@ -648,9 +678,15 @@ pub fn merge_body_parts(
                 normal.x = -normal.x;
             }
 
-            // Transform vertex to bone's rest position
-            pos += offset;
-            v.position = pos.to_array();
+            // For limbs: center X on bone, keep Y/Z as-is
+            // For center parts: no offset (meshes are already positioned correctly in FBX)
+            let world_pos = if is_limb {
+                Vec3::new(pos.x + x_offset, pos.y, pos.z)
+            } else {
+                pos // No offset for center body parts
+            };
+
+            v.position = world_pos.to_array();
             v.normal = normal.to_array();
 
             // Override bone weights: 100% to the assigned bone
@@ -677,14 +713,15 @@ pub fn merge_body_parts(
         }
 
         let mirror_str = if part.mirror { " [mirrored]" } else { "" };
+        let bone_pos = bone_rest_transform.w_axis.truncate();
         tracing::info!(
-            "Merged {}/{}: {} verts -> bone {} '{}'{} (offset: [{:.1}, {:.1}, {:.1}])",
+            "Merged {}/{}: {} verts -> bone {} '{}'{} (bone pos: [{:.1}, {:.1}, {:.1}])",
             part.folder, part.file,
             vert_count,
             bone_idx,
             skeleton.bone_names.get(bone_idx as usize).unwrap_or(&"?".to_string()),
             mirror_str,
-            offset.x, offset.y, offset.z,
+            bone_pos.x, bone_pos.y, bone_pos.z,
         );
     }
 
