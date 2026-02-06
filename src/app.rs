@@ -215,9 +215,9 @@ impl App {
             tracing::warn!("Failed to load item entities: {}", e);
         }
 
-        // Initialize entity manager and load test character
+        // Initialize entity manager and load player character
         let mut entity_manager = EntityManager::new();
-        Self::load_test_character(&mut entity_manager, &mut renderer);
+        Self::load_player_character(&mut entity_manager, &mut renderer);
 
         // Initialize chest manager
         // TODO: Load chests from disk
@@ -494,8 +494,8 @@ impl App {
                             let clip_count = self.entity_manager.animation_clips.len();
                             if clip_count > 0 {
                                 for anim in self.entity_manager.animations.values_mut() {
-                                    anim.current_clip = (anim.current_clip + 1) % clip_count;
-                                    anim.playback_time = 0.0;
+                                    let next = (anim.current_clip + 1) % clip_count;
+                                    anim.transition_to(next, 0.2);
                                 }
                                 let idx = self.entity_manager.animations.values().next()
                                     .map(|a| a.current_clip).unwrap_or(0);
@@ -1014,8 +1014,8 @@ impl App {
         self.profiler.end_frame();
     }
 
-    /// Load a test character model from assets for Phase 1 rendering.
-    fn load_test_character(entity_manager: &mut EntityManager, renderer: &mut Renderer) {
+    /// Load the player character model from assets.
+    fn load_player_character(entity_manager: &mut EntityManager, renderer: &mut Renderer) {
         use crate::entity::loader;
         use crate::entity::RenderComponent;
         use std::sync::Arc;
@@ -1146,16 +1146,16 @@ impl App {
             char_renderer.create_placeholder_texture(&device, &queue);
         }
 
-        // Spawn entity near player spawn location, facing player
-        // Player typically spawns around Y=50-60, Z=5000
+        // Spawn player character entity (position will be synced from Player each frame)
         let key = entity_manager.spawn(
-            EntityType::Npc,
+            EntityType::Player,
             Transform {
-                position: glam::Vec3::new(0.0, 50.0, 5003.0),
-                rotation: glam::Quat::from_rotation_y(std::f32::consts::PI),
+                position: glam::Vec3::ZERO, // Synced from Player::feet_pos each frame
+                rotation: glam::Quat::IDENTITY,
                 scale: 0.09, // Mesh ~20 units tall (scaled to skeleton space), 0.09 * 20 ≈ 1.8 blocks
             },
         );
+        entity_manager.player_entity = Some(key);
 
         entity_manager.render.insert(key, RenderComponent {
             mesh_slot,
@@ -1211,49 +1211,49 @@ impl App {
     /// Update character entity rendering data each frame.
     fn update_character_entities(&mut self, dt: f64) {
         use crate::renderer::character_renderer::CharacterInstance;
+        use crate::player::MovementState;
 
-        // Base position: 5 blocks in front of the player
-        let player_pos = self.player.position();
-        let player_forward = self.player.forward();
-        let base_entity_pos = player_pos + player_forward * 5.0 - glam::Vec3::new(0.0, 2.0, 0.0);
+        let player_feet = self.player.feet_position();
+        let player_facing = self.player.facing_yaw();
+        let movement_state = self.player.movement_state();
 
-        // Update animations and collect bone matrices + root motion
+        // Select animation clip and speed based on player movement state
+        let clip_count = self.entity_manager.animation_clips.len();
+        if clip_count > 0 {
+            if let Some(player_key) = self.entity_manager.player_entity {
+                if let Some(anim) = self.entity_manager.animations.get_mut(player_key) {
+                    let (target_clip, target_speed, blend_time) = match movement_state {
+                        MovementState::Idle => (0, 1.0, 0.25),       // Idle - smooth blend in
+                        MovementState::Walking => (1.min(clip_count - 1), 1.0, 0.2),  // Move
+                        MovementState::Sprinting => (1.min(clip_count - 1), 1.5, 0.15), // Move faster
+                        MovementState::Airborne => (3.min(clip_count - 1), 1.0, 0.1),  // Jump - fast blend
+                        MovementState::Swimming => (1.min(clip_count - 1), 0.8, 0.3),  // Move slow
+                    };
+
+                    // Crossfade to new clip if changed
+                    if anim.current_clip != target_clip {
+                        anim.transition_to(target_clip, blend_time);
+                    }
+                    anim.speed = target_speed;
+                }
+
+                // Update player entity transform from Player position
+                if let Some(transform) = self.entity_manager.transforms.get_mut(player_key) {
+                    transform.position = player_feet;
+                    transform.rotation = glam::Quat::from_rotation_y(player_facing);
+                }
+            }
+        }
+
+        // Update all animations and collect bone matrices
         let mut all_bone_matrices = Vec::new();
         let clips = &self.entity_manager.animation_clips;
-        static FRAME_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let frame = FRAME_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         let anim_keys: Vec<_> = self.entity_manager.animations.keys().collect();
         for key in &anim_keys {
             if let Some(anim) = self.entity_manager.animations.get_mut(*key) {
-                let root_motion = anim.update(dt, clips);
-
-
-                // Apply root motion to entity position for visible animation
-                if let Some((root_translation, _root_rotation)) = root_motion {
-                    if let Some(transform) = self.entity_manager.transforms.get_mut(*key) {
-                        // Use base position + scaled root bone offset for visible bobbing/movement
-                        let scale = transform.scale;
-                        transform.position = base_entity_pos + root_translation * scale;
-
-                        // Face the player
-                        let to_player = (player_pos - transform.position).normalize_or_zero();
-                        if to_player.length_squared() > 0.01 {
-                            let yaw = to_player.x.atan2(to_player.z);
-                            transform.rotation = glam::Quat::from_rotation_y(yaw);
-                        }
-                    }
-                } else {
-                    // No root motion - just use base position
-                    if let Some(transform) = self.entity_manager.transforms.get_mut(*key) {
-                        transform.position = base_entity_pos;
-                        let to_player = (player_pos - transform.position).normalize_or_zero();
-                        if to_player.length_squared() > 0.01 {
-                            let yaw = to_player.x.atan2(to_player.z);
-                            transform.rotation = glam::Quat::from_rotation_y(yaw);
-                        }
-                    }
-                }
+                // Update animation (ignore root motion - player position is physics-driven)
+                let _root_motion = anim.update(dt, clips);
 
                 // Record where this entity's bones start in the shared buffer
                 if let Some(render) = self.entity_manager.render.get_mut(*key) {
@@ -1261,21 +1261,6 @@ impl App {
                     render.bone_count = anim.bone_matrices.len() as u32;
                 }
                 all_bone_matrices.extend_from_slice(&anim.bone_matrices);
-            }
-        }
-
-        // Also position non-animated entities
-        let non_anim_keys: Vec<_> = self.entity_manager.render.keys()
-            .filter(|k| !self.entity_manager.animations.contains_key(*k))
-            .collect();
-        for key in &non_anim_keys {
-            if let Some(transform) = self.entity_manager.transforms.get_mut(*key) {
-                transform.position = base_entity_pos;
-                let to_player = (player_pos - transform.position).normalize_or_zero();
-                if to_player.length_squared() > 0.01 {
-                    let yaw = to_player.x.atan2(to_player.z);
-                    transform.rotation = glam::Quat::from_rotation_y(yaw);
-                }
             }
         }
 

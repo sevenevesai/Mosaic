@@ -9,7 +9,7 @@ cargo build --release
 ./target/release/mosaic.exe
 ```
 
-**Controls:** WASD move, Space jump/fly-up, Shift fly-down, Ctrl sprint, F fly mode, E inventory, 1-9 hotbar slots, Scroll wheel cycle slots, LMB break, RMB place, F3 debug, T day/night speed, Y shadow mode, U shadow debug, V volumetric light shafts, P perf log, Esc menu.
+**Controls:** WASD move, Space jump/fly-up, Shift fly-down, Ctrl sprint, F fly mode, E inventory, 1-9 hotbar slots, Scroll wheel cycle slots, LMB break, RMB place, F3 debug, F4 body part editor, T day/night speed, Y shadow mode, U shadow debug, V volumetric light shafts, P perf log, Esc menu.
 
 ## Commands
 
@@ -39,6 +39,7 @@ src/
 │   ├── water.rs     # Ray-marched water (fullscreen post-process)
 │   ├── clouds.rs    # Procedural cloud system
 │   ├── grass/       # Procedural grass rendering (vertex pulling)
+│   ├── character_renderer.rs # Skinned character rendering, bone matrices
 │   ├── inventory_ui.rs # Hotbar/inventory UI rendering
 │   ├── gpu_culling.rs # GPU frustum culling + visibility cache
 │   ├── voxel_gi.rs  # Voxel GI: 256^3 volume, DDA shadows, VCT
@@ -46,6 +47,9 @@ src/
 │   ├── aa.rs        # Hybrid Morphological-Temporal AA
 │   ├── volumetrics.rs # Volumetric light shafts (god rays)
 │   └── chunk_pool.rs # MDI mega-buffers
+├── entity/
+│   ├── mod.rs       # EntityManager, Skeleton, AnimationComponent, player_entity tracking
+│   └── loader.rs    # FBX loading, body part merging, skeleton binding
 ├── world/
 │   ├── mod.rs       # WorldManager, 8 worker threads, chunk lifecycle
 │   ├── meshing.rs   # Binary greedy meshing (~1,800 LOC)
@@ -53,7 +57,7 @@ src/
 │   ├── generation/  # Biomes, caves, terrain, trees, ores
 │   ├── lighting.rs  # BFS flood fill propagation
 │   └── storage/     # Region files, zstd compression
-└── player/mod.rs    # AABB collision, raycast, inventory integration
+└── player/mod.rs    # AABB collision, raycast, 3rd person camera, inventory integration
 ```
 
 ## Key Constants (src/lib.rs)
@@ -80,7 +84,14 @@ WATER_SEA_LEVEL: 32      // Y level for water generation
 
 **Winding Order**: CCW front faces. Triangles: 0-2-1 and 0-3-2. Left/right faces have reordered UVs.
 
-**Render Pipeline Order**: Sky pass -> Opaque geometry (MDI) -> Water pass -> Volumetrics -> Post-process (SSAO, AA, DOF, Bloom) -> UI
+**Render Pipeline Order**: Sky pass -> Opaque geometry (MDI) -> Character entities -> Water pass -> Volumetrics -> Post-process (SSAO, AA, DOF, Bloom) -> UI
+
+**3rd Person Camera**:
+- Camera orbits behind player: `position = player_center - forward * 10.0`
+- Camera-terrain collision: 10-step ray sampling, min distance 1.0 block
+- `facing_yaw` computed from WASD input relative to camera yaw
+- Animation selected by `MovementState`: Idle(0), Move(1), Jump(3)
+- Root motion disabled for player (physics drives position)
 
 ## Gotchas & Warnings
 

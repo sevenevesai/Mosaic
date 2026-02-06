@@ -238,7 +238,7 @@ fn sample_quat(keys: &[BakedKey<Quat>], t: f64) -> Quat {
     k0.value.slerp(k1.value, factor)
 }
 
-/// Animation state for a single entity.
+/// Animation state for a single entity with crossfade blending.
 pub struct AnimationComponent {
     /// Shared skeleton data.
     pub skeleton: Arc<Skeleton>,
@@ -250,6 +250,14 @@ pub struct AnimationComponent {
     pub speed: f64,
     /// Computed bone matrices ready for GPU upload.
     pub bone_matrices: Vec<Mat4>,
+    /// Previous clip index for crossfade blending.
+    prev_clip: Option<usize>,
+    /// Playback time of the previous clip (frozen at transition point).
+    prev_playback_time: f64,
+    /// Blend factor: 0.0 = fully previous clip, 1.0 = fully current clip.
+    blend_factor: f64,
+    /// Duration of the crossfade transition in seconds.
+    blend_duration: f64,
 }
 
 impl AnimationComponent {
@@ -261,7 +269,27 @@ impl AnimationComponent {
             playback_time: 0.0,
             speed: 1.0,
             bone_matrices: vec![Mat4::IDENTITY; bone_count],
+            prev_clip: None,
+            prev_playback_time: 0.0,
+            blend_factor: 1.0,
+            blend_duration: 0.2,
         }
+    }
+
+    /// Transition to a new animation clip with crossfade blending.
+    /// `duration` is the blend time in seconds (0.0 for instant switch).
+    pub fn transition_to(&mut self, clip_index: usize, duration: f64) {
+        if clip_index == self.current_clip {
+            return;
+        }
+        // Save current state as the "previous" clip for blending
+        self.prev_clip = Some(self.current_clip);
+        self.prev_playback_time = self.playback_time;
+        self.blend_factor = 0.0;
+        self.blend_duration = duration;
+        // Start new clip
+        self.current_clip = clip_index;
+        self.playback_time = 0.0;
     }
 
     /// Advance animation and compute bone matrices for GPU upload.
@@ -275,8 +303,53 @@ impl AnimationComponent {
 
         let clip = &clips[self.current_clip];
 
-        // Sample local bone transforms from animation
-        let local_poses = clip.sample(self.playback_time, &self.skeleton);
+        // Wrap playback time to prevent float precision drift on long sessions
+        if clip.duration > 0.0 {
+            self.playback_time = self.playback_time % clip.duration;
+        }
+
+        // Advance blend factor toward 1.0 (fully current clip)
+        if self.blend_factor < 1.0 {
+            if self.blend_duration > 0.0 {
+                self.blend_factor = (self.blend_factor + dt / self.blend_duration).min(1.0);
+            } else {
+                self.blend_factor = 1.0;
+            }
+            // Also advance the previous clip playback so it doesn't freeze mid-stride
+            if let Some(prev_idx) = self.prev_clip {
+                if prev_idx < clips.len() {
+                    let prev_clip = &clips[prev_idx];
+                    self.prev_playback_time += dt * self.speed;
+                    if prev_clip.duration > 0.0 {
+                        self.prev_playback_time = self.prev_playback_time % prev_clip.duration;
+                    }
+                }
+            }
+        }
+
+        // Sample current clip
+        let current_poses = clip.sample(self.playback_time, &self.skeleton);
+
+        // If blending, sample previous clip and interpolate
+        let final_poses = if self.blend_factor < 1.0 {
+            if let Some(prev_idx) = self.prev_clip {
+                if prev_idx < clips.len() {
+                    let prev_clip = &clips[prev_idx];
+                    let prev_poses = prev_clip.sample(self.prev_playback_time, &self.skeleton);
+                    let t = self.blend_factor as f32;
+                    // Blend per-bone local transforms
+                    blend_poses(&prev_poses, &current_poses, t)
+                } else {
+                    current_poses
+                }
+            } else {
+                current_poses
+            }
+        } else {
+            // Blend complete, clear previous clip
+            self.prev_clip = None;
+            current_poses
+        };
 
         // Extract root bone (bone 0) animated TRS for root motion
         let root_motion = if !clip.bone_tracks.is_empty() {
@@ -297,10 +370,43 @@ impl AnimationComponent {
         };
 
         // Walk hierarchy: compute global transforms then final matrices
-        self.skeleton.compute_animated_matrices(&local_poses, &mut self.bone_matrices);
+        self.skeleton.compute_animated_matrices(&final_poses, &mut self.bone_matrices);
 
         root_motion
     }
+}
+
+/// Blend two sets of bone local transforms using matrix decomposition.
+/// `t` = 0.0 returns `from`, `t` = 1.0 returns `to`.
+fn blend_poses(from: &[Mat4], to: &[Mat4], t: f32) -> Vec<Mat4> {
+    from.iter().zip(to.iter()).map(|(a, b)| {
+        // Decompose both matrices into TRS
+        let (a_scale, a_rot, a_trans) = decompose_mat4(a);
+        let (b_scale, b_rot, b_trans) = decompose_mat4(b);
+        // Interpolate each component
+        let translation = a_trans.lerp(b_trans, t);
+        let rotation = a_rot.slerp(b_rot, t);
+        let scale = a_scale.lerp(b_scale, t);
+        Mat4::from_scale_rotation_translation(scale, rotation, translation)
+    }).collect()
+}
+
+/// Decompose a Mat4 into (scale, rotation, translation).
+fn decompose_mat4(m: &Mat4) -> (Vec3, Quat, Vec3) {
+    let translation = Vec3::new(m.w_axis.x, m.w_axis.y, m.w_axis.z);
+    let sx = Vec3::new(m.x_axis.x, m.x_axis.y, m.x_axis.z).length();
+    let sy = Vec3::new(m.y_axis.x, m.y_axis.y, m.y_axis.z).length();
+    let sz = Vec3::new(m.z_axis.x, m.z_axis.y, m.z_axis.z).length();
+    let scale = Vec3::new(sx, sy, sz);
+    // Build rotation matrix by removing scale
+    let rot_mat = Mat4::from_cols(
+        (m.x_axis / sx.max(1e-6)).into(),
+        (m.y_axis / sy.max(1e-6)).into(),
+        (m.z_axis / sz.max(1e-6)).into(),
+        glam::Vec4::W,
+    );
+    let rotation = Quat::from_mat4(&rot_mat);
+    (scale, rotation, translation)
 }
 
 /// Central entity manager.
@@ -312,6 +418,8 @@ pub struct EntityManager {
     pub skeletons: Vec<Arc<Skeleton>>,
     /// Shared animation clip library.
     pub animation_clips: Vec<AnimationClip>,
+    /// The player's character entity (if spawned).
+    pub player_entity: Option<EntityKey>,
 }
 
 impl EntityManager {
@@ -323,6 +431,7 @@ impl EntityManager {
             animations: SecondaryMap::new(),
             skeletons: Vec::new(),
             animation_clips: Vec::new(),
+            player_entity: None,
         }
     }
 

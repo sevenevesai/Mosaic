@@ -51,6 +51,8 @@ pub struct PlayerData {
     pub selected_slot: u8,
     /// Fly mode enabled
     pub fly_mode: bool,
+    /// Third-person camera mode
+    pub third_person: bool,
     /// Inventory slots: (item_id, count, flags)
     /// item_id 0 = empty slot, otherwise Block id + 1
     pub inventory: [(u16, u8, u8); TOTAL_SLOTS],
@@ -63,6 +65,7 @@ impl Default for PlayerData {
             rotation: [0.0, 0.0],
             selected_slot: 0,
             fly_mode: false,
+            third_person: true,
             inventory: [(0, 0, 0); TOTAL_SLOTS],
         }
     }
@@ -75,6 +78,7 @@ impl PlayerData {
         rotation: [f32; 2],
         selected_slot: u8,
         fly_mode: bool,
+        third_person: bool,
         inventory: &Inventory,
     ) -> Self {
         let mut inv_data = [(0u16, 0u8, 0u8); TOTAL_SLOTS];
@@ -95,6 +99,7 @@ impl PlayerData {
             rotation,
             selected_slot,
             fly_mode,
+            third_person,
             inventory: inv_data,
         }
     }
@@ -138,8 +143,10 @@ impl PlayerData {
         // Version (4-5)
         data[4..6].copy_from_slice(&PLAYER_VERSION.to_le_bytes());
 
-        // Flags (6-7) - bit 0: fly_mode
-        let flags: u16 = if self.fly_mode { 0x01 } else { 0x00 };
+        // Flags (6-7) - bit 0: fly_mode, bit 1: third_person
+        let mut flags: u16 = 0;
+        if self.fly_mode { flags |= 0x01; }
+        if self.third_person { flags |= 0x02; }
         data[6..8].copy_from_slice(&flags.to_le_bytes());
 
         // Position (8-19)
@@ -204,6 +211,7 @@ impl PlayerData {
         // Parse flags
         let flags = u16::from_le_bytes([data[6], data[7]]);
         let fly_mode = (flags & 0x01) != 0;
+        let third_person = (flags & 0x02) != 0;
 
         // Parse position
         let position = [
@@ -238,6 +246,7 @@ impl PlayerData {
             rotation,
             selected_slot,
             fly_mode,
+            third_person,
             inventory,
         })
     }
@@ -260,6 +269,7 @@ mod tests {
         data.rotation = [1.5, -0.5];
         data.selected_slot = 3;
         data.fly_mode = true;
+        data.third_person = true;
         data.inventory[0] = (4, 32, 0x01); // Stone (3+1), 32 count, locked
         data.inventory[5] = (16, 64, 0x00); // Torch (15+1), 64 count
 
@@ -276,6 +286,7 @@ mod tests {
         assert_eq!(data.rotation, loaded.rotation);
         assert_eq!(data.selected_slot, loaded.selected_slot);
         assert_eq!(data.fly_mode, loaded.fly_mode);
+        assert_eq!(data.third_person, loaded.third_person);
         assert_eq!(data.inventory[0], loaded.inventory[0]);
         assert_eq!(data.inventory[5], loaded.inventory[5]);
     }

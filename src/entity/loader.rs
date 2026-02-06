@@ -358,32 +358,54 @@ pub fn load_animations(
             }
         }
 
-        // Find minimum keyframe time from ROOT bone (bone 0) to normalize timeline
-        // Use root bone as reference since it defines the animation's main timeline
-        let min_time = bone_tracks.get(0)
-            .and_then(|t| t.as_ref())
-            .and_then(|t| t.rotation_keys.first().map(|k| k.time))
-            .unwrap_or(0.0);
-
-        // Normalize keyframe times if offset (ufbx gives absolute FBX timeline times)
-        if min_time > 0.1 {
-            tracing::info!("Animation '{}': normalizing times (subtracting {:.2}s)", clip_name, min_time);
-            for track in bone_tracks.iter_mut().flatten() {
-                for k in &mut track.translation_keys { k.time -= min_time; }
-                for k in &mut track.rotation_keys { k.time -= min_time; }
-                for k in &mut track.scale_keys { k.time -= min_time; }
+        // Find minimum keyframe time across ALL bone tracks to normalize timeline.
+        // ufbx gives absolute FBX timeline times, so we need to subtract the global
+        // minimum to start at 0.0.
+        let mut global_min_time = f64::MAX;
+        for track in bone_tracks.iter().flatten() {
+            for k in &track.translation_keys {
+                global_min_time = global_min_time.min(k.time);
             }
+            for k in &track.rotation_keys {
+                global_min_time = global_min_time.min(k.time);
+            }
+            for k in &track.scale_keys {
+                global_min_time = global_min_time.min(k.time);
+            }
+        }
+
+        // Normalize keyframe times if offset
+        if global_min_time > 0.01 && global_min_time < f64::MAX {
+            tracing::info!("Animation '{}': normalizing times (subtracting {:.2}s)", clip_name, global_min_time);
+            for track in bone_tracks.iter_mut().flatten() {
+                for k in &mut track.translation_keys { k.time -= global_min_time; }
+                for k in &mut track.rotation_keys { k.time -= global_min_time; }
+                for k in &mut track.scale_keys { k.time -= global_min_time; }
+            }
+        }
+
+        // Use baked.playback_duration as the clip duration - this reflects the
+        // intended animation length from the FBX stack. After trimming keyframes
+        // beyond this duration, the animation will loop cleanly.
+        let clip_duration = duration;
+
+        // Trim keyframes that extend beyond the clip duration (some FBX bakers
+        // emit extra samples beyond the intended playback range).
+        for track in bone_tracks.iter_mut().flatten() {
+            track.translation_keys.retain(|k| k.time <= clip_duration + 0.01);
+            track.rotation_keys.retain(|k| k.time <= clip_duration + 0.01);
+            track.scale_keys.retain(|k| k.time <= clip_duration + 0.01);
         }
 
         let matched = bone_tracks.iter().filter(|t| t.is_some()).count();
         tracing::info!(
             "Animation '{}': duration={:.2}s, {}/{} bones matched, {} baked nodes",
-            clip_name, duration, matched, bone_count, baked.nodes.len()
+            clip_name, clip_duration, matched, bone_count, baked.nodes.len()
         );
 
         clips.push(AnimationClip {
             name: clip_name,
-            duration,
+            duration: clip_duration,
             bone_tracks,
         });
     }

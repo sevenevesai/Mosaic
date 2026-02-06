@@ -22,6 +22,23 @@ use crate::inventory::{Inventory, Item};
 use crate::renderer::Camera;
 use crate::world::{Block, WorldManager, raycast, raycast_props};
 
+/// Third-person camera distance behind the player (blocks).
+const THIRD_PERSON_DISTANCE: f32 = 10.0;
+/// Minimum camera distance when colliding with terrain.
+const THIRD_PERSON_MIN_DISTANCE: f32 = 1.0;
+/// Height offset above player center for camera target point.
+const THIRD_PERSON_HEIGHT_OFFSET: f32 = 0.5;
+
+/// Player movement state for animation selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MovementState {
+    Idle,
+    Walking,
+    Sprinting,
+    Airborne,
+    Swimming,
+}
+
 /// Result of block interaction processing
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BlockInteraction {
@@ -94,14 +111,32 @@ pub struct Player {
 
     // Mode
     fly_mode: bool,
+
+    // Third-person camera
+    /// Whether third-person camera is active (true) or first-person (false).
+    third_person: bool,
+    /// Character model facing direction (yaw in radians). Updated from movement.
+    facing_yaw: f32,
 }
 
 impl Player {
     pub fn new(position: Vec3) -> Self {
         // Position is camera position, calculate feet position
         let feet_pos = Vec3::new(position.x, position.y - PLAYER_EYE_HEIGHT, position.z);
+        let mut camera = Camera::new(position, 16.0 / 9.0);
+
+        // Initialize camera behind the player for third-person view so the first frame
+        // doesn't render with the camera inside the character mesh.
+        let center = Vec3::new(
+            feet_pos.x,
+            feet_pos.y + PLAYER_HEIGHT * 0.5 + THIRD_PERSON_HEIGHT_OFFSET,
+            feet_pos.z,
+        );
+        let forward = camera.forward();
+        camera.position = center - forward * THIRD_PERSON_DISTANCE;
+
         Self {
-            camera: Camera::new(position, 16.0 / 9.0),
+            camera,
             velocity: Vec3::ZERO,
             feet_pos,
             move_forward: false,
@@ -125,6 +160,8 @@ impl Player {
             on_ground: false,
             in_water: false,
             fly_mode: false,
+            third_person: true,
+            facing_yaw: 0.0,
         }
     }
 
@@ -159,6 +196,41 @@ impl Player {
 
     pub fn is_in_water(&self) -> bool {
         self.in_water
+    }
+
+    /// Get player feet position (model origin).
+    pub fn feet_position(&self) -> Vec3 {
+        self.feet_pos
+    }
+
+    /// Get the character model facing yaw (radians).
+    pub fn facing_yaw(&self) -> f32 {
+        self.facing_yaw
+    }
+
+    /// Whether 3rd person camera is active.
+    pub fn is_third_person(&self) -> bool {
+        self.third_person
+    }
+
+    /// Current movement state for animation selection.
+    pub fn movement_state(&self) -> MovementState {
+        if self.in_water {
+            return MovementState::Swimming;
+        }
+        if !self.on_ground && !self.fly_mode {
+            return MovementState::Airborne;
+        }
+        let horiz_speed = self.horizontal_speed();
+        if horiz_speed > 0.5 {
+            if self.sprint {
+                MovementState::Sprinting
+            } else {
+                MovementState::Walking
+            }
+        } else {
+            MovementState::Idle
+        }
     }
 
     /// Check if inventory is open (affects input handling)
@@ -399,12 +471,76 @@ impl Player {
             self.update_normal_mode(dt_secs, world);
         }
 
-        // Sync camera position with feet position
-        self.camera.position = Vec3::new(
-            self.feet_pos.x,
-            self.feet_pos.y + PLAYER_EYE_HEIGHT,
-            self.feet_pos.z,
-        );
+        // Update facing direction from WASD input relative to camera.
+        // Smoothly interpolate to avoid jarring snaps when changing direction.
+        let mut input_dir = Vec3::ZERO;
+        if self.move_forward { input_dir += self.camera.forward(); }
+        if self.move_backward { input_dir -= self.camera.forward(); }
+        if self.move_left { input_dir -= self.camera.right(); }
+        if self.move_right { input_dir += self.camera.right(); }
+        input_dir.y = 0.0;
+        if input_dir.length_squared() > 0.01 {
+            // atan2(x, z) gives clockwise angle from +Z axis (model's default forward).
+            // Negate because Quat::from_rotation_y uses CCW convention.
+            let target_yaw = (-input_dir.x).atan2(-input_dir.z);
+            // Smoothly rotate toward target (shortest path around the circle)
+            let mut diff = target_yaw - self.facing_yaw;
+            // Wrap to [-PI, PI]
+            if diff > std::f32::consts::PI { diff -= 2.0 * std::f32::consts::PI; }
+            if diff < -std::f32::consts::PI { diff += 2.0 * std::f32::consts::PI; }
+            let rotation_speed = 15.0; // radians/sec - fast but smooth
+            let max_step = rotation_speed * dt_secs;
+            if diff.abs() < max_step {
+                self.facing_yaw = target_yaw;
+            } else {
+                self.facing_yaw += diff.signum() * max_step;
+            }
+            // Keep in [-PI, PI]
+            if self.facing_yaw > std::f32::consts::PI { self.facing_yaw -= 2.0 * std::f32::consts::PI; }
+            if self.facing_yaw < -std::f32::consts::PI { self.facing_yaw += 2.0 * std::f32::consts::PI; }
+        }
+
+        if self.third_person {
+            // 3rd person: camera orbits behind player
+            let center = Vec3::new(
+                self.feet_pos.x,
+                self.feet_pos.y + PLAYER_HEIGHT * 0.5 + THIRD_PERSON_HEIGHT_OFFSET,
+                self.feet_pos.z,
+            );
+            let forward = self.camera.forward();
+            let desired_pos = center - forward * THIRD_PERSON_DISTANCE;
+
+            // Camera-terrain collision: raycast from center toward desired camera position
+            let cam_dir = (desired_pos - center).normalize_or_zero();
+            let mut cam_dist = THIRD_PERSON_DISTANCE;
+
+            if let Some(world) = world {
+                // Check if camera would be inside a block by sampling along the ray
+                let steps = 10;
+                for i in 1..=steps {
+                    let t = (i as f32 / steps as f32) * THIRD_PERSON_DISTANCE;
+                    let sample = center + cam_dir * t;
+                    let bx = sample.x.floor() as i32;
+                    let by = sample.y.floor() as i32;
+                    let bz = sample.z.floor() as i32;
+                    if let Some(block) = world.get_block(bx, by, bz) {
+                        if block.is_solid() {
+                            cam_dist = (t - 0.5).max(THIRD_PERSON_MIN_DISTANCE);
+                            break;
+                        }
+                    }
+                }
+            }
+
+            self.camera.position = center + cam_dir * cam_dist;
+        } else {
+            // 1st person: camera at eye height
+            self.camera.position = Vec3::new(
+                self.feet_pos.x,
+                self.feet_pos.y + PLAYER_EYE_HEIGHT,
+                self.feet_pos.z,
+            );
+        }
     }
 
     fn update_fly_mode(&mut self, dt_secs: f32) {
@@ -671,6 +807,7 @@ impl Player {
             [self.camera.yaw, self.camera.pitch],
             self.inventory.selected_index() as u8,
             self.fly_mode,
+            self.third_person,
             &self.inventory,
         )
     }
@@ -689,7 +826,7 @@ impl Player {
         self.camera.yaw = data.rotation[0];
         self.camera.pitch = data.rotation[1];
 
-        // Restore fly mode
+        // Restore fly mode (third_person defaults to true, don't override from old saves)
         self.fly_mode = data.fly_mode;
 
         // Restore inventory
@@ -776,7 +913,9 @@ mod tests {
     fn test_player_creation() {
         let player = Player::new(Vec3::new(0.0, 100.0, 0.0));
 
-        assert!((player.position().y - 100.0).abs() < 0.001);
+        // Camera is positioned behind player for third-person view, so Y won't match exactly.
+        // Verify feet position instead (derived from input camera position).
+        assert!((player.feet_position().y - (100.0 - PLAYER_EYE_HEIGHT)).abs() < 0.001);
         assert!(!player.is_flying());
         assert!(!player.is_on_ground());
         assert!(!player.is_sprinting());
