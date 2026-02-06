@@ -4,6 +4,7 @@
 
 pub mod app;
 pub mod audio;
+pub mod entity;
 pub mod inventory;
 pub mod renderer;
 pub mod settings;

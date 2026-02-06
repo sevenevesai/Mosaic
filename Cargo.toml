@@ -31,6 +31,10 @@ image = { version = "0.24", default-features = false, features = ["png"] }
 zstd = "0.13"
 lru = "0.12"
 
+# Entity system
+ufbx = "0.10"
+slotmap = "1.0"
+
 # Audio
 rodio = "0.19"
 

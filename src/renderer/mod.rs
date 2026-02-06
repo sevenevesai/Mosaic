@@ -13,6 +13,7 @@ pub mod grass;
 mod gpu_culling;
 mod impostor;
 mod inventory_ui;
+pub mod character_renderer;
 mod item_renderer;
 mod pipeline;
 mod prop_renderer;
@@ -32,6 +33,7 @@ pub use camera::{Camera, Frustum};
 pub use chunk_pool::ChunkPool;
 pub use debug_overlay::{DebugOverlay, DebugMetrics};
 pub use impostor::{ImpostorRenderer, ImpostorInstance, ImpostorRange};
+pub use character_renderer::{CharacterRenderer, CharacterInstance, MAX_BONES_PER_CHARACTER};
 pub use item_renderer::{ItemRenderer, ItemInstanceData};
 pub use prop_renderer::{PropRenderer, PropInstance};
 pub use prop_registry::{PropRegistry, PropDefinition, PropId, CollisionType};
@@ -256,6 +258,9 @@ pub struct Renderer {
 
     // Inventory UI
     inventory_ui: inventory_ui::InventoryUI,
+
+    // Character entity rendering (skinned characters)
+    character_renderer: CharacterRenderer,
 
     // Item entity rendering (dropped items in world)
     item_renderer: ItemRenderer,
@@ -735,6 +740,15 @@ impl Renderer {
         // Create inventory UI renderer
         let inventory_ui = inventory_ui::InventoryUI::new(&device, surface_format, &texture_bind_group_layout);
 
+        // Create character entity renderer (skinned characters)
+        let mut character_renderer = CharacterRenderer::new(
+            &device,
+            surface_format,
+            &camera_bind_group_layout,
+            &light_buffer,
+        );
+        character_renderer.create_placeholder_texture(&device, &queue);
+
         // Create item entity renderer
         let item_renderer = ItemRenderer::new(
             &device,
@@ -850,6 +864,7 @@ impl Renderer {
             menu_blur_texture,
             menu_blur_texture_view,
             inventory_ui,
+            character_renderer,
             item_renderer,
             prop_renderer,
             prop_registry,
@@ -3088,6 +3103,13 @@ impl Renderer {
                 &self.texture_bind_group,
             );
 
+            // === CHARACTER ENTITY RENDER PASS ===
+            // Render skinned character entities (players, NPCs)
+            self.character_renderer.render(
+                &mut render_pass,
+                &self.camera_bind_group,
+            );
+
             // === SCENERY RENDER PASS ===
             // Render vegetation (grass, flowers, rocks)
             let scenery_count = self.scenery_renderer.render(
@@ -3603,6 +3625,16 @@ impl Renderer {
 
     pub fn queue(&self) -> &Arc<wgpu::Queue> {
         &self.queue
+    }
+
+    /// Get mutable reference to the character renderer.
+    pub fn character_renderer_mut(&mut self) -> &mut CharacterRenderer {
+        &mut self.character_renderer
+    }
+
+    /// Get reference to the character renderer.
+    pub fn character_renderer(&self) -> &CharacterRenderer {
+        &self.character_renderer
     }
 
     /// Update item entity renderer with current items

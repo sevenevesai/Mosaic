@@ -1412,9 +1412,11 @@ dependencies = [
  "pollster",
  "rayon",
  "rodio",
+ "slotmap",
  "tempfile",
  "tracing",
  "tracing-subscriber",
+ "ufbx",
  "wgpu",
  "winit",
  "zstd",
@@ -2463,6 +2465,15 @@ name = "ttf-parser"
 version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
+
+[[package]]
+name = "ufbx"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f6d09c5c5a8ce72ad7853b9c92c2b0aae0a4ae0167055f2ddaabecd7e9bec870"
+dependencies = [
+ "cc",
+]
 
 [[package]]
 name = "unicode-ident"

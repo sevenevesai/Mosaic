@@ -18,6 +18,7 @@ use crate::renderer::{DisplayMode, Renderer, DebugMetrics};
 use crate::settings::Settings;
 use crate::settings_menu::SettingsMenu;
 use crate::utils::profiler::FrameProfiler;
+use crate::entity::{EntityManager, EntityType, Transform, AnimationComponent};
 use crate::world::{WorldManager, ChunkPos, ItemEntityManager, ChestManager, Block, MESH_STATS, save_items, load_items};
 
 /// Main application state
@@ -27,6 +28,7 @@ pub struct App {
     world: WorldManager,
     player: Player,
     item_entities: ItemEntityManager,
+    entity_manager: EntityManager,
     chests: ChestManager,
     profiler: FrameProfiler,
     last_frame: Instant,
@@ -125,6 +127,10 @@ impl App {
             tracing::warn!("Failed to load item entities: {}", e);
         }
 
+        // Initialize entity manager and load test character
+        let mut entity_manager = EntityManager::new();
+        Self::load_test_character(&mut entity_manager, &mut renderer);
+
         // Initialize chest manager
         // TODO: Load chests from disk
         let chests = ChestManager::new();
@@ -135,6 +141,7 @@ impl App {
             world,
             player,
             item_entities,
+            entity_manager,
             chests,
             profiler: FrameProfiler::new(),
             last_frame: Instant::now(),
@@ -758,6 +765,9 @@ impl App {
             .collect();
         self.renderer.update_props("chest", &chest_instances);
 
+        // Update character entity rendering (advance animation + upload)
+        self.update_character_entities(dt.as_secs_f64());
+
         // Build debug metrics
         let pos = self.player.position();
         let chunk_pos = ChunkPos::from_world_pos(pos);
@@ -840,5 +850,248 @@ impl App {
         self.profiler.end_section("render");
 
         self.profiler.end_frame();
+    }
+
+    /// Load a test character model from assets for Phase 1 rendering.
+    fn load_test_character(entity_manager: &mut EntityManager, renderer: &mut Renderer) {
+        use crate::entity::loader;
+        use crate::entity::RenderComponent;
+        use std::sync::Arc;
+
+        // Phase 2 approach: separate mesh, skeleton, and animation files
+        // 1. Mesh from body part FBX (no skeleton, no skin weights)
+        // 2. Skeleton from Avatar_for_Animation.fbx or EmptyBody.fbx
+        // 3. Animations from Anim@xxx.fbx files
+        // Body part mesh vertices default to bone 0 (root bone) - whole mesh follows root motion
+
+        // Step 1: Load skeleton first (needed for animation binding)
+        let skeleton_path = std::path::Path::new("assets/char/animations/v1/Avatar_for_Animation.fbx");
+        let skeleton = match loader::load_skeleton_from_fbx(skeleton_path) {
+            Ok(skel) => {
+                tracing::info!("Loaded skeleton: {} bones", skel.bone_names.len());
+                Arc::new(skel)
+            }
+            Err(e) => {
+                tracing::warn!("Failed to load skeleton from Avatar: {}", e);
+                // Fallback to EmptyBody
+                let empty_path = std::path::Path::new("assets/char/models/EmptyBody.fbx");
+                match loader::load_skeleton_from_fbx(empty_path) {
+                    Ok(skel) => {
+                        tracing::info!("Loaded skeleton from EmptyBody.fbx: {} bones", skel.bone_names.len());
+                        Arc::new(skel)
+                    }
+                    Err(e2) => {
+                        tracing::warn!("Failed to load any skeleton: {}", e2);
+                        return;
+                    }
+                }
+            }
+        };
+
+        // Step 2: Merge body part meshes into a single skinned mesh
+        let models_dir = std::path::Path::new("assets/char/models");
+        let merged = match loader::merge_body_parts(models_dir, &skeleton, loader::HUMANOID_BODY_PARTS) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!("Failed to merge body parts: {}", e);
+                return;
+            }
+        };
+
+        // Log mesh bounds
+        if !merged.vertices.is_empty() {
+            let mut min = [f32::MAX; 3];
+            let mut max = [f32::MIN; 3];
+            for v in &merged.vertices {
+                for i in 0..3 {
+                    min[i] = min[i].min(v.position[i]);
+                    max[i] = max[i].max(v.position[i]);
+                }
+            }
+            tracing::info!(
+                "Merged mesh: {} verts, {} indices, bounds ({:.1},{:.1},{:.1})->({:.1},{:.1},{:.1})",
+                merged.vertices.len(), merged.indices.len(),
+                min[0], min[1], min[2], max[0], max[1], max[2],
+            );
+        }
+
+        // Upload mesh to GPU
+        let device = renderer.device().clone();
+        let queue = renderer.queue().clone();
+        let char_renderer = renderer.character_renderer_mut();
+        let mesh_slot = char_renderer.upload_mesh(&device, &merged.vertices, &merged.indices);
+
+        let bone_count = skeleton.bone_names.len();
+
+        // Upload T-pose bone matrices as initial state
+        let tpose_matrices = skeleton.compute_tpose_matrices();
+        char_renderer.update_bones(&queue, &tpose_matrices);
+
+        // Store skeleton
+        entity_manager.skeletons.push(Arc::clone(&skeleton));
+
+        // Step 3: Load animation clips
+        let anim_files = [
+            "assets/char/animations/v1/Anim@Idle.fbx",
+            "assets/char/animations/v1/Anim@Move.fbx",
+            "assets/char/animations/v1/Anim@ATK1.fbx",
+            "assets/char/animations/v1/Anim@Jump.fbx",
+        ];
+
+        for anim_path_str in &anim_files {
+            let anim_path = std::path::Path::new(anim_path_str);
+            if !anim_path.exists() {
+                tracing::warn!("Animation not found: {}", anim_path_str);
+                continue;
+            }
+            match loader::load_animations(anim_path, &skeleton) {
+                Ok(clips) => {
+                    for clip in clips {
+                        let tracked = clip.bone_tracks.iter().filter(|t| t.is_some()).count();
+                        tracing::info!(
+                            "Loaded animation '{}': {:.2}s, {}/{} bones",
+                            clip.name, clip.duration, tracked, bone_count,
+                        );
+                        entity_manager.animation_clips.push(clip);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to load animation '{}': {}", anim_path_str, e);
+                }
+            }
+        }
+
+        // Load character texture
+        let texture_path = std::path::Path::new("assets/char/textures/Characters/002.png");
+        if texture_path.exists() {
+            if let Err(e) = char_renderer.load_texture(&device, &queue, texture_path) {
+                tracing::warn!("Failed to load character texture: {}", e);
+            } else {
+                tracing::info!("Loaded character texture: {}", texture_path.display());
+            }
+        }
+
+        // Spawn entity
+        let key = entity_manager.spawn(
+            EntityType::Npc,
+            Transform {
+                position: glam::Vec3::ZERO,
+                rotation: glam::Quat::IDENTITY,
+                scale: 0.2,
+            },
+        );
+
+        entity_manager.render.insert(key, RenderComponent {
+            mesh_slot,
+            index_count: merged.indices.len() as u32,
+            bone_offset: 0,
+            bone_count: bone_count as u32,
+        });
+
+        // Add animation component if we have clips
+        if !entity_manager.animation_clips.is_empty() {
+            entity_manager.animations.insert(
+                key,
+                AnimationComponent::new(Arc::clone(&skeleton), 0),
+            );
+            tracing::info!(
+                "Character spawned with {} animation clips (bone 0 = root motion)",
+                entity_manager.animation_clips.len()
+            );
+        } else {
+            tracing::info!("Character spawned (no animations loaded, T-pose)");
+        }
+    }
+
+    /// Update character entity rendering data each frame.
+    fn update_character_entities(&mut self, dt: f64) {
+        use crate::renderer::character_renderer::CharacterInstance;
+
+        // Base position: 5 blocks in front of the player
+        let player_pos = self.player.position();
+        let player_forward = self.player.forward();
+        let base_entity_pos = player_pos + player_forward * 5.0 - glam::Vec3::new(0.0, 2.0, 0.0);
+
+        // Update animations and collect bone matrices + root motion
+        let mut all_bone_matrices = Vec::new();
+        let clips = &self.entity_manager.animation_clips;
+        static FRAME_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let frame = FRAME_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        let anim_keys: Vec<_> = self.entity_manager.animations.keys().collect();
+        for key in &anim_keys {
+            if let Some(anim) = self.entity_manager.animations.get_mut(*key) {
+                let root_motion = anim.update(dt, clips);
+
+
+                // Apply root motion to entity position for visible animation
+                if let Some((root_translation, _root_rotation)) = root_motion {
+                    if let Some(transform) = self.entity_manager.transforms.get_mut(*key) {
+                        // Use base position + scaled root bone offset for visible bobbing/movement
+                        let scale = transform.scale;
+                        transform.position = base_entity_pos + root_translation * scale;
+
+                        // Face the player
+                        let to_player = (player_pos - transform.position).normalize_or_zero();
+                        if to_player.length_squared() > 0.01 {
+                            let yaw = to_player.x.atan2(to_player.z);
+                            transform.rotation = glam::Quat::from_rotation_y(yaw);
+                        }
+                    }
+                } else {
+                    // No root motion - just use base position
+                    if let Some(transform) = self.entity_manager.transforms.get_mut(*key) {
+                        transform.position = base_entity_pos;
+                        let to_player = (player_pos - transform.position).normalize_or_zero();
+                        if to_player.length_squared() > 0.01 {
+                            let yaw = to_player.x.atan2(to_player.z);
+                            transform.rotation = glam::Quat::from_rotation_y(yaw);
+                        }
+                    }
+                }
+
+                // Record where this entity's bones start in the shared buffer
+                if let Some(render) = self.entity_manager.render.get_mut(*key) {
+                    render.bone_offset = all_bone_matrices.len() as u32;
+                    render.bone_count = anim.bone_matrices.len() as u32;
+                }
+                all_bone_matrices.extend_from_slice(&anim.bone_matrices);
+            }
+        }
+
+        // Also position non-animated entities
+        let non_anim_keys: Vec<_> = self.entity_manager.render.keys()
+            .filter(|k| !self.entity_manager.animations.contains_key(*k))
+            .collect();
+        for key in &non_anim_keys {
+            if let Some(transform) = self.entity_manager.transforms.get_mut(*key) {
+                transform.position = base_entity_pos;
+                let to_player = (player_pos - transform.position).normalize_or_zero();
+                if to_player.length_squared() > 0.01 {
+                    let yaw = to_player.x.atan2(to_player.z);
+                    transform.rotation = glam::Quat::from_rotation_y(yaw);
+                }
+            }
+        }
+
+        let queue = self.renderer.queue().clone();
+
+        // Upload bone matrices to GPU
+        if !all_bone_matrices.is_empty() {
+            self.renderer.character_renderer_mut().update_bones(&queue, &all_bone_matrices);
+        }
+
+        // Build instance data for GPU
+        let mut instances = Vec::new();
+        for (_key, transform, render) in self.entity_manager.renderable_entities() {
+            instances.push(CharacterInstance::new(
+                transform.position,
+                transform.rotation,
+                transform.scale,
+                render.bone_offset,
+            ));
+        }
+
+        self.renderer.character_renderer_mut().update_instances(&queue, &instances);
     }
 }
