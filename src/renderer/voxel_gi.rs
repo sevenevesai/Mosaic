@@ -277,6 +277,9 @@ pub struct VoxelGI {
     last_chunk_volume_center: glam::IVec3,
     /// Whether delta upload mode is active (requires stable volume tracking)
     delta_upload_enabled: bool,
+
+    /// Voxel positions currently occupied by the player shadow (for clearing next frame)
+    player_shadow_voxels: Vec<(u32, u32, u32)>,
 }
 
 impl VoxelGI {
@@ -486,6 +489,7 @@ impl VoxelGI {
             next_slot: 0,
             last_chunk_volume_center: glam::IVec3::ZERO,
             delta_upload_enabled: true, // Enable by default
+            player_shadow_voxels: Vec::new(),
         }
     }
 
@@ -2131,6 +2135,104 @@ impl VoxelGI {
     /// Get the bind group for binding in render passes
     pub fn bind_group(&self) -> &wgpu::BindGroup {
         &self.bind_group
+    }
+
+    /// Inject player occupancy voxels into the volume so the character casts shadows.
+    /// Clears previous frame's player voxels, writes new ones, uploads to GPU.
+    pub fn inject_player_shadow(&mut self, queue: &wgpu::Queue, player_feet: Vec3) {
+        if !self.initialized {
+            return;
+        }
+
+        let half_size = (VOXEL_VOLUME_SIZE / 2) as f32;
+        let volume_min = self.last_update_center - Vec3::splat(half_size);
+        let vol_size = VOXEL_VOLUME_SIZE as i32;
+
+        let air_pixel: [u8; 4] = [0, 0, 0, 0];
+        let solid_pixel: [u8; 4] = [255, 0, 1, 0]; // opacity=255, material=1
+
+        // Clear previous frame's player voxels (restore to air)
+        for &(vx, vy, vz) in &self.player_shadow_voxels {
+            let idx = ((vz * VOXEL_VOLUME_SIZE * VOXEL_VOLUME_SIZE
+                      + vy * VOXEL_VOLUME_SIZE
+                      + vx) * 4) as usize;
+            if idx + 3 < self.voxel_cache.len() {
+                self.voxel_cache[idx] = 0;
+                self.voxel_cache[idx + 1] = 0;
+                self.voxel_cache[idx + 2] = 0;
+                self.voxel_cache[idx + 3] = 0;
+            }
+            // Upload cleared voxel to GPU
+            queue.write_texture(
+                wgpu::ImageCopyTexture {
+                    texture: &self.voxel_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d { x: vx, y: vy, z: vz },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &air_pixel,
+                wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4),
+                    rows_per_image: Some(1),
+                },
+                wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            );
+        }
+
+        self.player_shadow_voxels.clear();
+
+        // Calculate player voxel positions (1 wide x 2 tall x 1 deep column)
+        // Player is ~0.6 blocks wide, ~1.8 blocks tall
+        // Use round() for smoother tracking (reduces block-snapping)
+        let px = (player_feet.x.round() as i32) - volume_min.x as i32;
+        let py = (player_feet.y.round() as i32) - volume_min.y as i32;
+        let pz = (player_feet.z.round() as i32) - volume_min.z as i32;
+
+        // Write player voxels: 2 blocks tall at the player's position
+        for dy in 0..2i32 {
+            let vx = px;
+            let vy = py + dy;
+            let vz = pz;
+
+            // Bounds check
+            if vx < 0 || vx >= vol_size || vy < 0 || vy >= vol_size || vz < 0 || vz >= vol_size {
+                continue;
+            }
+
+            let uvx = vx as u32;
+            let uvy = vy as u32;
+            let uvz = vz as u32;
+
+            let idx = ((uvz * VOXEL_VOLUME_SIZE * VOXEL_VOLUME_SIZE
+                      + uvy * VOXEL_VOLUME_SIZE
+                      + uvx) * 4) as usize;
+            if idx + 3 < self.voxel_cache.len() {
+                self.voxel_cache[idx] = 255;
+                self.voxel_cache[idx + 1] = 0;
+                self.voxel_cache[idx + 2] = 1;
+                self.voxel_cache[idx + 3] = 0;
+            }
+
+            // Upload to GPU
+            queue.write_texture(
+                wgpu::ImageCopyTexture {
+                    texture: &self.voxel_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d { x: uvx, y: uvy, z: uvz },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &solid_pixel,
+                wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4),
+                    rows_per_image: Some(1),
+                },
+                wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            );
+
+            self.player_shadow_voxels.push((uvx, uvy, uvz));
+        }
     }
 
     /// Incrementally update only the dirty blocks (FAST PATH)

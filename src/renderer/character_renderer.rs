@@ -88,6 +88,7 @@ impl CharacterRenderer {
         surface_format: wgpu::TextureFormat,
         camera_bind_group_layout: &wgpu::BindGroupLayout,
         light_buffer: &wgpu::Buffer,
+        voxel_gi_bind_group_layout: &wgpu::BindGroupLayout,
     ) -> Self {
         // Shader
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -147,13 +148,14 @@ impl CharacterRenderer {
             ],
         });
 
-        // Pipeline layout: camera(0), character_data(1), texture(2)
+        // Pipeline layout: camera(0), character_data(1), texture(2), voxel_gi(3)
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Character Pipeline Layout"),
             bind_group_layouts: &[
                 camera_bind_group_layout,
                 &character_bind_group_layout,
                 &texture_bind_group_layout,
+                voxel_gi_bind_group_layout,
             ],
             push_constant_ranges: &[],
         });
@@ -592,6 +594,7 @@ impl CharacterRenderer {
         &'a self,
         render_pass: &mut wgpu::RenderPass<'a>,
         camera_bind_group: &'a wgpu::BindGroup,
+        voxel_gi_bind_group: &'a wgpu::BindGroup,
     ) {
         if self.instance_count == 0 || self.mesh_slots.is_empty() {
             return;
@@ -606,6 +609,7 @@ impl CharacterRenderer {
         render_pass.set_bind_group(0, camera_bind_group, &[]);
         render_pass.set_bind_group(1, &self.character_bind_group, &[]);
         render_pass.set_bind_group(2, texture_bg, &[]);
+        render_pass.set_bind_group(3, voxel_gi_bind_group, &[]);
 
         // Render each mesh slot (Phase 1: typically just one mesh)
         for slot in &self.mesh_slots {
@@ -646,6 +650,19 @@ struct LightUniform {
     ambient_color: vec4<f32>,
 }
 
+// Voxel volume uniform (same as chunk shader)
+struct VoxelVolumeUniform {
+    volume_center: vec4<f32>,
+    volume_size: vec4<f32>,
+    inv_volume_size: vec4<f32>,
+    sun_direction: vec4<f32>,
+    sun_color: vec4<f32>,
+    ambient_color: vec4<f32>,
+    time_of_day: vec4<f32>,
+    player_light: vec4<f32>,
+    volume_origin: vec4<i32>,
+};
+
 @group(0) @binding(0)
 var<uniform> camera: CameraUniform;
 
@@ -659,6 +676,16 @@ var<uniform> light: LightUniform;
 var char_texture: texture_2d_array<f32>;
 @group(2) @binding(1)
 var char_sampler: sampler;
+
+// Voxel GI group (shadows)
+@group(3) @binding(0)
+var<uniform> voxel_volume: VoxelVolumeUniform;
+@group(3) @binding(1)
+var t_voxel: texture_3d<f32>;
+@group(3) @binding(2)
+var t_radiance: texture_3d<f32>;
+@group(3) @binding(3)
+var s_voxel: sampler;
 
 // Per-vertex attributes
 struct VertexInput {
@@ -686,6 +713,72 @@ struct VertexOutput {
     @location(2) world_position: vec3<f32>,
     @location(3) @interpolate(flat) texture_layer: u32,
 }
+
+// === VOXEL GI SHADOW FUNCTIONS ===
+
+fn world_to_voxel_uv(world_pos: vec3<f32>) -> vec3<f32> {
+    let center = voxel_volume.volume_center.xyz;
+    let half_size = 128.0;
+    let local = world_pos - center + vec3<f32>(half_size);
+    return local / 256.0;
+}
+
+fn char_ray_march_shadow(world_pos: vec3<f32>, light_dir: vec3<f32>) -> f32 {
+    let max_steps = 64;
+    var accumulated_opacity = 0.0;
+    var solid_hits = 0;
+
+    // Start offset to escape the character's own voxels
+    var pos = world_pos + light_dir * 1.2;
+    var total_distance = 1.2;
+
+    for (var i = 0; i < max_steps; i++) {
+        var current_step: f32;
+        if (i < 8) {
+            current_step = 0.5;
+        } else if (i < 24) {
+            current_step = 1.0;
+        } else {
+            current_step = 2.0;
+        }
+
+        pos += light_dir * current_step;
+        total_distance += current_step;
+
+        let center_dist = length(pos - voxel_volume.volume_center.xyz);
+        if (center_dist > 120.0) { break; }
+
+        let edge_fade = 1.0 - smoothstep(100.0, 120.0, center_dist);
+
+        let uv = world_to_voxel_uv(pos);
+        let voxel = textureSampleLevel(t_voxel, s_voxel, uv, 0.0);
+        let opacity = voxel.r * edge_fade;
+
+        if (opacity > 0.5) {
+            solid_hits += 1;
+            accumulated_opacity += 0.4;
+            if (solid_hits >= 3) { break; }
+        } else if (opacity > 0.1) {
+            accumulated_opacity += opacity * 0.2;
+        }
+
+        if (accumulated_opacity >= 1.1) { break; }
+    }
+
+    var shadow: f32;
+    if (solid_hits > 0) {
+        let shadow_strength = smoothstep(0.3, 0.7, clamp(accumulated_opacity, 0.0, 1.0));
+        shadow = mix(1.0, 0.25, shadow_strength);
+    } else if (accumulated_opacity > 0.0) {
+        shadow = 1.0 - clamp(accumulated_opacity * 0.5, 0.0, 0.5);
+    } else {
+        shadow = 1.0;
+    }
+
+    return shadow;
+}
+
+// === VERTEX SHADER ===
 
 @vertex
 fn vs_character(vertex: VertexInput, instance: InstanceInput) -> VertexOutput {
@@ -727,6 +820,8 @@ fn vs_character(vertex: VertexInput, instance: InstanceInput) -> VertexOutput {
     return out;
 }
 
+// === FRAGMENT SHADER ===
+
 @fragment
 fn fs_character(in: VertexOutput) -> @location(0) vec4<f32> {
     // Sample character texture from array using per-vertex layer index
@@ -745,11 +840,20 @@ fn fs_character(in: VertexOutput) -> @location(0) vec4<f32> {
     let moon_intensity = light.moon_direction.w;
     let ambient = light.ambient_color.rgb;
 
-    // Diffuse lighting from sun
-    let sun_ndotl = max(dot(normal, sun_dir), 0.0);
-    let sun_diffuse = light.sun_color.rgb * sun_ndotl * sun_intensity;
+    // Shadow from voxel GI (only when sun is up)
+    var shadow = 1.0;
+    let shadow_blend = voxel_volume.time_of_day.w;
+    if (sun_intensity > 0.05 && shadow_blend > 0.0) {
+        let voxel_sun_dir = normalize(voxel_volume.sun_direction.xyz);
+        shadow = char_ray_march_shadow(in.world_position, voxel_sun_dir);
+        shadow = mix(1.0, shadow, shadow_blend);
+    }
 
-    // Diffuse lighting from moon (dimmer)
+    // Diffuse lighting from sun (modulated by shadow)
+    let sun_ndotl = max(dot(normal, sun_dir), 0.0);
+    let sun_diffuse = light.sun_color.rgb * sun_ndotl * sun_intensity * shadow;
+
+    // Diffuse lighting from moon (dimmer, no shadows)
     let moon_ndotl = max(dot(normal, moon_dir), 0.0);
     let moon_diffuse = light.moon_color.rgb * moon_ndotl * moon_intensity * 0.3;
 

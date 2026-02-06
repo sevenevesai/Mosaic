@@ -848,6 +848,7 @@ impl Renderer {
             surface_format,
             &camera_bind_group_layout,
             &light_buffer,
+            voxel_gi.bind_group_layout(),
         );
         character_renderer.create_placeholder_texture(&device, &queue);
 
@@ -2834,6 +2835,7 @@ impl Renderer {
         target_block: Option<[i32; 3]>,
         mining_target: Option<[i32; 3]>,
         mining_progress: f32,
+        player_feet_pos: glam::Vec3,
         debug_metrics: &DebugMetrics,
         held_light_emission: u8,  // Light emission of held item (0 = none, 14 = torch)
         settings_menu: &crate::settings_menu::SettingsMenu,
@@ -3334,10 +3336,11 @@ impl Renderer {
             );
 
             // === CHARACTER ENTITY RENDER PASS ===
-            // Render skinned character entities (players, NPCs)
+            // Render skinned character entities (players, NPCs) with voxel GI shadows
             self.character_renderer.render(
                 &mut render_pass,
                 &self.camera_bind_group,
+                self.voxel_gi.bind_group(),
             );
 
             // === SCENERY RENDER PASS ===
@@ -3840,6 +3843,9 @@ impl Renderer {
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
         let submit_elapsed = submit_start.elapsed();
+
+        // Inject player voxels AFTER submit so they aren't overwritten by GPU fill compute
+        self.voxel_gi.inject_player_shadow(&self.queue, player_feet_pos);
 
         // Begin async readback of GPU timing
         self.gpu_profiler.begin_readback();

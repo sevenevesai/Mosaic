@@ -1080,7 +1080,8 @@ impl App {
         let held_light = self.player.selected_block().light_emission();
         let mining_target = self.player.mining_target();
         let mining_progress = self.player.mining_progress();
-        match self.renderer.render(&self.player.camera, &mut self.world, &self.profiler, target_block, mining_target, mining_progress, &debug_metrics, held_light, &self.settings_menu, &self.player.inventory) {
+        let player_feet_pos = self.player.feet_position();
+        match self.renderer.render(&self.player.camera, &mut self.world, &self.profiler, target_block, mining_target, mining_progress, player_feet_pos, &debug_metrics, held_light, &self.settings_menu, &self.player.inventory) {
             Ok(_) => {
                 // Update profiler with render stats
                 self.profiler.update_render_stats(self.renderer.stats.clone());
