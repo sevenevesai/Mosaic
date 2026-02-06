@@ -666,21 +666,21 @@ pub const BODY_PART_NAMES: &[&str] = &[
 pub fn default_adjustments() -> Vec<BodyPartAdjustment> {
     vec![
         // Center/spine parts
-        BodyPartAdjustment { offset: Vec3::new( 0.0, -2.5,  0.0), scale: 1.0 }, // Root
+        BodyPartAdjustment { offset: Vec3::new( 0.0, -2.0,  0.0), scale: 1.0 }, // Root
         BodyPartAdjustment { offset: Vec3::new( 0.0, -1.5,  0.0), scale: 1.0 }, // Spine
         BodyPartAdjustment { offset: Vec3::new( 0.0,  0.0,  0.0), scale: 1.0 }, // Chest
         BodyPartAdjustment { offset: Vec3::new( 0.0,  1.0,  0.0), scale: 1.0 }, // Head
         BodyPartAdjustment { offset: Vec3::new( 0.0,  0.0,  0.0), scale: 1.0 }, // Hair
         // Left side
-        BodyPartAdjustment { offset: Vec3::new(-2.5, -4.0, -1.0), scale: 1.0 }, // Hip_L
-        BodyPartAdjustment { offset: Vec3::new(-2.0, -4.0, -0.5), scale: 1.0 }, // Knee_L
-        BodyPartAdjustment { offset: Vec3::new( 1.0, -3.5,  0.0), scale: 1.0 }, // Shoulder_L
-        BodyPartAdjustment { offset: Vec3::new( 0.5, -4.0,  0.0), scale: 1.0 }, // Elbow_L
-        // Right side (mirrored X from left, independently adjustable)
-        BodyPartAdjustment { offset: Vec3::new( 2.5, -4.0, -1.0), scale: 1.0 }, // Hip_R
-        BodyPartAdjustment { offset: Vec3::new( 2.0, -4.0, -0.5), scale: 1.0 }, // Knee_R
-        BodyPartAdjustment { offset: Vec3::new(-1.0, -3.5,  0.0), scale: 1.0 }, // Shoulder_R
-        BodyPartAdjustment { offset: Vec3::new(-0.5, -4.0,  0.0), scale: 1.0 }, // Elbow_R
+        BodyPartAdjustment { offset: Vec3::new(-2.5, -3.0, -1.0), scale: 1.0 }, // Hip_L
+        BodyPartAdjustment { offset: Vec3::new(-2.5, -3.0, -1.0), scale: 1.0 }, // Knee_L
+        BodyPartAdjustment { offset: Vec3::new( 0.0, -4.0,  0.5), scale: 1.0 }, // Shoulder_L
+        BodyPartAdjustment { offset: Vec3::new( 2.0, -4.5,  1.0), scale: 1.0 }, // Elbow_L
+        // Right side (independently adjustable)
+        BodyPartAdjustment { offset: Vec3::new( 2.5, -3.0, -0.5), scale: 1.0 }, // Hip_R
+        BodyPartAdjustment { offset: Vec3::new( 2.5, -3.0,  0.0), scale: 1.0 }, // Knee_R
+        BodyPartAdjustment { offset: Vec3::new(-0.5, -4.0,  0.0), scale: 1.0 }, // Shoulder_R
+        BodyPartAdjustment { offset: Vec3::new( 0.0, -4.0,  1.5), scale: 1.0 }, // Elbow_R
     ]
 }
 
@@ -689,21 +689,21 @@ pub fn default_adjustments() -> Vec<BodyPartAdjustment> {
 /// Paired limbs (Hip, Shoulder, Elbow, Knee) have both right and left entries.
 pub const HUMANOID_BODY_PARTS: &[BodyPart] = &[
     // Center/spine parts - body texture for torso parts, separate textures for head/hair
-    BodyPart { folder: "Root", file: "Root001.fbx", bone_names: &["Root_M", "Root"], texture: Some("Characters/002.png"), mirror: false },
-    BodyPart { folder: "Spine", file: "Spine001.fbx", bone_names: &["Spine1_M", "Spine"], texture: Some("Characters/002.png"), mirror: false },
-    BodyPart { folder: "Chest", file: "Chest001.fbx", bone_names: &["Chest_M", "Chest"], texture: Some("Characters/002.png"), mirror: false },
+    BodyPart { folder: "Root", file: "Root020.fbx", bone_names: &["Root_M", "Root"], texture: Some("Characters/020.png"), mirror: false },
+    BodyPart { folder: "Spine", file: "Spine020.fbx", bone_names: &["Spine1_M", "Spine"], texture: Some("Characters/020.png"), mirror: false },
+    BodyPart { folder: "Chest", file: "Chest020.fbx", bone_names: &["Chest_M", "Chest"], texture: Some("Characters/020.png"), mirror: false },
     BodyPart { folder: "Head", file: "Head001.fbx", bone_names: &["Head_M", "Head"], texture: Some("Head/Head001.png"), mirror: false },
     BodyPart { folder: "Hair", file: "Hair001.fbx", bone_names: &["Head_M", "Head"], texture: Some("Hair/Hair001.png"), mirror: false },
     // Left side limbs (FBX meshes are at positive X, which matches left side)
-    BodyPart { folder: "Hip", file: "Hip001.fbx", bone_names: &["Hip_L"], texture: Some("Characters/002.png"), mirror: false },
-    BodyPart { folder: "Knee", file: "Knee001.fbx", bone_names: &["Knee_L"], texture: Some("Characters/002.png"), mirror: false },
-    BodyPart { folder: "Shoulder", file: "Shoulder001.fbx", bone_names: &["Shoulder_L"], texture: Some("Characters/002.png"), mirror: false },
-    BodyPart { folder: "Elbow", file: "Elbow001.fbx", bone_names: &["Elbow_L"], texture: Some("Characters/002.png"), mirror: false },
+    BodyPart { folder: "Hip", file: "Hip020.fbx", bone_names: &["Hip_L"], texture: Some("Characters/020.png"), mirror: false },
+    BodyPart { folder: "Knee", file: "Knee020.fbx", bone_names: &["Knee_L"], texture: Some("Characters/020.png"), mirror: false },
+    BodyPart { folder: "Shoulder", file: "Shoulder020.fbx", bone_names: &["Shoulder_L"], texture: Some("Characters/020.png"), mirror: false },
+    BodyPart { folder: "Elbow", file: "Elbow020.fbx", bone_names: &["Elbow_L"], texture: Some("Characters/020.png"), mirror: false },
     // Right side limbs (mirrored from left side meshes to negative X)
-    BodyPart { folder: "Hip", file: "Hip001.fbx", bone_names: &["Hip_R"], texture: Some("Characters/002.png"), mirror: true },
-    BodyPart { folder: "Knee", file: "Knee001.fbx", bone_names: &["Knee_R"], texture: Some("Characters/002.png"), mirror: true },
-    BodyPart { folder: "Shoulder", file: "Shoulder001.fbx", bone_names: &["Shoulder_R"], texture: Some("Characters/002.png"), mirror: true },
-    BodyPart { folder: "Elbow", file: "Elbow001.fbx", bone_names: &["Elbow_R"], texture: Some("Characters/002.png"), mirror: true },
+    BodyPart { folder: "Hip", file: "Hip020.fbx", bone_names: &["Hip_R"], texture: Some("Characters/020.png"), mirror: true },
+    BodyPart { folder: "Knee", file: "Knee020.fbx", bone_names: &["Knee_R"], texture: Some("Characters/020.png"), mirror: true },
+    BodyPart { folder: "Shoulder", file: "Shoulder020.fbx", bone_names: &["Shoulder_R"], texture: Some("Characters/020.png"), mirror: true },
+    BodyPart { folder: "Elbow", file: "Elbow020.fbx", bone_names: &["Elbow_R"], texture: Some("Characters/020.png"), mirror: true },
 ];
 
 /// Find bone index by name. Tries exact match first (case-insensitive),

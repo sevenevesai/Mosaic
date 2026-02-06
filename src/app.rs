@@ -79,6 +79,7 @@ impl BodyPartEditor {
         lines.push("[/] part  Arrows X/Z".to_string());
         lines.push("PgUp/Dn Y  +/- scale".to_string());
         lines.push("Shift=fine  Enter=log".to_string());
+        lines.push("Tab=cycle animation".to_string());
         lines.push(String::new());
 
         for (i, name) in BODY_PART_NAMES.iter().enumerate() {
@@ -487,6 +488,21 @@ impl App {
                         }
                         KeyCode::Enter if pressed && self.body_part_editor.active => {
                             self.body_part_editor.log_values();
+                        }
+                        KeyCode::Tab if pressed && self.body_part_editor.active => {
+                            // Cycle animation clip on all animated entities
+                            let clip_count = self.entity_manager.animation_clips.len();
+                            if clip_count > 0 {
+                                for anim in self.entity_manager.animations.values_mut() {
+                                    anim.current_clip = (anim.current_clip + 1) % clip_count;
+                                    anim.playback_time = 0.0;
+                                }
+                                let idx = self.entity_manager.animations.values().next()
+                                    .map(|a| a.current_clip).unwrap_or(0);
+                                let name = self.entity_manager.animation_clips.get(idx)
+                                    .map(|c| c.name.as_str()).unwrap_or("?");
+                                tracing::info!("Animation: [{}] {}", idx, name);
+                            }
                         }
                         _ => {
                             self.player.handle_key(key_code, pressed);
