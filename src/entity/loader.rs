@@ -549,21 +549,21 @@ pub struct BodyPart {
 /// Paired limbs (Hip, Shoulder, Elbow, Knee) have both right and left entries.
 pub const HUMANOID_BODY_PARTS: &[BodyPart] = &[
     // Center/spine parts
-    BodyPart { folder: "Root", file: "Root001.fbx", bone_names: &["Root_M", "Root"], texture: Some("Characters/002.png"), mirror: false },
-    BodyPart { folder: "Spine", file: "Spine001.fbx", bone_names: &["Spine1_M", "Spine"], texture: Some("Characters/002.png"), mirror: false },
-    BodyPart { folder: "Chest", file: "Chest001.fbx", bone_names: &["Chest_M", "Chest"], texture: Some("Characters/002.png"), mirror: false },
-    BodyPart { folder: "Head", file: "Head001.fbx", bone_names: &["Head_M", "Head"], texture: Some("Characters/002.png"), mirror: false },
-    BodyPart { folder: "Hair", file: "Hair001.fbx", bone_names: &["Head_M", "Head"], texture: Some("Characters/002.png"), mirror: false },
+    BodyPart { folder: "Root", file: "Root001.fbx", bone_names: &["Root_M", "Root"], texture: Some("Characters/001.png"), mirror: false },
+    BodyPart { folder: "Spine", file: "Spine001.fbx", bone_names: &["Spine1_M", "Spine"], texture: Some("Characters/001.png"), mirror: false },
+    BodyPart { folder: "Chest", file: "Chest001.fbx", bone_names: &["Chest_M", "Chest"], texture: Some("Characters/001.png"), mirror: false },
+    BodyPart { folder: "Head", file: "Head001.fbx", bone_names: &["Head_M", "Head"], texture: Some("Characters/001.png"), mirror: false },
+    BodyPart { folder: "Hair", file: "Hair001.fbx", bone_names: &["Head_M", "Head"], texture: Some("Characters/001.png"), mirror: false },
     // Right side limbs
-    BodyPart { folder: "Hip", file: "Hip001.fbx", bone_names: &["Hip_R"], texture: Some("Characters/002.png"), mirror: false },
-    BodyPart { folder: "Knee", file: "Knee001.fbx", bone_names: &["Knee_R"], texture: Some("Characters/002.png"), mirror: false },
-    BodyPart { folder: "Shoulder", file: "Shoulder001.fbx", bone_names: &["Shoulder_R"], texture: Some("Characters/002.png"), mirror: false },
-    BodyPart { folder: "Elbow", file: "Elbow001.fbx", bone_names: &["Elbow_R"], texture: Some("Characters/002.png"), mirror: false },
+    BodyPart { folder: "Hip", file: "Hip001.fbx", bone_names: &["Hip_R"], texture: Some("Characters/001.png"), mirror: false },
+    BodyPart { folder: "Knee", file: "Knee001.fbx", bone_names: &["Knee_R"], texture: Some("Characters/001.png"), mirror: false },
+    BodyPart { folder: "Shoulder", file: "Shoulder001.fbx", bone_names: &["Shoulder_R"], texture: Some("Characters/001.png"), mirror: false },
+    BodyPart { folder: "Elbow", file: "Elbow001.fbx", bone_names: &["Elbow_R"], texture: Some("Characters/001.png"), mirror: false },
     // Left side limbs (mirrored from right side meshes)
-    BodyPart { folder: "Hip", file: "Hip001.fbx", bone_names: &["Hip_L"], texture: Some("Characters/002.png"), mirror: true },
-    BodyPart { folder: "Knee", file: "Knee001.fbx", bone_names: &["Knee_L"], texture: Some("Characters/002.png"), mirror: true },
-    BodyPart { folder: "Shoulder", file: "Shoulder001.fbx", bone_names: &["Shoulder_L"], texture: Some("Characters/002.png"), mirror: true },
-    BodyPart { folder: "Elbow", file: "Elbow001.fbx", bone_names: &["Elbow_L"], texture: Some("Characters/002.png"), mirror: true },
+    BodyPart { folder: "Hip", file: "Hip001.fbx", bone_names: &["Hip_L"], texture: Some("Characters/001.png"), mirror: true },
+    BodyPart { folder: "Knee", file: "Knee001.fbx", bone_names: &["Knee_L"], texture: Some("Characters/001.png"), mirror: true },
+    BodyPart { folder: "Shoulder", file: "Shoulder001.fbx", bone_names: &["Shoulder_L"], texture: Some("Characters/001.png"), mirror: true },
+    BodyPart { folder: "Elbow", file: "Elbow001.fbx", bone_names: &["Elbow_L"], texture: Some("Characters/001.png"), mirror: true },
 ];
 
 /// Find bone index by name (case-insensitive partial match).
@@ -594,9 +594,6 @@ pub fn merge_body_parts(
     // Map texture path to layer index for deduplication
     let mut texture_to_layer: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
 
-    // Pre-compute bone world positions for alignment
-    let bone_world_positions = skeleton.get_bone_world_positions();
-
     for part in parts {
         let mesh_path = models_dir.join(part.folder).join(part.file);
         if !mesh_path.exists() {
@@ -619,26 +616,8 @@ pub fn merge_body_parts(
             }
         };
 
-        // Compute mesh centroid for alignment (account for mirroring)
-        let mut centroid = Vec3::ZERO;
-        for v in &model.vertices {
-            let mut pos = Vec3::from_array(v.position);
-            if part.mirror {
-                pos.x = -pos.x;
-            }
-            centroid += pos;
-        }
-        if !model.vertices.is_empty() {
-            centroid /= model.vertices.len() as f32;
-        }
-
-        // Get bone's world position from rest pose
-        let bone_world_pos = bone_world_positions.get(bone_idx as usize)
-            .copied()
-            .unwrap_or(Vec3::ZERO);
-
-        // Compute offset to align mesh centroid to bone position
-        let offset = bone_world_pos - centroid;
+        // No offset - meshes are positioned by the skinning system via bone matrices
+        let offset = Vec3::ZERO;
 
         // Determine texture layer for this part (deduplicated)
         let texture_layer = if let Some(tex) = part.texture {

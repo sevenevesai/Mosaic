@@ -983,13 +983,14 @@ impl App {
             char_renderer.create_placeholder_texture(&device, &queue);
         }
 
-        // Spawn entity (2x smaller, 1 block lower, 1 block further away, facing player)
+        // Spawn entity near player spawn location, facing player
+        // Player typically spawns around Y=50-60, Z=5000
         let key = entity_manager.spawn(
             EntityType::Npc,
             Transform {
-                position: glam::Vec3::new(0.0, -1.0, 1.0),
-                rotation: glam::Quat::from_rotation_y(std::f32::consts::PI), // 180° to face player
-                scale: 0.1,
+                position: glam::Vec3::new(0.0, 50.0, 5003.0),
+                rotation: glam::Quat::from_rotation_y(std::f32::consts::PI),
+                scale: 0.05, // Small scale for testing
             },
         );
 
