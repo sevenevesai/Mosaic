@@ -522,6 +522,100 @@ pub fn load_skeleton_from_fbx(path: &Path) -> Result<Skeleton, String> {
     })
 }
 
+/// Compute the scale factor to convert body part mesh coordinates into skeleton bind-pose space.
+///
+/// The body part FBX files and the skeleton FBX often use different unit scales.
+/// We detect this by comparing the FBX unit_meters settings from both files.
+/// Fallback: measure the vertex height range vs skeleton bone height range.
+fn compute_mesh_to_skeleton_scale(
+    models_dir: &Path,
+    skeleton: &Skeleton,
+    parts: &[BodyPart],
+) -> f32 {
+    // Strategy 1: Compare FBX scene unit_meters between body part and skeleton files.
+    if let Some(part) = parts.first() {
+        let mesh_path = models_dir.join(part.folder).join(part.file);
+        if let Some(path_str) = mesh_path.to_str() {
+            if let Ok(scene) = ufbx::load_file(path_str, ufbx::LoadOpts::default()) {
+                let mesh_unit = scene.settings.unit_meters as f32;
+                tracing::info!("Body part FBX unit_meters: {:.6}", mesh_unit);
+
+                let skel_path = "assets/char/animations/v1/Avatar_for_Animation.fbx";
+                if let Ok(skel_scene) = ufbx::load_file(skel_path, ufbx::LoadOpts::default()) {
+                    let skel_unit = skel_scene.settings.unit_meters as f32;
+                    tracing::info!("Skeleton FBX unit_meters: {:.6}", skel_unit);
+
+                    if mesh_unit > 0.0 && skel_unit > 0.0 && (mesh_unit - skel_unit).abs() > 1e-6 {
+                        let scale = mesh_unit / skel_unit;
+                        tracing::info!("Unit scale ratio (mesh/skel): {:.4}", scale);
+                        return scale;
+                    }
+                }
+
+                // Strategy 2: Check root/mesh node transforms for baked scale.
+                for node in scene.nodes.iter() {
+                    if node.mesh.is_some() {
+                        let geo = &node.geometry_transform;
+                        let geo_scale = Vec3::new(
+                            geo.scale.x as f32,
+                            geo.scale.y as f32,
+                            geo.scale.z as f32,
+                        );
+                        if (geo_scale - Vec3::ONE).length() > 0.01 {
+                            tracing::info!("Mesh node geometry scale: [{:.3}, {:.3}, {:.3}]", geo_scale.x, geo_scale.y, geo_scale.z);
+                            return geo_scale.y;
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // Strategy 3: Measure empirically from vertex Y range vs skeleton bone Y range.
+    let bone_positions = skeleton.get_bone_world_positions();
+    let skel_min_y = bone_positions.iter().map(|p| p.y).fold(f32::MAX, f32::min);
+    let skel_max_y = bone_positions.iter().map(|p| p.y).fold(f32::MIN, f32::max);
+    let skel_height = skel_max_y - skel_min_y;
+
+    if skel_height < 0.1 {
+        tracing::warn!("Skeleton has near-zero height range, using scale 1.0");
+        return 1.0;
+    }
+
+    // Deduplicate mesh files to avoid loading the same file twice (mirrored parts)
+    let mut seen_files = std::collections::HashSet::new();
+    let mut mesh_min_y = f32::MAX;
+    let mut mesh_max_y = f32::MIN;
+    for part in parts {
+        let key = format!("{}/{}", part.folder, part.file);
+        if !seen_files.insert(key) { continue; }
+        let mesh_path = models_dir.join(part.folder).join(part.file);
+        if !mesh_path.exists() { continue; }
+        if let Ok(model) = load_fbx(&mesh_path) {
+            for v in &model.vertices {
+                mesh_min_y = mesh_min_y.min(v.position[1]);
+                mesh_max_y = mesh_max_y.max(v.position[1]);
+            }
+        }
+    }
+
+    let mesh_height = mesh_max_y - mesh_min_y;
+    if mesh_height < 0.1 {
+        tracing::warn!("Mesh has near-zero height range, using scale 1.0");
+        return 1.0;
+    }
+
+    let scale = skel_height / mesh_height;
+    tracing::info!(
+        "Empirical scale: skel Y [{:.1}, {:.1}] h={:.1}, mesh Y [{:.1}, {:.1}] h={:.1}, scale={:.4}",
+        skel_min_y, skel_max_y, skel_height,
+        mesh_min_y, mesh_max_y, mesh_height,
+        scale,
+    );
+    scale
+}
+
 /// Result of merging multiple body part meshes.
 pub struct MergedCharacterMesh {
     pub vertices: Vec<CharacterVertex>,
@@ -593,7 +687,8 @@ fn find_bone_index(skeleton: &Skeleton, names: &[&str]) -> Option<u8> {
 /// Load and merge multiple body part meshes into a single skinned mesh.
 ///
 /// Each body part is assigned 100% weight to its designated bone(s).
-/// Vertices are transformed to align with the bone's rest position.
+/// Vertices are scaled from mesh space into skeleton bind-pose space so that
+/// the standard skinning equation (global * inverse_bind * vertex) works correctly.
 pub fn merge_body_parts(
     models_dir: &Path,
     skeleton: &Skeleton,
@@ -604,6 +699,21 @@ pub fn merge_body_parts(
     let mut texture_paths: Vec<std::path::PathBuf> = Vec::new();
     // Map texture path to layer index for deduplication
     let mut texture_to_layer: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+
+    // Compute mesh-to-skeleton scale factor.
+    //
+    // Body part FBX meshes and the skeleton FBX use different unit scales.
+    // We determine the correct scale by loading a reference mesh (Root) and
+    // comparing its geometry_to_node transform, or by measuring the ratio
+    // between known mesh positions and skeleton bind-pose positions.
+    //
+    // We use the Root mesh center vs Root_M bone as the primary reference,
+    // combined with the Head mesh vs Head_M bone to get two data points
+    // and derive a uniform scale + offset if needed.
+    //
+    // For now: load the first body part's FBX scene to read its root node scale.
+    let mesh_to_skeleton_scale = compute_mesh_to_skeleton_scale(models_dir, skeleton, parts);
+    tracing::info!("Mesh-to-skeleton scale factor: {:.4}", mesh_to_skeleton_scale);
 
     for part in parts {
         let mesh_path = models_dir.join(part.folder).join(part.file);
@@ -627,13 +737,6 @@ pub fn merge_body_parts(
             }
         };
 
-        // Body parts are designed to be parented to bones with local position zero.
-        // Get bone's world position (translation only, no rotation) from rest pose.
-        let bone_bind_transform = skeleton.inverse_bind_matrices
-            .get(bone_idx as usize)
-            .map(|inv_bind| inv_bind.inverse())
-            .unwrap_or(Mat4::IDENTITY);
-
         // Determine texture layer for this part (deduplicated)
         let texture_layer = if let Some(tex) = part.texture {
             let tex_key = tex.to_string();
@@ -652,7 +755,7 @@ pub fn merge_body_parts(
         let base_vertex = all_vertices.len() as u32;
         let vert_count = model.vertices.len();
 
-        // Compute mesh center for alignment
+        // Compute mesh bounds and center
         let mut mesh_min = Vec3::splat(f32::MAX);
         let mut mesh_max = Vec3::splat(f32::MIN);
         for v in &model.vertices {
@@ -662,23 +765,31 @@ pub fn merge_body_parts(
         }
         let mesh_center = (mesh_min + mesh_max) * 0.5;
 
-        // Get bone's bind-pose position
+        // Get bone's bind-pose world position
+        let bone_bind_transform = skeleton.inverse_bind_matrices
+            .get(bone_idx as usize)
+            .map(|inv_bind| inv_bind.inverse())
+            .unwrap_or(Mat4::IDENTITY);
         let bone_pos = bone_bind_transform.w_axis.truncate();
 
-        // Offset to align mesh center with bone position
-        // This makes the mesh "attach" to the bone properly for skinning
-        let effective_mesh_center = if part.mirror { Vec3::new(-mesh_center.x, mesh_center.y, mesh_center.z) } else { mesh_center };
-        let align_offset = bone_pos - effective_mesh_center;
+        let effective_mesh_center = if part.mirror {
+            Vec3::new(-mesh_center.x, mesh_center.y, mesh_center.z)
+        } else {
+            mesh_center
+        };
+        let scaled_center = effective_mesh_center * mesh_to_skeleton_scale;
 
         tracing::info!(
-            "  {} mesh_center=[{:.1},{:.1},{:.1}] bone=[{:.1},{:.1},{:.1}] offset=[{:.1},{:.1},{:.1}]",
+            "  {} scaled=[{:.1},{:.1},{:.1}] bone=[{:.1},{:.1},{:.1}]",
             part.file,
-            mesh_center.x, mesh_center.y, mesh_center.z,
+            scaled_center.x, scaled_center.y, scaled_center.z,
             bone_pos.x, bone_pos.y, bone_pos.z,
-            align_offset.x, align_offset.y, align_offset.z
         );
 
-        // Add vertices with bone weight assignment, position transform, and texture layer
+        // Add vertices: uniform scale from mesh space into skeleton bind-pose space.
+        // No per-bone offset — the mesh's own proportions define the visual shape.
+        // The skeleton bone pivots may not perfectly match mesh centers, but this
+        // preserves the artist's intended proportions for the stylized character.
         for mut v in model.vertices {
             let mut pos = Vec3::from_array(v.position);
             let mut normal = Vec3::from_array(v.normal);
@@ -689,20 +800,11 @@ pub fn merge_body_parts(
                 normal.x = -normal.x;
             }
 
-            // Translate-only alignment: move mesh center to skeleton bone position.
-            //
-            // The mesh and skeleton have different coordinate systems (~2x scale diff),
-            // but both are Y-up with the same orientation. We only translate (no rotation)
-            // so the mesh shape is preserved and the skinning rotation pivot matches
-            // the mesh center. This ensures animated bone rotations swing the part
-            // around its visual center rather than a mismatched skeleton position.
-            //
-            // bone_pos comes from the skeleton's bind pose (translation only).
-            // effective_mesh_center is the mesh's centroid (mirrored for right-side parts).
-            let bind_pos = pos + align_offset;
+            // Uniform scale only — preserve mesh proportions
+            let bind_pos = pos * mesh_to_skeleton_scale;
 
             v.position = bind_pos.to_array();
-            // Normal stays unchanged (no rotation applied)
+            // Normal direction is unchanged by uniform scale
 
             // FBX UV origin is bottom-left, wgpu expects top-left: flip V coordinate
             v.tex_coords[1] = 1.0 - v.tex_coords[1];
@@ -731,7 +833,6 @@ pub fn merge_body_parts(
         }
 
         let mirror_str = if part.mirror { " [mirrored]" } else { "" };
-        let bone_pos = bone_bind_transform.w_axis.truncate();
         tracing::info!(
             "Merged {}/{}: {} verts -> bone {} '{}'{} (bone pos: [{:.1}, {:.1}, {:.1}])",
             part.folder, part.file,
