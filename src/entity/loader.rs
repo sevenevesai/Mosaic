@@ -554,16 +554,16 @@ pub const HUMANOID_BODY_PARTS: &[BodyPart] = &[
     BodyPart { folder: "Chest", file: "Chest001.fbx", bone_names: &["Chest_M", "Chest"], texture: Some("Characters/001.png"), mirror: false },
     BodyPart { folder: "Head", file: "Head001.fbx", bone_names: &["Head_M", "Head"], texture: Some("Characters/001.png"), mirror: false },
     BodyPart { folder: "Hair", file: "Hair001.fbx", bone_names: &["Head_M", "Head"], texture: Some("Characters/001.png"), mirror: false },
-    // Right side limbs
-    BodyPart { folder: "Hip", file: "Hip001.fbx", bone_names: &["Hip_R"], texture: Some("Characters/001.png"), mirror: false },
-    BodyPart { folder: "Knee", file: "Knee001.fbx", bone_names: &["Knee_R"], texture: Some("Characters/001.png"), mirror: false },
-    BodyPart { folder: "Shoulder", file: "Shoulder001.fbx", bone_names: &["Shoulder_R"], texture: Some("Characters/001.png"), mirror: false },
-    BodyPart { folder: "Elbow", file: "Elbow001.fbx", bone_names: &["Elbow_R"], texture: Some("Characters/001.png"), mirror: false },
-    // Left side limbs (mirrored from right side meshes)
-    BodyPart { folder: "Hip", file: "Hip001.fbx", bone_names: &["Hip_L"], texture: Some("Characters/001.png"), mirror: true },
-    BodyPart { folder: "Knee", file: "Knee001.fbx", bone_names: &["Knee_L"], texture: Some("Characters/001.png"), mirror: true },
-    BodyPart { folder: "Shoulder", file: "Shoulder001.fbx", bone_names: &["Shoulder_L"], texture: Some("Characters/001.png"), mirror: true },
-    BodyPart { folder: "Elbow", file: "Elbow001.fbx", bone_names: &["Elbow_L"], texture: Some("Characters/001.png"), mirror: true },
+    // Left side limbs (FBX meshes are at positive X, which matches left side)
+    BodyPart { folder: "Hip", file: "Hip001.fbx", bone_names: &["Hip_L"], texture: Some("Characters/001.png"), mirror: false },
+    BodyPart { folder: "Knee", file: "Knee001.fbx", bone_names: &["Knee_L"], texture: Some("Characters/001.png"), mirror: false },
+    BodyPart { folder: "Shoulder", file: "Shoulder001.fbx", bone_names: &["Shoulder_L"], texture: Some("Characters/001.png"), mirror: false },
+    BodyPart { folder: "Elbow", file: "Elbow001.fbx", bone_names: &["Elbow_L"], texture: Some("Characters/001.png"), mirror: false },
+    // Right side limbs (mirrored from left side meshes to negative X)
+    BodyPart { folder: "Hip", file: "Hip001.fbx", bone_names: &["Hip_R"], texture: Some("Characters/001.png"), mirror: true },
+    BodyPart { folder: "Knee", file: "Knee001.fbx", bone_names: &["Knee_R"], texture: Some("Characters/001.png"), mirror: true },
+    BodyPart { folder: "Shoulder", file: "Shoulder001.fbx", bone_names: &["Shoulder_R"], texture: Some("Characters/001.png"), mirror: true },
+    BodyPart { folder: "Elbow", file: "Elbow001.fbx", bone_names: &["Elbow_R"], texture: Some("Characters/001.png"), mirror: true },
 ];
 
 /// Find bone index by name (case-insensitive partial match).
@@ -618,36 +618,10 @@ pub fn merge_body_parts(
 
         // Body parts are designed to be parented to bones with local position zero.
         // Get bone's world position (translation only, no rotation) from rest pose.
-        let bone_rest_transform = skeleton.inverse_bind_matrices
+        let bone_bind_transform = skeleton.inverse_bind_matrices
             .get(bone_idx as usize)
             .map(|inv_bind| inv_bind.inverse())
             .unwrap_or(Mat4::IDENTITY);
-        let bone_world_pos = bone_rest_transform.w_axis.truncate();
-
-        // For limbs (parts with _R or _L bones), center the mesh X on the bone X
-        // For center parts, just use bone position directly
-        let is_limb = part.bone_names.iter().any(|n| n.ends_with("_R") || n.ends_with("_L"));
-
-        let x_offset = if is_limb {
-            // Compute mesh X centroid to center limbs on bone X position
-            let mut x_sum = 0.0f32;
-            for v in &model.vertices {
-                let mut x = v.position[0];
-                if part.mirror {
-                    x = -x;
-                }
-                x_sum += x;
-            }
-            let x_centroid = if !model.vertices.is_empty() {
-                x_sum / model.vertices.len() as f32
-            } else {
-                0.0
-            };
-            bone_world_pos.x - x_centroid
-        } else {
-            // Center parts: just use bone X position
-            bone_world_pos.x
-        };
 
         // Determine texture layer for this part (deduplicated)
         let texture_layer = if let Some(tex) = part.texture {
@@ -667,6 +641,24 @@ pub fn merge_body_parts(
         let base_vertex = all_vertices.len() as u32;
         let vert_count = model.vertices.len();
 
+        // Debug: log raw mesh bounds before any transform
+        if !model.vertices.is_empty() {
+            let mut min = Vec3::splat(f32::MAX);
+            let mut max = Vec3::splat(f32::MIN);
+            for v in &model.vertices {
+                let p = Vec3::from_array(v.position);
+                min = min.min(p);
+                max = max.max(p);
+            }
+            let center = (min + max) * 0.5;
+            tracing::info!(
+                "  RAW mesh {}/{}: center=[{:.1},{:.1},{:.1}] size=[{:.1},{:.1},{:.1}]",
+                part.folder, part.file,
+                center.x, center.y, center.z,
+                max.x - min.x, max.y - min.y, max.z - min.z
+            );
+        }
+
         // Add vertices with bone weight assignment, position transform, and texture layer
         for mut v in model.vertices {
             let mut pos = Vec3::from_array(v.position);
@@ -678,16 +670,17 @@ pub fn merge_body_parts(
                 normal.x = -normal.x;
             }
 
-            // For limbs: center X on bone, keep Y/Z as-is
-            // For center parts: no offset (meshes are already positioned correctly in FBX)
-            let world_pos = if is_limb {
-                Vec3::new(pos.x + x_offset, pos.y, pos.z)
-            } else {
-                pos // No offset for center body parts
-            };
+            // Translate vertex to bone position (translation only, no rotation)
+            // The mesh parts are already oriented correctly in the FBX files,
+            // they just need to be offset to their bone's bind-pose position.
+            // Using full transform would incorrectly rotate the mesh.
+            let world_pos = pos;
 
             v.position = world_pos.to_array();
             v.normal = normal.to_array();
+
+            // Flip V coordinate for Unity FBX compatibility (different UV origin convention)
+            v.tex_coords[1] = 1.0 - v.tex_coords[1];
 
             // Override bone weights: 100% to the assigned bone
             v.bone_indices = [bone_idx, 0, 0, 0];
@@ -713,7 +706,7 @@ pub fn merge_body_parts(
         }
 
         let mirror_str = if part.mirror { " [mirrored]" } else { "" };
-        let bone_pos = bone_rest_transform.w_axis.truncate();
+        let bone_pos = bone_bind_transform.w_axis.truncate();
         tracing::info!(
             "Merged {}/{}: {} verts -> bone {} '{}'{} (bone pos: [{:.1}, {:.1}, {:.1}])",
             part.folder, part.file,
