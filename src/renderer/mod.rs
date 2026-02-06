@@ -199,10 +199,12 @@ pub struct Renderer {
     cycle_speed: f32,      // Multiplier for cycle speed (1.0 = 10 min day, higher = faster)
     day_count: u32,        // Number of complete days elapsed (for moon phase)
 
-    // Shadow mode: -1.0 = off, 0.0 = hard shadows, 1.0 = soft shadows
+    // Shadow mode: 0.0 = hard shadows, 1.0 = soft shadows
     shadow_mode: f32,
     // Shadow debug mode: 0.0 = off, 1.0 = visualize shadow data
     shadow_debug: f32,
+    // Shadow quality: 0=OFF, 1=LOW, 2=MEDIUM, 3=HIGH, 4=ULTRA
+    shadow_quality: u32,
 
     // Graphics settings
     bloom_enabled: bool,
@@ -938,8 +940,9 @@ impl Renderer {
             time_of_day: 0.35,   // Start at mid-morning
             cycle_speed: 10.0,   // 10x speed for testing (1 min = 1 day cycle)
             day_count: 0,        // Start at day 0
-            shadow_mode: 0.0,    // Start with hard shadows (-1=off, 0=hard, 1=soft)
+            shadow_mode: 0.0,    // Start with hard shadows (0=hard, 1=soft)
             shadow_debug: 0.0,   // Shadow debug off by default
+            shadow_quality: 2,   // MEDIUM default
             bloom_enabled: true,
             render_distance: crate::constants::RENDER_DISTANCE,
             lod_distance: crate::constants::LOD_FULL_DETAIL, // Default: LOD starts at 12 chunks
@@ -1212,38 +1215,62 @@ impl Renderer {
         self.cycle_speed
     }
 
-    /// Toggle shadow mode: SOFT (1) -> HARD (0) -> OFF (-1) -> SOFT
+    /// Toggle shadow mode: HARD (0) <-> SOFT (1)
     /// Returns the new mode for display
     pub fn toggle_shadow_mode(&mut self) -> f32 {
-        self.shadow_mode = if self.shadow_mode > 0.5 {
-            0.0  // SOFT -> HARD
-        } else if self.shadow_mode > -0.5 {
-            -1.0 // HARD -> OFF
-        } else {
-            1.0  // OFF -> SOFT
-        };
+        self.shadow_mode = if self.shadow_mode > 0.5 { 0.0 } else { 1.0 };
         self.shadow_mode
     }
 
-    /// Get current shadow mode (-1=off, 0=hard, 1=soft)
+    /// Get current shadow mode (0=hard, 1=soft)
     pub fn shadow_mode(&self) -> f32 {
         self.shadow_mode
     }
 
     /// Get shadow mode as string
     pub fn shadow_mode_str(&self) -> &'static str {
-        if self.shadow_mode < -0.5 {
-            "OFF"
-        } else if self.shadow_mode < 0.5 {
+        if self.shadow_mode < 0.5 {
             "HARD"
         } else {
             "SOFT"
         }
     }
 
-    /// Set shadow mode directly (-1=off, 0=hard, 1=soft)
+    /// Set shadow mode directly (0=hard, 1=soft)
     pub fn set_shadow_mode(&mut self, mode: f32) {
         self.shadow_mode = mode;
+    }
+
+    /// Get shadow quality as string
+    pub fn shadow_quality_str(&self) -> &'static str {
+        match self.shadow_quality {
+            0 => "OFF",
+            1 => "LOW",
+            2 => "MEDIUM",
+            3 => "HIGH",
+            4 => "ULTRA",
+            _ => "MEDIUM",
+        }
+    }
+
+    /// Get shadow quality index (0-4)
+    pub fn shadow_quality_index(&self) -> usize {
+        self.shadow_quality as usize
+    }
+
+    /// Set shadow quality by index (0=OFF, 1=LOW, 2=MEDIUM, 3=HIGH, 4=ULTRA)
+    pub fn set_shadow_quality_index(&mut self, index: usize) {
+        self.shadow_quality = (index as u32).min(4);
+    }
+
+    /// Cycle shadow quality forward
+    pub fn cycle_shadow_quality_next(&mut self) {
+        self.shadow_quality = (self.shadow_quality + 1) % 5;
+    }
+
+    /// Cycle shadow quality backward
+    pub fn cycle_shadow_quality_prev(&mut self) {
+        self.shadow_quality = if self.shadow_quality == 0 { 4 } else { self.shadow_quality - 1 };
     }
 
     /// Toggle shadow debug visualization
@@ -2358,6 +2385,14 @@ impl Renderer {
             _ => settings.lod_distance.parse().unwrap_or(12),
         };
         self.shadow_mode = settings.shadow_mode;
+        self.shadow_quality = match settings.shadow_quality.as_str() {
+            "OFF" => 0,
+            "LOW" => 1,
+            "MEDIUM" => 2,
+            "HIGH" => 3,
+            "ULTRA" => 4,
+            _ => 2,
+        };
         self.bloom_enabled = settings.bloom_enabled;
         self.volumetrics.set_enabled(settings.volumetrics_enabled);
         if self.mdi_count_available {
@@ -2485,6 +2520,7 @@ impl Renderer {
             render_distance: self.render_distance,
             lod_distance: self.lod_distance_str(),
             shadow_mode: self.shadow_mode,
+            shadow_quality: self.shadow_quality_str().to_string(),
             bloom_enabled: self.bloom_enabled,
             volumetrics_enabled: self.volumetrics.enabled,
             gpu_culling: self.use_gpu_culling,
@@ -2978,6 +3014,7 @@ impl Renderer {
             held_light_emission,
             self.torch_shadows,
             (self.total_view_distance() * CHUNK_SIZE_I32) as f32,
+            self.shadow_quality,
         );
         let voxel_gi_elapsed = voxel_gi_start.elapsed();
 

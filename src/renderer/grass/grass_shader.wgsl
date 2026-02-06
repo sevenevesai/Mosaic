@@ -135,42 +135,77 @@ fn world_to_voxel_uv(world_pos: vec3<f32>) -> vec3<f32> {
     return local / 256.0;
 }
 
-// Sample sky occlusion by checking for solid blocks above grass position
+fn voxel_in_bounds(v: vec3<i32>) -> bool {
+    return all(v >= vec3<i32>(0)) && all(v < vec3<i32>(256));
+}
+
+// Sample shadow using DDA with bilinear filtering for smooth edges
 // Returns 0.0 = fully in shadow, 1.0 = fully lit
 fn sample_grass_shadow(world_pos: vec3<f32>, sun_dir: vec3<f32>) -> f32 {
-    // Ray march toward sun, checking for occlusion
-    let max_steps = 16;
-    let step_size = 1.5;  // Sample every 1.5 blocks
+    let max_steps = 48;
+    let center = voxel_volume.volume_center.xyz;
 
-    var accumulated_opacity = 0.0;
-    var pos = world_pos + vec3<f32>(0.0, 0.5, 0.0);  // Start slightly above grass
-
-    // Check if we're within valid voxel volume range
-    let center_dist = length(pos - voxel_volume.volume_center.xyz);
+    let start = world_pos + sun_dir * 0.55;
+    let center_dist = length(start - center);
     if (center_dist > 120.0) {
-        return 1.0;  // Outside volume, assume lit
+        return 1.0;
     }
 
-    for (var i = 0; i < max_steps; i++) {
-        pos += sun_dir * step_size;
+    let local_start = start - center + vec3<f32>(128.0);
+    var voxel = vec3<i32>(floor(local_start));
+    let step_sign = vec3<i32>(sign(sun_dir));
+    let abs_dir = max(abs(sun_dir), vec3<f32>(1e-8));
+    let t_delta = vec3<f32>(1.0) / abs_dir;
+    let frac = local_start - vec3<f32>(floor(local_start));
+    var t_max: vec3<f32>;
+    if (sun_dir.x >= 0.0) { t_max.x = (1.0 - frac.x) * t_delta.x; } else { t_max.x = frac.x * t_delta.x; }
+    if (sun_dir.y >= 0.0) { t_max.y = (1.0 - frac.y) * t_delta.y; } else { t_max.y = frac.y * t_delta.y; }
+    if (sun_dir.z >= 0.0) { t_max.z = (1.0 - frac.z) * t_delta.z; } else { t_max.z = frac.z * t_delta.z; }
 
-        // Check distance from volume center
-        let dist = length(pos - voxel_volume.volume_center.xyz);
+    var accumulated_opacity = 0.0;
+    var t_entry = 0.0;
+
+    for (var i = 0; i < max_steps; i++) {
+        if (!voxel_in_bounds(voxel)) { break; }
+
+        let voxel_world = vec3<f32>(voxel) - vec3<f32>(128.0) + vec3<f32>(0.5) + center;
+        let dist = length(voxel_world - center);
         if (dist > 120.0) { break; }
 
-        let uv = world_to_voxel_uv(pos);
-        let voxel = textureSampleLevel(t_voxel, s_voxel, uv, 0.0);
+        // Bilinear sampling at ray midpoint for smooth edges
+        let t_exit = min(t_max.x, min(t_max.y, t_max.z));
+        let t_mid = (t_entry + t_exit) * 0.5;
+        let ray_pos = local_start + sun_dir * t_mid;
+        let ray_uv = ray_pos / 256.0;
+        let opacity = textureSampleLevel(t_voxel, s_voxel, ray_uv, 0.0).r;
 
-        // Accumulate opacity (R channel = solid blocks)
-        accumulated_opacity += voxel.r * 0.8;
+        accumulated_opacity += opacity * 0.8;
 
-        // Early exit if mostly shadowed
         if (accumulated_opacity > 0.9) {
-            return 0.1;  // In deep shadow
+            return 0.1;
+        }
+
+        t_entry = t_exit;
+
+        if (t_max.x < t_max.y) {
+            if (t_max.x < t_max.z) {
+                voxel.x += step_sign.x;
+                t_max.x += t_delta.x;
+            } else {
+                voxel.z += step_sign.z;
+                t_max.z += t_delta.z;
+            }
+        } else {
+            if (t_max.y < t_max.z) {
+                voxel.y += step_sign.y;
+                t_max.y += t_delta.y;
+            } else {
+                voxel.z += step_sign.z;
+                t_max.z += t_delta.z;
+            }
         }
     }
 
-    // Convert opacity to shadow factor (0 = dark, 1 = lit)
     return 1.0 - saturate(accumulated_opacity);
 }
 

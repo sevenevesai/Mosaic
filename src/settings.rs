@@ -12,6 +12,8 @@ use crate::renderer::DisplayMode;
 pub struct Settings {
     pub render_distance: i32,
     pub shadow_mode: f32,
+    /// Shadow quality preset: OFF, LOW, MEDIUM, HIGH, ULTRA
+    pub shadow_quality: String,
     pub bloom_enabled: bool,
     pub volumetrics_enabled: bool,
     pub gpu_culling: bool,
@@ -92,6 +94,7 @@ impl Default for Settings {
         Self {
             render_distance: crate::constants::RENDER_DISTANCE,
             shadow_mode: 0.0, // HARD
+            shadow_quality: "MEDIUM".to_string(), // Default shadow quality
             bloom_enabled: true,
             volumetrics_enabled: true,
             gpu_culling: true,
@@ -181,6 +184,9 @@ impl Settings {
                         if let Ok(v) = value.parse() {
                             settings.shadow_mode = v;
                         }
+                    }
+                    "shadow_quality" => {
+                        settings.shadow_quality = value.to_string();
                     }
                     "bloom_enabled" => {
                         settings.bloom_enabled = value == "true";
@@ -338,6 +344,7 @@ impl Settings {
             "# Mosaic Settings\n\
              render_distance={}\n\
              shadow_mode={}\n\
+             shadow_quality={}\n\
              bloom_enabled={}\n\
              volumetrics_enabled={}\n\
              gpu_culling={}\n\
@@ -381,6 +388,7 @@ impl Settings {
              water_flow_distance={}\n",
             self.render_distance,
             self.shadow_mode,
+            self.shadow_quality,
             self.bloom_enabled,
             self.volumetrics_enabled,
             self.gpu_culling,

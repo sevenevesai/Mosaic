@@ -66,6 +66,10 @@ harness = false
 name = "world_load_bench"
 harness = false
 
+[[bench]]
+name = "shadow_bench"
+harness = false
+
 [profile.dev]
 opt-level = 1
 

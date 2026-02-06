@@ -31,24 +31,24 @@ src/
 ├── audio/
 │   └── mod.rs       # 3D spatial audio, material sounds, ambient system
 ├── inventory/
-│   ├── item.rs      # Item types, tags, rarity, stacking
+│   ├── item.rs      # Item types (Block + Tool), tags, rarity, stacking, durability
 │   └── inventory.rs # Slots, hotbar, sorting, Quick Stack
 ├── renderer/
 │   ├── mod.rs       # GPU state, render passes, day/night cycle
-│   ├── pipeline.rs  # WGSL shaders (chunk, sky, UI)
+│   ├── pipeline.rs  # WGSL shaders (chunk, sky, UI, crack overlay)
 │   ├── water.rs     # Ray-marched water (fullscreen post-process)
 │   ├── clouds.rs    # Procedural cloud system
 │   ├── grass/       # Procedural grass rendering (vertex pulling)
-│   ├── character_renderer.rs # Skinned character rendering, bone matrices
-│   ├── inventory_ui.rs # Hotbar/inventory UI rendering
+│   ├── character_renderer.rs # Skinned character rendering, bone matrices, voxel GI shadows
+│   ├── inventory_ui.rs # Hotbar/inventory UI rendering (tools: colored rect + letter + durability bar)
 │   ├── gpu_culling.rs # GPU frustum culling + visibility cache
-│   ├── voxel_gi.rs  # Voxel GI: 256^3 volume, DDA shadows, VCT
+│   ├── voxel_gi.rs  # Voxel GI: 256^3 volume, Amanatides & Woo DDA shadows, VCT, player shadow injection
 │   ├── ssao.rs      # Screen-space ambient occlusion
 │   ├── aa.rs        # Hybrid Morphological-Temporal AA
 │   ├── volumetrics.rs # Volumetric light shafts (god rays)
 │   └── chunk_pool.rs # MDI mega-buffers
 ├── entity/
-│   ├── mod.rs       # EntityManager, Skeleton, AnimationComponent, player_entity tracking
+│   ├── mod.rs       # EntityManager, Skeleton, AnimationComponent (looping/clamp), player_entity tracking
 │   └── loader.rs    # FBX loading, body part merging, skeleton binding
 ├── world/
 │   ├── mod.rs       # WorldManager, 8 worker threads, chunk lifecycle
@@ -57,7 +57,8 @@ src/
 │   ├── generation/  # Biomes, caves, terrain, trees, ores
 │   ├── lighting.rs  # BFS flood fill propagation
 │   └── storage/     # Region files, zstd compression
-└── player/mod.rs    # AABB collision, raycast, 3rd person camera, inventory integration
+├── character_styler.rs # Character appearance: outfit, hair, head selection (default: outfit 010)
+└── player/mod.rs    # AABB collision, raycast, 3rd person camera, mining (tools+hardness), inventory
 ```
 
 ## Key Constants (src/lib.rs)
@@ -84,13 +85,16 @@ WATER_SEA_LEVEL: 32      // Y level for water generation
 
 **Winding Order**: CCW front faces. Triangles: 0-2-1 and 0-3-2. Left/right faces have reordered UVs.
 
-**Render Pipeline Order**: Sky pass -> Opaque geometry (MDI) -> Character entities -> Water pass -> Volumetrics -> Post-process (SSAO, AA, DOF, Bloom) -> UI
+**Render Pipeline Order**: Sky pass -> Opaque geometry (MDI) -> Character entities (w/ voxel GI shadows) -> Block outline -> Crack overlay -> Water pass -> Volumetrics -> Post-process (SSAO, AA, DOF, Bloom) -> UI
 
 **3rd Person Camera**:
 - Camera orbits behind player: `position = player_center - forward * 10.0`
 - Camera-terrain collision: 10-step ray sampling, min distance 1.0 block
 - `facing_yaw` computed from WASD input relative to camera yaw
-- Animation selected by `MovementState`: Idle(0), Move(1), Jump(3)
+- Animation selected by `MovementState`: Idle(0), Walk(1), Jumping(3), Falling(3 slow+clamp)
+- Jumping/Falling split: Jumping = rising (velocity.y > 0.5), Falling = descending/apex
+- Jump animation clamps at last frame (no loop), falling slows to 0.3x and holds pose
+- Binary search ground contact on landing for pixel-accurate placement
 - Root motion disabled for player (physics drives position)
 
 ## Gotchas & Warnings
@@ -104,6 +108,12 @@ WATER_SEA_LEVEL: 32      // Y level for water generation
 - **Ore generation** - Noise clustering + hash slot system in `get_ore_or_stone_fast()`
 - **water_flow.rs** exists but is parked - visual flow not currently used
 - **Biomes**: Grasslands (~75%) caves underground only; Cavernous Highlands (~25%) have surface caverns
+- **Player shadow voxels** - Injected AFTER queue.submit() to avoid GPU fill overwrite. 1-frame latency, block-snapping (known limitation)
+- **Crack overlay** - 4-stage procedural texture (256x64), rendered after block outline pass with depth bias -3
+- **Tool items** - Stack size 1, rendered as colored rect + letter (P/A/S/W) + durability bar in hotbar
+- **Character shadows** - Receive via voxel GI DDA in fragment shader (group 3); cast via inject_player_shadow (2 voxels)
+- **Shadow quality** - 5 presets (OFF/LOW/MEDIUM/HIGH/ULTRA) control DDA max_steps (0/48/96/128/128+2tap). Packed into `volume_origin.w` bits 1-3. ULTRA forces 2-tap multi-sampling regardless of shadow mode
+- **Shadow DDA** - Uses Amanatides & Woo true voxel traversal with `textureLoad` (integer sampling). Never skips voxels, eliminates shadow gaps. Prior naive fixed-step approach had gap artifacts at shallow sun angles
 
 ## Common Tasks
 
@@ -123,7 +133,7 @@ WATER_SEA_LEVEL: 32      // Y level for water generation
 
 ```bash
 cargo check                    # Compilation errors
-cargo test                     # Run 175 unit tests
+cargo test                     # Run 192 unit tests
 cargo build --release          # Full build
 ./target/release/mosaic.exe    # Manual smoke test
 ```

@@ -259,6 +259,18 @@ impl SettingsMenu {
                 set_float: |_, _| {},
             },
             MenuItem {
+                label: "SHADOW QUALITY",
+                tab: MenuTab::Graphics,
+                control_type: ControlType::EnumCycle,
+                get_value: |r| r.shadow_quality_str().to_string(),
+                get_index: |r| r.shadow_quality_index(),
+                get_float: |_| 0.0,
+                cycle_next: |r| { r.cycle_shadow_quality_next(); },
+                cycle_prev: |r| { r.cycle_shadow_quality_prev(); },
+                set_index: |r, i| { r.set_shadow_quality_index(i); },
+                set_float: |_, _| {},
+            },
+            MenuItem {
                 label: "SHADOW MODE",
                 tab: MenuTab::Graphics,
                 control_type: ControlType::EnumCycle,

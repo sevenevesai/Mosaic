@@ -1,22 +1,25 @@
 # Testing & Benchmarking
 
-175 unit/integration tests across core systems.
+192 unit/integration tests across core systems.
 
 ## Commands
 
 ```bash
-cargo test                     # All 175 tests
-cargo test world::             # World module (108 tests)
-cargo test inventory::         # Inventory module (32 tests)
+cargo test                     # All 192 tests
+cargo test world::             # World module (113 tests incl. hardness, preferred_tool)
+cargo test inventory::         # Inventory module (44 tests incl. tools, durability, persistence)
 cargo test player::            # Player module (18 tests)
 cargo test meshing             # Meshing tests (22 tests)
 cargo test lighting            # Lighting tests (12 tests)
+cargo test test_tool           # Tool-specific tests (12 tests)
+cargo test test_block_hardness # Block hardness tests (4 tests)
 cargo bench                    # All benchmarks
+cargo bench shadow             # Shadow DDA benchmarks (algorithm comparison, quality presets)
 ```
 
 ## Coverage
 
-Well tested: meshing, lighting, serialization, inventory, physics, generation.
+Well tested: meshing, lighting, serialization, inventory (incl. tools), physics, generation, block hardness.
 Not unit-testable: GPU shaders, renderer (need visual regression tests).
 
 ## Test Fixtures
@@ -35,3 +38,7 @@ Not unit-testable: GPU shaders, renderer (need visual regression tests).
 | meshing/lod_sparse/Full | ~157us |
 | meshing/lod_sparse/Half | ~58us |
 | meshing/lod_sparse/Quarter | ~6.5us |
+| shadow/algorithm/naive_112steps (500 rays) | ~940us |
+| shadow/algorithm/dda_128steps (500 rays) | ~325us |
+| shadow/algorithm/dda_96steps (500 rays) | ~248us |
+| shadow/algorithm/dda_48steps (500 rays) | ~131us |

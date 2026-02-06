@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo bench:*)",
+      "Bash(taskkill:*)",
+      "Bash(timeout /T 2 /NOBREAK)",
+      "Bash(cargo check:*)",
+      "Bash(cargo build:*)",
+      "Bash(cargo test:*)"
+    ]
+  }
+}

@@ -973,6 +973,7 @@ impl VoxelGI {
         held_light_emission: u8,
         torch_shadows: bool,
         fog_distance: f32,
+        shadow_quality: u32,
     ) {
         // Use smoothed_center for gradual transitions (already tracks camera smoothly)
         let snapped_center = Vec3::new(
@@ -991,7 +992,7 @@ impl VoxelGI {
 
         // If no updates needed, just update uniforms
         if !needs_full_refresh && !has_dirty_blocks {
-            self.update_uniform(queue, self.last_update_center, sun_direction, sun_color, ambient_color, time_of_day, shadow_mode, shadow_debug, camera_pos, held_light_emission, torch_shadows, fog_distance);
+            self.update_uniform(queue, self.last_update_center, sun_direction, sun_color, ambient_color, time_of_day, shadow_mode, shadow_debug, camera_pos, held_light_emission, torch_shadows, fog_distance, shadow_quality);
             return;
         }
 
@@ -1013,7 +1014,7 @@ impl VoxelGI {
             }
 
             // Update uniforms with current volume center
-            self.update_uniform(queue, self.last_update_center, sun_direction, sun_color, ambient_color, time_of_day, shadow_mode, shadow_debug, camera_pos, held_light_emission, torch_shadows, fog_distance);
+            self.update_uniform(queue, self.last_update_center, sun_direction, sun_color, ambient_color, time_of_day, shadow_mode, shadow_debug, camera_pos, held_light_emission, torch_shadows, fog_distance, shadow_quality);
             return;
         }
 
@@ -1028,7 +1029,7 @@ impl VoxelGI {
             // We just need to update the uniform with the values gpu_fill_volume set.
 
             // Always use the actual volume center for uniforms (where the voxel data is)
-            self.update_uniform(queue, self.last_update_center, sun_direction, sun_color, ambient_color, time_of_day, shadow_mode, shadow_debug, camera_pos, held_light_emission, torch_shadows, fog_distance);
+            self.update_uniform(queue, self.last_update_center, sun_direction, sun_color, ambient_color, time_of_day, shadow_mode, shadow_debug, camera_pos, held_light_emission, torch_shadows, fog_distance, shadow_quality);
             return;
         }
 
@@ -1046,7 +1047,7 @@ impl VoxelGI {
         self.last_update_center = snapped_center;
 
         // Update uniform buffer
-        self.update_uniform(queue, snapped_center, sun_direction, sun_color, ambient_color, time_of_day, shadow_mode, shadow_debug, camera_pos, held_light_emission, torch_shadows, fog_distance);
+        self.update_uniform(queue, snapped_center, sun_direction, sun_color, ambient_color, time_of_day, shadow_mode, shadow_debug, camera_pos, held_light_emission, torch_shadows, fog_distance, shadow_quality);
 
         // Time the voxel cache fill
         let fill_start = std::time::Instant::now();
@@ -1100,6 +1101,7 @@ impl VoxelGI {
         held_light_emission: u8,
         torch_shadows: bool,
         fog_distance: f32,
+        shadow_quality: u32,
     ) {
         // Volume origin is the world position of voxel [0,0,0]
         // For toroidal wrapping: origin = center - half_size
@@ -1109,6 +1111,9 @@ impl VoxelGI {
             center.y.floor() as i32 - half_size,
             center.z.floor() as i32 - half_size,
         );
+
+        // Pack volume_origin.w: bit 0 = torch_shadows, bits 1-3 = shadow_quality (0-4)
+        let packed_w = (if torch_shadows { 1i32 } else { 0 }) | ((shadow_quality as i32) << 1);
 
         let uniform = VoxelVolumeUniform {
             volume_center: [center.x, center.y, center.z, fog_distance],
@@ -1120,8 +1125,8 @@ impl VoxelGI {
             ambient_color: [ambient_color.x, ambient_color.y, ambient_color.z, 1.0],
             time_of_day: [time_of_day, shadow_mode, shadow_debug, self.shadow_blend],
             player_light: [player_pos.x, player_pos.y, player_pos.z, held_light_emission as f32 / 15.0],
-            // W component stores torch_shadows flag (0 = off, 1 = on)
-            volume_origin: [origin.x, origin.y, origin.z, if torch_shadows { 1 } else { 0 }],
+            // W component: bit 0 = torch_shadows, bits 1-3 = shadow_quality
+            volume_origin: [origin.x, origin.y, origin.z, packed_w],
         };
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniform]));
     }

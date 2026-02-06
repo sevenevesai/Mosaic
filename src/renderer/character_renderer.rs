@@ -723,54 +723,87 @@ fn world_to_voxel_uv(world_pos: vec3<f32>) -> vec3<f32> {
     return local / 256.0;
 }
 
+fn voxel_in_bounds(v: vec3<i32>) -> bool {
+    return all(v >= vec3<i32>(0)) && all(v < vec3<i32>(256));
+}
+
 fn char_ray_march_shadow(world_pos: vec3<f32>, light_dir: vec3<f32>) -> f32 {
-    let max_steps = 64;
-    var accumulated_opacity = 0.0;
-    var solid_hits = 0;
+    let max_steps = 96;
+    let center = voxel_volume.volume_center.xyz;
 
     // Start offset to escape the character's own voxels
-    var pos = world_pos + light_dir * 1.2;
-    var total_distance = 1.2;
+    let start = world_pos + light_dir * 1.2;
+    let local_start = start - center + vec3<f32>(128.0);
+
+    var voxel = vec3<i32>(floor(local_start));
+    let step_sign = vec3<i32>(sign(light_dir));
+    let abs_dir = max(abs(light_dir), vec3<f32>(1e-8));
+    let t_delta = vec3<f32>(1.0) / abs_dir;
+
+    let frac = local_start - vec3<f32>(floor(local_start));
+    var t_max: vec3<f32>;
+    if (light_dir.x >= 0.0) { t_max.x = (1.0 - frac.x) * t_delta.x; } else { t_max.x = frac.x * t_delta.x; }
+    if (light_dir.y >= 0.0) { t_max.y = (1.0 - frac.y) * t_delta.y; } else { t_max.y = frac.y * t_delta.y; }
+    if (light_dir.z >= 0.0) { t_max.z = (1.0 - frac.z) * t_delta.z; } else { t_max.z = frac.z * t_delta.z; }
+
+    var accumulated_opacity = 0.0;
+    var solid_hits = 0;
+    var t_entry = 0.0;
 
     for (var i = 0; i < max_steps; i++) {
-        var current_step: f32;
-        if (i < 8) {
-            current_step = 0.5;
-        } else if (i < 24) {
-            current_step = 1.0;
-        } else {
-            current_step = 2.0;
-        }
+        if (!voxel_in_bounds(voxel)) { break; }
 
-        pos += light_dir * current_step;
-        total_distance += current_step;
-
-        let center_dist = length(pos - voxel_volume.volume_center.xyz);
+        let voxel_world = vec3<f32>(voxel) - vec3<f32>(128.0) + vec3<f32>(0.5) + center;
+        let center_dist = length(voxel_world - center);
         if (center_dist > 120.0) { break; }
 
         let edge_fade = 1.0 - smoothstep(100.0, 120.0, center_dist);
 
-        let uv = world_to_voxel_uv(pos);
-        let voxel = textureSampleLevel(t_voxel, s_voxel, uv, 0.0);
-        let opacity = voxel.r * edge_fade;
+        // Bilinear sampling at ray midpoint for smooth edges
+        let t_exit = min(t_max.x, min(t_max.y, t_max.z));
+        let t_mid = (t_entry + t_exit) * 0.5;
+        let ray_pos = local_start + light_dir * t_mid;
+        let ray_uv = ray_pos / 256.0;
+        let opacity = textureSampleLevel(t_voxel, s_voxel, ray_uv, 0.0).r * edge_fade;
 
         if (opacity > 0.5) {
             solid_hits += 1;
             accumulated_opacity += 0.4;
             if (solid_hits >= 3) { break; }
-        } else if (opacity > 0.1) {
-            accumulated_opacity += opacity * 0.2;
+        } else if (opacity > 0.05) {
+            accumulated_opacity += opacity * 0.5;
         }
 
         if (accumulated_opacity >= 1.1) { break; }
+
+        t_entry = t_exit;
+
+        // Amanatides & Woo step
+        if (t_max.x < t_max.y) {
+            if (t_max.x < t_max.z) {
+                voxel.x += step_sign.x;
+                t_max.x += t_delta.x;
+            } else {
+                voxel.z += step_sign.z;
+                t_max.z += t_delta.z;
+            }
+        } else {
+            if (t_max.y < t_max.z) {
+                voxel.y += step_sign.y;
+                t_max.y += t_delta.y;
+            } else {
+                voxel.z += step_sign.z;
+                t_max.z += t_delta.z;
+            }
+        }
     }
 
     var shadow: f32;
-    if (solid_hits > 0) {
-        let shadow_strength = smoothstep(0.3, 0.7, clamp(accumulated_opacity, 0.0, 1.0));
-        shadow = mix(1.0, 0.25, shadow_strength);
+    if (accumulated_opacity > 0.2) {
+        let shadow_strength = smoothstep(0.2, 0.8, clamp(accumulated_opacity, 0.0, 1.0));
+        shadow = mix(1.0, 0.2, shadow_strength);
     } else if (accumulated_opacity > 0.0) {
-        shadow = 1.0 - clamp(accumulated_opacity * 0.5, 0.0, 0.5);
+        shadow = 1.0 - accumulated_opacity * 0.5;
     } else {
         shadow = 1.0;
     }
