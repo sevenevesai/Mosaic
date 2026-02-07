@@ -643,14 +643,14 @@ fn voxel_in_bounds(v: vec3<i32>) -> bool {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// CORE DDA: Amanatides & Woo voxel traversal with bilinear-filtered sampling
+// CORE DDA: Amanatides & Woo voxel traversal with integer textureLoad
 // Steps exactly one voxel boundary per iteration - never skips a voxel.
-// Uses textureSampleLevel at the ray's actual position for hardware-accelerated
-// trilinear interpolation, giving smooth shadow edges at zero extra cost.
+// Uses textureLoad with integer coordinates for exact per-voxel sampling.
+// No interpolation = no banding from partial opacity at voxel boundaries.
 // ═══════════════════════════════════════════════════════════════════════════
 
 fn dda_trace_shadow(world_pos: vec3<f32>, light_dir: vec3<f32>, max_steps: i32) -> vec2<f32> {
-    // Returns: x = accumulated_opacity, y = distance to first occluder
+    // Returns: x = number of solid voxels hit, y = distance to first occluder
 
     let center = voxel_volume.volume_center.xyz;
 
@@ -677,46 +677,34 @@ fn dda_trace_shadow(world_pos: vec3<f32>, light_dir: vec3<f32>, max_steps: i32) 
     if (light_dir.y >= 0.0) { t_max.y = (1.0 - frac.y) * t_delta.y; } else { t_max.y = frac.y * t_delta.y; }
     if (light_dir.z >= 0.0) { t_max.z = (1.0 - frac.z) * t_delta.z; } else { t_max.z = frac.z * t_delta.z; }
 
-    var accumulated_opacity = 0.0;
-    var solid_hits = 0;
+    var solid_hits = 0.0;
     var min_dist_to_occluder = 1000.0;
-    var t_entry = 0.0;
 
     for (var i = 0; i < max_steps; i++) {
         // Bounds check
         if (!voxel_in_bounds(voxel)) { break; }
 
-        // Distance from voxel center to volume center (world space)
-        let voxel_world = vec3<f32>(voxel) - vec3<f32>(128.0) + vec3<f32>(0.5) + center;
-        let center_dist = length(voxel_world - center);
+        // Distance from voxel to volume center (cheap: max-component, no sqrt)
+        let vd = abs(vec3<f32>(voxel) - vec3<f32>(127.5));
+        let center_dist = max(vd.x, max(vd.y, vd.z));
         if (center_dist > 120.0) { break; }
 
-        // Edge fade near volume boundary
-        let edge_fade = 1.0 - smoothstep(100.0, 120.0, center_dist);
+        // Integer textureLoad: exact voxel value, no interpolation
+        let voxel_data = textureLoad(t_voxel, voxel, 0);
+        let opacity = voxel_data.r;
 
-        // Sample at ray midpoint within this voxel using bilinear filtering
-        // GPU trilinear interpolation naturally smooths shadow edges
-        let t_exit = min(t_max.x, min(t_max.y, t_max.z));
-        let t_mid = (t_entry + t_exit) * 0.5;
-        let ray_pos = local_start + light_dir * t_mid;
-        let ray_uv = ray_pos / 256.0;
-        let opacity = textureSampleLevel(t_voxel, s_voxel, ray_uv, 0.0).r * edge_fade;
-
+        // Binary test: solid voxels cast shadow, everything else doesn't
+        // opacity is 0.0 (air) or 1.0 (solid) or specific values (leaves=0.75, water=0.25)
         if (opacity > 0.5) {
-            solid_hits += 1;
-            accumulated_opacity += 0.4;
+            solid_hits += 1.0;
             if (min_dist_to_occluder > 999.0) {
-                min_dist_to_occluder = t_exit;
+                let t_current = min(t_max.x, min(t_max.y, t_max.z));
+                min_dist_to_occluder = t_current;
             }
-            if (solid_hits >= 3) { break; }
-        } else if (opacity > 0.05) {
-            // Partial opacity from bilinear edge interpolation - smooth gradients
-            accumulated_opacity += opacity * 0.5;
         }
 
-        if (accumulated_opacity >= 1.1) { break; }
-
-        t_entry = t_exit;
+        // Early exit: one solid voxel is enough for full shadow
+        if (solid_hits >= 1.0) { break; }
 
         // Step to next voxel boundary (Amanatides & Woo core)
         if (t_max.x < t_max.y) {
@@ -738,7 +726,7 @@ fn dda_trace_shadow(world_pos: vec3<f32>, light_dir: vec3<f32>, max_steps: i32) 
         }
     }
 
-    return vec2<f32>(accumulated_opacity, min_dist_to_occluder);
+    return vec2<f32>(solid_hits, min_dist_to_occluder);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -757,29 +745,18 @@ fn get_shadow_max_steps() -> i32 {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// SHADOW MODE: HARD (DDA with bilinear sampling - smooth edges, no gaps)
+// SHADOW MODE: HARD (DDA with integer sampling - crisp, exact shadows)
 // ═══════════════════════════════════════════════════════════════════════════
 fn ray_march_shadow_hard(world_pos: vec3<f32>, light_dir: vec3<f32>) -> f32 {
     let max_steps = get_shadow_max_steps();
     let result = dda_trace_shadow(world_pos, light_dir, max_steps);
-    let accumulated_opacity = result.x;
+    let hit_count = result.x;
 
-    var shadow: f32;
-    if (accumulated_opacity > 0.2) {
-        let shadow_strength = smoothstep(0.2, 0.8, clamp(accumulated_opacity, 0.0, 1.0));
-        shadow = mix(1.0, 0.2, shadow_strength);
-    } else if (accumulated_opacity > 0.0) {
-        shadow = 1.0 - accumulated_opacity * 0.5;
-    } else {
-        shadow = 1.0;
+    // Binary: hit a solid voxel = in shadow, otherwise fully lit
+    if (hit_count >= 1.0) {
+        return 0.2;  // Shadow darkness
     }
-
-    if (accumulated_opacity > 1.0) {
-        let depth_darkness = clamp((accumulated_opacity - 1.0) * 0.08, 0.0, 0.12);
-        shadow *= (1.0 - depth_darkness);
-    }
-
-    return shadow;
+    return 1.0;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -788,21 +765,25 @@ fn ray_march_shadow_hard(world_pos: vec3<f32>, light_dir: vec3<f32>) -> f32 {
 fn ray_march_shadow_soft_core(world_pos: vec3<f32>, light_dir: vec3<f32>) -> f32 {
     let max_steps = get_shadow_max_steps();
     let result = dda_trace_shadow(world_pos, light_dir, max_steps);
-    let accumulated_opacity = result.x;
+    let hit_count = result.x;
     let min_distance_to_occluder = result.y;
 
-    var shadow = 1.0 - clamp(accumulated_opacity, 0.0, 1.0);
+    if (hit_count < 1.0) {
+        return 1.0;  // No occlusion
+    }
 
+    // In shadow - darken based on occluder distance (closer = darker)
+    var shadow = 0.2;
     if (min_distance_to_occluder < 999.0) {
         let penumbra_softness = smoothstep(1.0, 15.0, min_distance_to_occluder);
-        shadow = mix(shadow * 0.25, shadow, penumbra_softness * 0.6 + 0.4);
+        shadow = mix(0.15, 0.3, penumbra_softness);
     }
 
     return shadow;
 }
 
 // PCF-style multi-tap: offsets the shadow ORIGIN perpendicular to sun direction
-// This straddles voxel boundaries across taps, creating smooth anti-aliased edges
+// This straddles voxel boundaries across taps, creating anti-aliased shadow edges
 fn ray_march_shadow_pcf(world_pos: vec3<f32>, light_dir: vec3<f32>, spread: f32) -> f32 {
     var tangent: vec3<f32>;
     if (abs(light_dir.y) < 0.9) {
@@ -820,20 +801,15 @@ fn ray_march_shadow_pcf(world_pos: vec3<f32>, light_dir: vec3<f32>, spread: f32)
     let s0 = dda_trace_shadow(world_pos + o0, light_dir, max_steps);
     let s1 = dda_trace_shadow(world_pos + o1, light_dir, max_steps);
 
-    let avg_opacity = (s0.x + s1.x) * 0.5;
-    let min_dist = min(s0.y, s1.y);
+    // Average the binary results: 0, 0.5, or 1.0 hits
+    let total_hits = s0.x + s1.x;
 
-    var shadow: f32;
-    if (avg_opacity > 0.2) {
-        let shadow_strength = smoothstep(0.2, 0.8, clamp(avg_opacity, 0.0, 1.0));
-        shadow = mix(1.0, 0.2, shadow_strength);
-    } else if (avg_opacity > 0.0) {
-        shadow = 1.0 - avg_opacity * 0.5;
-    } else {
-        shadow = 1.0;
+    if (total_hits >= 2.0) {
+        return 0.2;   // Both taps hit = full shadow
+    } else if (total_hits >= 1.0) {
+        return 0.6;   // One tap hit = partial shadow (edge)
     }
-
-    return shadow;
+    return 1.0;       // No hits = fully lit
 }
 
 // Soft multi-tap: offsets origins for penumbra effect

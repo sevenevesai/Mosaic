@@ -746,37 +746,20 @@ fn char_ray_march_shadow(world_pos: vec3<f32>, light_dir: vec3<f32>) -> f32 {
     if (light_dir.y >= 0.0) { t_max.y = (1.0 - frac.y) * t_delta.y; } else { t_max.y = frac.y * t_delta.y; }
     if (light_dir.z >= 0.0) { t_max.z = (1.0 - frac.z) * t_delta.z; } else { t_max.z = frac.z * t_delta.z; }
 
-    var accumulated_opacity = 0.0;
-    var solid_hits = 0;
-    var t_entry = 0.0;
-
     for (var i = 0; i < max_steps; i++) {
         if (!voxel_in_bounds(voxel)) { break; }
 
-        let voxel_world = vec3<f32>(voxel) - vec3<f32>(128.0) + vec3<f32>(0.5) + center;
-        let center_dist = length(voxel_world - center);
+        // Distance check using max-component (no sqrt)
+        let vd = abs(vec3<f32>(voxel) - vec3<f32>(127.5));
+        let center_dist = max(vd.x, max(vd.y, vd.z));
         if (center_dist > 120.0) { break; }
 
-        let edge_fade = 1.0 - smoothstep(100.0, 120.0, center_dist);
+        // Integer textureLoad: exact voxel value, no interpolation
+        let voxel_data = textureLoad(t_voxel, voxel, 0);
 
-        // Bilinear sampling at ray midpoint for smooth edges
-        let t_exit = min(t_max.x, min(t_max.y, t_max.z));
-        let t_mid = (t_entry + t_exit) * 0.5;
-        let ray_pos = local_start + light_dir * t_mid;
-        let ray_uv = ray_pos / 256.0;
-        let opacity = textureSampleLevel(t_voxel, s_voxel, ray_uv, 0.0).r * edge_fade;
-
-        if (opacity > 0.5) {
-            solid_hits += 1;
-            accumulated_opacity += 0.4;
-            if (solid_hits >= 3) { break; }
-        } else if (opacity > 0.05) {
-            accumulated_opacity += opacity * 0.5;
+        if (voxel_data.r > 0.5) {
+            return 0.2;  // Hit solid = in shadow
         }
-
-        if (accumulated_opacity >= 1.1) { break; }
-
-        t_entry = t_exit;
 
         // Amanatides & Woo step
         if (t_max.x < t_max.y) {
@@ -798,17 +781,7 @@ fn char_ray_march_shadow(world_pos: vec3<f32>, light_dir: vec3<f32>) -> f32 {
         }
     }
 
-    var shadow: f32;
-    if (accumulated_opacity > 0.2) {
-        let shadow_strength = smoothstep(0.2, 0.8, clamp(accumulated_opacity, 0.0, 1.0));
-        shadow = mix(1.0, 0.2, shadow_strength);
-    } else if (accumulated_opacity > 0.0) {
-        shadow = 1.0 - accumulated_opacity * 0.5;
-    } else {
-        shadow = 1.0;
-    }
-
-    return shadow;
+    return 1.0;  // No occlusion
 }
 
 // === VERTEX SHADER ===
