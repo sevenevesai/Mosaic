@@ -655,7 +655,9 @@ fn dda_trace_shadow(world_pos: vec3<f32>, light_dir: vec3<f32>, max_steps: i32) 
     let center = voxel_volume.volume_center.xyz;
 
     // Start slightly offset along light direction to escape source voxel
-    let start = world_pos + light_dir * 0.55;
+    // Keep tight: with textureLoad (integer sampling), we only need to clear
+    // the surface boundary, not avoid interpolation bleed
+    let start = world_pos + light_dir * 0.3;
 
     // Local position in volume space
     let local_start = start - center + vec3<f32>(128.0);
@@ -1345,12 +1347,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         was_traced = 1.0;
 
         // Shadow origin offset strategy:
-        // 1. Offset along normal to lift ray above surface
-        // 2. Offset along sun direction to escape current voxel
-        // This prevents self-shadowing and ensures shadow boundaries align with geometry
-        let grazing_factor = 1.0 - max(ndotl, 0.0);
-        let normal_offset = mix(0.25, 0.6, grazing_factor);
-        let sun_offset = 0.15;  // Small push toward sun
+        // Sun-facing faces need offset along normal to prevent self-shadow acne.
+        // Non-sun-facing faces need MINIMAL offset — large offsets push the ray
+        // past adjacent occluders, creating false "lit" strips near edges.
+        let normal_offset = mix(0.05, 0.3, max(ndotl, 0.0));
+        let sun_offset = 0.1;
         let shadow_origin = in.world_position + in.normal * normal_offset + sun_dir * sun_offset;
         shadow = ray_march_shadow(shadow_origin, sun_dir, shadow_mode);
     }
