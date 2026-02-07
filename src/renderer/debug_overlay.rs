@@ -139,6 +139,28 @@ pub struct DebugOverlay {
     max_logs_per_session: u32,
     stabilization_delay_secs: f32,
     log_interval_secs: f32,
+
+    // Session-wide accumulators for summary (collected after stabilization)
+    session_frames: u64,
+    session_fps_sum: f64,
+    session_fps_min: f64,
+    session_fps_max: f64,
+    session_frame_time_sum: f64,
+    session_frame_time_max: f64,
+    session_gpu_time_sum: f64,
+    session_gpu_time_max: f64,
+    session_triangles_max: u32,
+    session_chunks_rendered_max: u32,
+    session_total_vertices_max: u64,
+    session_settings_context: String,
+    /// Per-pass GPU time accumulators: (sum_ms, sample_count, max_ms)
+    session_pass_accum: Vec<(String, f64, u64, f64)>,
+    /// Per-CPU-section accumulators from profiler snapshots: (sum_ms, count, max_ms)
+    session_cpu_sections: Vec<(String, f64, u64, f64)>,
+    /// Last snapshot of mesh stats for summary
+    session_mesh_avg_us: f64,
+    session_mesh_total_quads: u64,
+    session_stabilized: bool,
 }
 
 const TEXT_SHADER: &str = r#"
@@ -319,7 +341,24 @@ impl DebugOverlay {
             log_count: 0,
             max_logs_per_session: 5,
             stabilization_delay_secs: 10.0, // Wait 10s for initial load
-            log_interval_secs: 30.0,        // Log every 30s after that
+            log_interval_secs: 60.0,        // Log every 60s after that
+            session_frames: 0,
+            session_fps_sum: 0.0,
+            session_fps_min: f64::MAX,
+            session_fps_max: 0.0,
+            session_frame_time_sum: 0.0,
+            session_frame_time_max: 0.0,
+            session_gpu_time_sum: 0.0,
+            session_gpu_time_max: 0.0,
+            session_triangles_max: 0,
+            session_chunks_rendered_max: 0,
+            session_total_vertices_max: 0,
+            session_settings_context: String::new(),
+            session_pass_accum: Vec::new(),
+            session_cpu_sections: Vec::new(),
+            session_mesh_avg_us: 0.0,
+            session_mesh_total_quads: 0,
+            session_stabilized: false,
         }
     }
 
@@ -503,14 +542,17 @@ impl DebugOverlay {
 
     /// Check if we should log metrics and do so if needed
     pub fn maybe_log_metrics(&mut self, metrics: &DebugMetrics) {
-        if self.log_count >= self.max_logs_per_session {
+        let elapsed = self.session_start.elapsed().as_secs_f32();
+
+        // Wait for stabilization before any accumulation or logging
+        if elapsed < self.stabilization_delay_secs {
             return;
         }
 
-        let elapsed = self.session_start.elapsed().as_secs_f32();
+        // Accumulate session-wide stats (every frame after stabilization)
+        self.accumulate_session_stats(metrics);
 
-        // Wait for stabilization
-        if elapsed < self.stabilization_delay_secs {
+        if self.log_count >= self.max_logs_per_session {
             return;
         }
 
@@ -522,6 +564,149 @@ impl DebugOverlay {
             self.log_metrics_to_file(metrics, elapsed);
             self.last_log_time = Instant::now();
             self.log_count += 1;
+        }
+    }
+
+    /// Accumulate per-frame stats for the session summary
+    fn accumulate_session_stats(&mut self, metrics: &DebugMetrics) {
+        if !self.session_stabilized {
+            self.session_stabilized = true;
+            self.session_settings_context = metrics.settings_context.clone();
+        }
+
+        let fps = metrics.fps as f64;
+        if fps > 0.0 {
+            self.session_frames += 1;
+            self.session_fps_sum += fps;
+            if fps < self.session_fps_min { self.session_fps_min = fps; }
+            if fps > self.session_fps_max { self.session_fps_max = fps; }
+        }
+
+        let frame_ms = metrics.frame_time_ms as f64;
+        self.session_frame_time_sum += frame_ms;
+        if frame_ms > self.session_frame_time_max { self.session_frame_time_max = frame_ms; }
+
+        let gpu_ms = metrics.gpu_time_ms;
+        self.session_gpu_time_sum += gpu_ms;
+        if gpu_ms > self.session_gpu_time_max { self.session_gpu_time_max = gpu_ms; }
+
+        if metrics.triangles > self.session_triangles_max { self.session_triangles_max = metrics.triangles; }
+        if metrics.chunks_rendered > self.session_chunks_rendered_max { self.session_chunks_rendered_max = metrics.chunks_rendered; }
+        if metrics.total_vertices > self.session_total_vertices_max { self.session_total_vertices_max = metrics.total_vertices; }
+
+        // Accumulate GPU pass times
+        for (name, ms) in &metrics.pass_times {
+            if *ms < 0.001 { continue; }
+            if let Some(entry) = self.session_pass_accum.iter_mut().find(|(n, _, _, _)| n == name) {
+                entry.1 += *ms;
+                entry.2 += 1;
+                if *ms > entry.3 { entry.3 = *ms; }
+            } else {
+                self.session_pass_accum.push((name.clone(), *ms, 1, *ms));
+            }
+        }
+
+        // Track mesh stats (just keep latest rolling values)
+        self.session_mesh_avg_us = metrics.mesh_avg_time_us;
+        self.session_mesh_total_quads = metrics.mesh_total_quads;
+    }
+
+    /// Write a comprehensive session summary to performance_log.txt.
+    /// Called from App::shutdown().
+    pub fn write_session_summary(&self, cpu_sections: &[(String, f64)]) {
+        if self.session_frames == 0 {
+            return; // No data collected
+        }
+
+        let log_path = "performance_log.txt";
+        let elapsed = self.session_start.elapsed().as_secs_f32();
+        let n = self.session_frames as f64;
+
+        let avg_fps = self.session_fps_sum / n;
+        let avg_frame = self.session_frame_time_sum / n;
+        let avg_gpu = self.session_gpu_time_sum / n;
+
+        let mut summary = String::new();
+        summary.push_str("\n================================================================================\n");
+        summary.push_str(&format!("SESSION SUMMARY  (duration: {:.0}s, {} frames sampled)\n", elapsed, self.session_frames));
+        summary.push_str(&format!("Settings: {}\n", self.session_settings_context));
+        summary.push_str("================================================================================\n");
+
+        // FPS
+        summary.push_str(&format!(
+            "FPS        avg:{:>6.1}  min:{:>6.1}  max:{:>6.1}\n",
+            avg_fps, self.session_fps_min, self.session_fps_max
+        ));
+
+        // Frame time
+        summary.push_str(&format!(
+            "Frame      avg:{:>6.2}ms              max:{:>6.2}ms\n",
+            avg_frame, self.session_frame_time_max
+        ));
+
+        // GPU time
+        summary.push_str(&format!(
+            "GPU        avg:{:>6.2}ms              max:{:>6.2}ms\n",
+            avg_gpu, self.session_gpu_time_max
+        ));
+
+        // Scene complexity
+        summary.push_str(&format!(
+            "Scene      tris_max:{}K  chunks_max:{}  verts_max:{}K\n",
+            self.session_triangles_max / 1000,
+            self.session_chunks_rendered_max,
+            self.session_total_vertices_max / 1000,
+        ));
+
+        // GPU pass breakdown
+        if !self.session_pass_accum.is_empty() {
+            summary.push_str("--- GPU Passes (avg / max ms) ---\n");
+            let mut passes = self.session_pass_accum.clone();
+            passes.sort_by(|a, b| {
+                let avg_a = a.1 / a.2 as f64;
+                let avg_b = b.1 / b.2 as f64;
+                avg_b.partial_cmp(&avg_a).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            for (name, sum, count, max) in &passes {
+                let avg = sum / *count as f64;
+                if avg > 0.01 {
+                    let pct = if avg_gpu > 0.0 { (avg / avg_gpu) * 100.0 } else { 0.0 };
+                    summary.push_str(&format!(
+                        "  {:20} avg:{:>5.2}ms  max:{:>5.2}ms  ({:>4.1}%)\n",
+                        name, avg, max, pct
+                    ));
+                }
+            }
+        }
+
+        // CPU sections from profiler
+        if !cpu_sections.is_empty() {
+            summary.push_str("--- CPU Sections (avg ms) ---\n");
+            for (name, avg_ms) in cpu_sections {
+                if *avg_ms > 0.01 {
+                    let pct = if avg_frame > 0.0 { (avg_ms / avg_frame) * 100.0 } else { 0.0 };
+                    summary.push_str(&format!(
+                        "  {:20} {:>5.2}ms  ({:>4.1}%)\n",
+                        name, avg_ms, pct
+                    ));
+                }
+            }
+        }
+
+        // Mesh stats
+        summary.push_str(&format!(
+            "Mesh       avg_time:{:.0}us  total_quads:{}K\n",
+            self.session_mesh_avg_us, self.session_mesh_total_quads / 1000
+        ));
+
+        summary.push_str("================================================================================\n\n");
+
+        if let Ok(mut file) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_path)
+        {
+            let _ = file.write_all(summary.as_bytes());
         }
     }
 
@@ -595,7 +780,6 @@ impl DebugOverlay {
             .open(log_path)
         {
             let _ = file.write_all(log_entry.as_bytes());
-            tracing::info!("Performance logged to {}", log_path);
         }
     }
 

@@ -705,11 +705,10 @@ fn dda_trace_shadow(world_pos: vec3<f32>, light_dir: vec3<f32>, max_steps: i32) 
     let t_delta = vec3<f32>(1.0) / abs_dir;
 
     // tMax: parametric distance to first boundary crossing per axis
+    // Branchless: select positive/negative direction per component
     let frac = local_start - vec3<f32>(floor(local_start));
-    var t_max: vec3<f32>;
-    if (light_dir.x >= 0.0) { t_max.x = (1.0 - frac.x) * t_delta.x; } else { t_max.x = frac.x * t_delta.x; }
-    if (light_dir.y >= 0.0) { t_max.y = (1.0 - frac.y) * t_delta.y; } else { t_max.y = frac.y * t_delta.y; }
-    if (light_dir.z >= 0.0) { t_max.z = (1.0 - frac.z) * t_delta.z; } else { t_max.z = frac.z * t_delta.z; }
+    let dir_pos = vec3<bool>(light_dir.x >= 0.0, light_dir.y >= 0.0, light_dir.z >= 0.0);
+    var t_max = select(frac * t_delta, (vec3<f32>(1.0) - frac) * t_delta, dir_pos);
 
     var solid_hits = 0.0;
     var min_dist_to_occluder = 1000.0;
@@ -732,32 +731,29 @@ fn dda_trace_shadow(world_pos: vec3<f32>, light_dir: vec3<f32>, max_steps: i32) 
         if (opacity > 0.5) {
             solid_hits += 1.0;
             if (min_dist_to_occluder > 999.0) {
-                let t_current = min(t_max.x, min(t_max.y, t_max.z));
-                min_dist_to_occluder = t_current;
+                min_dist_to_occluder = min(t_max.x, min(t_max.y, t_max.z));
             }
         }
 
         // Early exit: one solid voxel is enough for full shadow
         if (solid_hits >= 1.0) { break; }
 
-        // Step to next voxel boundary (Amanatides & Woo core)
-        if (t_max.x < t_max.y) {
-            if (t_max.x < t_max.z) {
-                voxel.x += step_sign.x;
-                t_max.x += t_delta.x;
-            } else {
-                voxel.z += step_sign.z;
-                t_max.z += t_delta.z;
-            }
-        } else {
-            if (t_max.y < t_max.z) {
-                voxel.y += step_sign.y;
-                t_max.y += t_delta.y;
-            } else {
-                voxel.z += step_sign.z;
-                t_max.z += t_delta.z;
-            }
-        }
+        // Branchless DDA step: advance along the axis with smallest t_max
+        // Uses comparison masks instead of nested if/else to reduce GPU warp divergence.
+        // All threads execute the same instructions regardless of which axis steps.
+        let x_le_y = t_max.x <= t_max.y;
+        let x_le_z = t_max.x <= t_max.z;
+        let y_le_z = t_max.y <= t_max.z;
+
+        // Exactly one mask is true: step_x if x is smallest, step_y if y is, step_z otherwise
+        let step_x = x_le_y && x_le_z;
+        let step_y = !x_le_y && y_le_z;
+        let step_z = !step_x && !step_y;
+
+        // Apply step using select: branchless per-component conditional add
+        let mask = vec3<bool>(step_x, step_y, step_z);
+        voxel += select(vec3<i32>(0), step_sign, mask);
+        t_max += select(vec3<f32>(0.0), t_delta, mask);
     }
 
     return vec2<f32>(solid_hits, min_dist_to_occluder);
@@ -1380,9 +1376,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var was_traced = 0.0;  // Track if we traced or not
 
     // Skip shadow tracing if shadows are disabled (quality = OFF)
-    if (shadow_quality > 0) {
-        // Always trace shadow for all faces - shadow determines if the AREA is lit,
-        // not whether the face receives direct sun (that's what ndotl is for).
+    // Also skip when sun is too low for shadows to matter:
+    // shadow_fade = smoothstep(0.0, 0.3, sun_intensity) drives final_shadow → 1.0
+    // when sun_intensity < ~0.02, so DDA result is completely unused.
+    if (shadow_quality > 0 && sun_intensity > 0.02) {
         was_traced = 1.0;
 
         // Shadow origin offset strategy:

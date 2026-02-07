@@ -688,6 +688,10 @@ impl App {
         let pos = self.player.position();
         self.world.set_spawn(pos.x, pos.y, pos.z);
 
+        // Write session performance summary to performance_log.txt
+        let cpu_sections = self.profiler.cpu_section_averages();
+        self.renderer.write_session_summary(&cpu_sections);
+
         // Save settings
         let settings = self.renderer.collect_settings((self.windowed_size.width, self.windowed_size.height));
         settings.save();
@@ -924,9 +928,9 @@ impl App {
         self.world.tick_water_simulation(dt.as_secs_f32());
         self.profiler.end_section("world_update");
 
-        // Log LOD distribution every 600 frames (~10 seconds at 60fps)
+        // Log LOD distribution every 3600 frames (~60 seconds at 60fps)
         self.lod_log_counter += 1;
-        if self.lod_log_counter >= 600 {
+        if self.lod_log_counter >= 3600 {
             self.lod_log_counter = 0;
             let (full, half, quarter) = self.world.lod_distribution();
             let total = full + half + quarter;

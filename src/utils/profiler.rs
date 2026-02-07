@@ -67,7 +67,6 @@ pub struct FrameProfiler {
     frame_times_extended: RingBuffer<Duration>,
     display_enabled: bool,
     verbose_enabled: bool,
-    last_report: Instant,
     last_verbose_report: Instant,
     render_stats: RenderStats,
     /// Current settings snapshot for context
@@ -182,7 +181,6 @@ impl FrameProfiler {
             frame_times_extended: RingBuffer::new(300), // 5 seconds at 60fps
             display_enabled: false,
             verbose_enabled: false,
-            last_report: now,
             last_verbose_report: now,
             render_stats: RenderStats::default(),
             settings: SettingsSnapshot::default(),
@@ -223,7 +221,7 @@ impl FrameProfiler {
         self.verbose_enabled = !self.verbose_enabled;
         if self.verbose_enabled {
             tracing::info!("╔════════════════════════════════════════════════════════════════════════╗");
-            tracing::info!("║ VERBOSE PROFILING ENABLED - Detailed breakdown every 2 seconds        ║");
+            tracing::info!("║ VERBOSE PROFILING ENABLED - Detailed breakdown every 10 seconds       ║");
             tracing::info!("╚════════════════════════════════════════════════════════════════════════╝");
             // Log current settings context
             tracing::info!("Settings: {}", self.settings.as_compact_string());
@@ -265,14 +263,11 @@ impl FrameProfiler {
             section.samples.push(section.accumulated);
         }
 
-        // Periodic logging
-        if self.display_enabled && self.last_report.elapsed() > Duration::from_secs(1) {
-            self.log_stats();
-            self.last_report = Instant::now();
-        }
+        // Periodic logging removed from tracing output to reduce console spam.
+        // F3 overlay still renders on-screen; use performance_log.txt for file-based metrics.
 
-        // Verbose logging with min/max breakdown
-        if self.verbose_enabled && self.last_verbose_report.elapsed() > Duration::from_secs(2) {
+        // Verbose logging with min/max breakdown (every 10 seconds)
+        if self.verbose_enabled && self.last_verbose_report.elapsed() > Duration::from_secs(10) {
             self.log_verbose_stats();
             self.last_verbose_report = Instant::now();
             // Reset min/max after reporting
@@ -341,43 +336,6 @@ impl FrameProfiler {
             tracing::info!("║ {}{}║", line, " ".repeat(70 - line.len()));
         }
         tracing::info!("╚════════════════════════════════════════════════════════════════════════╝");
-    }
-
-    fn log_stats(&self) {
-        let avg_frame = self.frame_times.average();
-        let fps = if avg_frame.as_secs_f64() > 0.0 {
-            1.0 / avg_frame.as_secs_f64()
-        } else {
-            0.0
-        };
-
-        let (one_pct_fps, _) = self.fps_percentiles();
-
-        tracing::info!(
-            "FPS: {:.1} (1%low: {:.1}) | Frame: {:.2}ms | GPU: {:.2}ms",
-            fps,
-            one_pct_fps,
-            avg_frame.as_secs_f64() * 1000.0,
-            self.render_stats.gpu_time_ms
-        );
-
-        tracing::info!(
-            "  Chunks: {} rendered, {} culled | Triangles: {}K",
-            self.render_stats.chunks_rendered,
-            self.render_stats.chunks_culled,
-            self.render_stats.triangles / 1000
-        );
-
-        for (name, section) in &self.sections {
-            let avg = section.samples.average();
-            if avg.as_secs_f64() > 0.0001 { // Only log sections > 0.1ms
-                tracing::info!(
-                    "  {}: {:.2}ms",
-                    name,
-                    avg.as_secs_f64() * 1000.0
-                );
-            }
-        }
     }
 
     fn log_verbose_stats(&self) {
@@ -484,6 +442,20 @@ impl FrameProfiler {
 
     pub fn render_stats(&self) -> &RenderStats {
         &self.render_stats
+    }
+
+    /// Get CPU section averages for session summary: Vec<(name, avg_ms)>
+    pub fn cpu_section_averages(&self) -> Vec<(String, f64)> {
+        let mut result: Vec<_> = self.sections
+            .iter()
+            .map(|(name, section)| {
+                let avg_ms = section.samples.average().as_secs_f64() * 1000.0;
+                (name.clone(), avg_ms)
+            })
+            .filter(|(_, ms)| *ms > 0.01)
+            .collect();
+        result.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        result
     }
 
     /// Get session elapsed time in seconds

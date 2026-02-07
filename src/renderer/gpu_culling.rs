@@ -392,7 +392,7 @@ impl GpuCuller {
         let total = hits + misses;
         if total > 0 && total % 300 == 0 {
             let hit_rate = hits as f32 / total as f32 * 100.0;
-            tracing::info!("Visibility cache: {:.1}% hit rate ({} hits / {} total)", hit_rate, hits, total);
+            tracing::debug!("Visibility cache: {:.1}% hit rate ({} hits / {} total)", hit_rate, hits, total);
         }
         
         Some(self.chunk_count)

@@ -1096,6 +1096,11 @@ impl Renderer {
         self.debug_overlay.is_enabled()
     }
 
+    /// Write session performance summary to performance_log.txt
+    pub fn write_session_summary(&self, cpu_sections: &[(String, f64)]) {
+        self.debug_overlay.write_session_summary(cpu_sections);
+    }
+
     /// Mark voxel volume as needing full update (use mark_voxel_dirty_at for single blocks)
     pub fn mark_voxel_dirty(&mut self) {
         self.voxel_gi.mark_dirty();

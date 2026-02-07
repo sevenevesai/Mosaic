@@ -1079,9 +1079,8 @@ impl VoxelGI {
         );
         let upload_time = upload_start.elapsed();
 
-        // Always log CPU fill timing for comparison with GPU
         let total_ms = fill_time.as_secs_f64() * 1000.0 + upload_time.as_secs_f64() * 1000.0;
-        tracing::info!(
+        tracing::debug!(
             "CPU voxel fill: fill={:.2}ms, upload={:.2}ms, total={:.2}ms",
             fill_time.as_secs_f64() * 1000.0,
             upload_time.as_secs_f64() * 1000.0,
@@ -1266,7 +1265,7 @@ impl VoxelGI {
         // Log with delta upload statistics
         if self.delta_upload_enabled && chunks_reused > 0 {
             let reuse_pct = (chunks_reused as f32 / num_chunks as f32) * 100.0;
-            tracing::info!(
+            tracing::debug!(
                 "GPU voxel fill: upload={:.2}ms, total={:.2}ms | {} chunks ({} new, {} reused={:.0}%), {}KB uploaded, {}KB saved",
                 upload_time.as_secs_f64() * 1000.0,
                 fill_time.as_secs_f64() * 1000.0,
@@ -1278,7 +1277,7 @@ impl VoxelGI {
                 bytes_saved / 1024,
             );
         } else {
-            tracing::info!(
+            tracing::debug!(
                 "GPU voxel fill: upload={:.2}ms, total={:.2}ms | {} chunks, center=({},{},{})",
                 upload_time.as_secs_f64() * 1000.0,
                 fill_time.as_secs_f64() * 1000.0,
@@ -1416,7 +1415,7 @@ impl VoxelGI {
             }
         }
 
-        tracing::info!(
+        tracing::debug!(
             "Lookup texture: {} filled, X=[{},{}], Y=[{},{}], Z=[{},{}]",
             num_filled, min_x, max_x, min_y, max_y, min_z, max_z
         );
@@ -2048,8 +2047,7 @@ impl VoxelGI {
             else if center.y < 65.0 { "surface" }
             else { "sky/mountain" };
 
-        // Detailed timing breakdown with context
-        tracing::info!(
+        tracing::debug!(
             "Voxel fill: clear={:.1}ms chunks={:.1}ms prop={:.1}ms | {} lights, {} chunks | pos=({:.0},{:.0},{:.0}) {} {}",
             clear_time.as_secs_f64() * 1000.0,
             chunk_time.as_secs_f64() * 1000.0,

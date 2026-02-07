@@ -383,6 +383,106 @@ fn trace_dda(vol: &VoxelVolume, world_pos: [f32; 3], light_dir: [f32; 3], max_st
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// BRANCHLESS DDA - Mirrors the GPU shader implementation
+// Uses comparison masks instead of nested if/else for axis selection.
+// On GPU this reduces warp divergence; on CPU it tests the same logic path.
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn trace_dda_branchless(vol: &VoxelVolume, world_pos: [f32; 3], light_dir: [f32; 3], max_steps: i32) -> f32 {
+    let start = [
+        world_pos[0] + light_dir[0] * 0.5,
+        world_pos[1] + light_dir[1] * 0.5,
+        world_pos[2] + light_dir[2] * 0.5,
+    ];
+
+    let mut voxel = [
+        start[0].floor() as i32,
+        start[1].floor() as i32,
+        start[2].floor() as i32,
+    ];
+
+    let step = [
+        if light_dir[0] >= 0.0 { 1i32 } else { -1 },
+        if light_dir[1] >= 0.0 { 1i32 } else { -1 },
+        if light_dir[2] >= 0.0 { 1i32 } else { -1 },
+    ];
+
+    let t_delta = [
+        if light_dir[0].abs() > 1e-8 { (1.0 / light_dir[0]).abs() } else { f32::MAX },
+        if light_dir[1].abs() > 1e-8 { (1.0 / light_dir[1]).abs() } else { f32::MAX },
+        if light_dir[2].abs() > 1e-8 { (1.0 / light_dir[2]).abs() } else { f32::MAX },
+    ];
+
+    // Branchless t_max init (matches shader select() pattern)
+    let frac = [
+        start[0] - start[0].floor(),
+        start[1] - start[1].floor(),
+        start[2] - start[2].floor(),
+    ];
+    let mut t_max = [
+        if light_dir[0] >= 0.0 { (1.0 - frac[0]) * t_delta[0] } else { frac[0] * t_delta[0] },
+        if light_dir[1] >= 0.0 { (1.0 - frac[1]) * t_delta[1] } else { frac[1] * t_delta[1] },
+        if light_dir[2] >= 0.0 { (1.0 - frac[2]) * t_delta[2] } else { frac[2] * t_delta[2] },
+    ];
+
+    let mut accumulated_opacity: f32 = 0.0;
+    let mut solid_hits = 0i32;
+
+    for _i in 0..max_steps {
+        let dx = voxel[0] as f32 + 0.5 - HALF_SIZE;
+        let dy = voxel[1] as f32 + 0.5 - HALF_SIZE;
+        let dz = voxel[2] as f32 + 0.5 - HALF_SIZE;
+        let center_dist = (dx * dx + dy * dy + dz * dz).sqrt();
+        if center_dist > 120.0 {
+            break;
+        }
+
+        let edge_fade = 1.0 - smoothstep(100.0, 120.0, center_dist);
+        let opacity = vol.load(voxel[0], voxel[1], voxel[2]) * edge_fade;
+
+        if opacity > 0.5 {
+            solid_hits += 1;
+            accumulated_opacity += 0.4;
+            if solid_hits >= 3 {
+                break;
+            }
+        } else if opacity > 0.1 {
+            accumulated_opacity += opacity * 0.2;
+        }
+
+        if accumulated_opacity >= 1.1 {
+            break;
+        }
+
+        // Branchless axis selection using comparison masks
+        let x_le_y = t_max[0] <= t_max[1];
+        let x_le_z = t_max[0] <= t_max[2];
+        let y_le_z = t_max[1] <= t_max[2];
+
+        let step_x = x_le_y && x_le_z;
+        let step_y = !x_le_y && y_le_z;
+        let step_z = !step_x && !step_y;
+
+        // Conditional add via bool-to-int multiplication
+        voxel[0] += step[0] * step_x as i32;
+        voxel[1] += step[1] * step_y as i32;
+        voxel[2] += step[2] * step_z as i32;
+        t_max[0] += t_delta[0] * step_x as i32 as f32;
+        t_max[1] += t_delta[1] * step_y as i32 as f32;
+        t_max[2] += t_delta[2] * step_z as i32 as f32;
+    }
+
+    if solid_hits > 0 {
+        let strength = smoothstep(0.3, 0.7, accumulated_opacity.clamp(0.0, 1.0));
+        lerp(1.0, 0.25, strength)
+    } else if accumulated_opacity > 0.0 {
+        1.0 - (accumulated_opacity * 0.5).clamp(0.0, 0.5)
+    } else {
+        1.0
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // HELPER FUNCTIONS
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -492,6 +592,26 @@ fn shadow_benchmarks(c: &mut Criterion) {
                 let mut total = 0.0f32;
                 for (pos, dir) in &rays {
                     total += trace_dda(black_box(&wall_vol), *pos, *dir, 48);
+                }
+                total
+            });
+        });
+
+        group.bench_function("dda_branchless_128steps", |b| {
+            b.iter(|| {
+                let mut total = 0.0f32;
+                for (pos, dir) in &rays {
+                    total += trace_dda_branchless(black_box(&wall_vol), *pos, *dir, 128);
+                }
+                total
+            });
+        });
+
+        group.bench_function("dda_branchless_96steps", |b| {
+            b.iter(|| {
+                let mut total = 0.0f32;
+                for (pos, dir) in &rays {
+                    total += trace_dda_branchless(black_box(&wall_vol), *pos, *dir, 96);
                 }
                 total
             });
