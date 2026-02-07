@@ -1350,8 +1350,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // Sun-facing faces need offset along normal to prevent self-shadow acne.
         // Non-sun-facing faces need MINIMAL offset — large offsets push the ray
         // past adjacent occluders, creating false "lit" strips near edges.
+        //
+        // Note: dda_trace_shadow() adds its own light_dir * 0.3 escape offset.
+        // For sun-facing faces: total offset ~0.4 along sun_dir (prevents acne).
+        // For non-sun-facing faces: we SUBTRACT to compensate, keeping total ~0.05
+        // so the ray starts near the surface and catches adjacent occluders.
         let normal_offset = mix(0.05, 0.3, max(ndotl, 0.0));
-        let sun_offset = 0.1;
+        let sun_offset = mix(-0.25, 0.1, max(ndotl, 0.0));
         let shadow_origin = in.world_position + in.normal * normal_offset + sun_dir * sun_offset;
         shadow = ray_march_shadow(shadow_origin, sun_dir, shadow_mode);
     }
