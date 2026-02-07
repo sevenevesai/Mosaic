@@ -661,6 +661,7 @@ struct VoxelVolumeUniform {
     time_of_day: vec4<f32>,
     player_light: vec4<f32>,
     volume_origin: vec4<i32>,
+    player_shadow_box: vec4<f32>,
 };
 
 @group(0) @binding(0)

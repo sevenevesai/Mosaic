@@ -69,7 +69,6 @@ pub struct VoxelRadiance {
 }
 
 /// GPU uniform for voxel volume parameters
-/// Note: Must be 128 bytes to match WGSL alignment requirements
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct VoxelVolumeUniform {
@@ -92,6 +91,10 @@ pub struct VoxelVolumeUniform {
     pub player_light: [f32; 4],
     /// Volume origin for toroidal wrapping (world position of voxel [0,0,0])
     pub volume_origin: [i32; 4],
+    /// Player shadow box: [feet_x, feet_y, feet_z, half_width]
+    /// Analytical box for smooth player shadow (no grid snapping)
+    /// Box spans: center=(x, y+height/2, z), half_extents=(w, height/2, w)
+    pub player_shadow_box: [f32; 4],
 }
 
 impl Default for VoxelVolumeUniform {
@@ -106,6 +109,7 @@ impl Default for VoxelVolumeUniform {
             time_of_day: [0.5, 0.0, 0.0, 0.0],
             player_light: [0.0; 4],  // No held light by default
             volume_origin: [0; 4],   // Toroidal origin
+            player_shadow_box: [0.0; 4], // No player shadow by default
         }
     }
 }
@@ -278,8 +282,6 @@ pub struct VoxelGI {
     /// Whether delta upload mode is active (requires stable volume tracking)
     delta_upload_enabled: bool,
 
-    /// Voxel positions currently occupied by the player shadow (for clearing next frame)
-    player_shadow_voxels: Vec<(u32, u32, u32)>,
 }
 
 impl VoxelGI {
@@ -489,7 +491,6 @@ impl VoxelGI {
             next_slot: 0,
             last_chunk_volume_center: glam::IVec3::ZERO,
             delta_upload_enabled: true, // Enable by default
-            player_shadow_voxels: Vec::new(),
         }
     }
 
@@ -974,6 +975,7 @@ impl VoxelGI {
         torch_shadows: bool,
         fog_distance: f32,
         shadow_quality: u32,
+        player_feet_pos: Vec3,
     ) {
         // Use smoothed_center for gradual transitions (already tracks camera smoothly)
         let snapped_center = Vec3::new(
@@ -992,7 +994,7 @@ impl VoxelGI {
 
         // If no updates needed, just update uniforms
         if !needs_full_refresh && !has_dirty_blocks {
-            self.update_uniform(queue, self.last_update_center, sun_direction, sun_color, ambient_color, time_of_day, shadow_mode, shadow_debug, camera_pos, held_light_emission, torch_shadows, fog_distance, shadow_quality);
+            self.update_uniform(queue, self.last_update_center, sun_direction, sun_color, ambient_color, time_of_day, shadow_mode, shadow_debug, camera_pos, held_light_emission, torch_shadows, fog_distance, shadow_quality, player_feet_pos);
             return;
         }
 
@@ -1014,7 +1016,7 @@ impl VoxelGI {
             }
 
             // Update uniforms with current volume center
-            self.update_uniform(queue, self.last_update_center, sun_direction, sun_color, ambient_color, time_of_day, shadow_mode, shadow_debug, camera_pos, held_light_emission, torch_shadows, fog_distance, shadow_quality);
+            self.update_uniform(queue, self.last_update_center, sun_direction, sun_color, ambient_color, time_of_day, shadow_mode, shadow_debug, camera_pos, held_light_emission, torch_shadows, fog_distance, shadow_quality, player_feet_pos);
             return;
         }
 
@@ -1029,7 +1031,7 @@ impl VoxelGI {
             // We just need to update the uniform with the values gpu_fill_volume set.
 
             // Always use the actual volume center for uniforms (where the voxel data is)
-            self.update_uniform(queue, self.last_update_center, sun_direction, sun_color, ambient_color, time_of_day, shadow_mode, shadow_debug, camera_pos, held_light_emission, torch_shadows, fog_distance, shadow_quality);
+            self.update_uniform(queue, self.last_update_center, sun_direction, sun_color, ambient_color, time_of_day, shadow_mode, shadow_debug, camera_pos, held_light_emission, torch_shadows, fog_distance, shadow_quality, player_feet_pos);
             return;
         }
 
@@ -1047,7 +1049,7 @@ impl VoxelGI {
         self.last_update_center = snapped_center;
 
         // Update uniform buffer
-        self.update_uniform(queue, snapped_center, sun_direction, sun_color, ambient_color, time_of_day, shadow_mode, shadow_debug, camera_pos, held_light_emission, torch_shadows, fog_distance, shadow_quality);
+        self.update_uniform(queue, snapped_center, sun_direction, sun_color, ambient_color, time_of_day, shadow_mode, shadow_debug, camera_pos, held_light_emission, torch_shadows, fog_distance, shadow_quality, player_feet_pos);
 
         // Time the voxel cache fill
         let fill_start = std::time::Instant::now();
@@ -1102,6 +1104,7 @@ impl VoxelGI {
         torch_shadows: bool,
         fog_distance: f32,
         shadow_quality: u32,
+        player_feet_pos: Vec3,
     ) {
         // Volume origin is the world position of voxel [0,0,0]
         // For toroidal wrapping: origin = center - half_size
@@ -1127,6 +1130,9 @@ impl VoxelGI {
             player_light: [player_pos.x, player_pos.y, player_pos.z, held_light_emission as f32 / 15.0],
             // W component: bit 0 = torch_shadows, bits 1-3 = shadow_quality
             volume_origin: [origin.x, origin.y, origin.z, packed_w],
+            // Player shadow box: feet position + half-width (0.3 blocks)
+            // Shader builds the full box: center = (x, y+0.9, z), half = (0.3, 0.9, 0.3)
+            player_shadow_box: [player_feet_pos.x, player_feet_pos.y, player_feet_pos.z, 0.3],
         };
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniform]));
     }
@@ -2140,104 +2146,6 @@ impl VoxelGI {
     /// Get the bind group for binding in render passes
     pub fn bind_group(&self) -> &wgpu::BindGroup {
         &self.bind_group
-    }
-
-    /// Inject player occupancy voxels into the volume so the character casts shadows.
-    /// Clears previous frame's player voxels, writes new ones, uploads to GPU.
-    pub fn inject_player_shadow(&mut self, queue: &wgpu::Queue, player_feet: Vec3) {
-        if !self.initialized {
-            return;
-        }
-
-        let half_size = (VOXEL_VOLUME_SIZE / 2) as f32;
-        let volume_min = self.last_update_center - Vec3::splat(half_size);
-        let vol_size = VOXEL_VOLUME_SIZE as i32;
-
-        let air_pixel: [u8; 4] = [0, 0, 0, 0];
-        let solid_pixel: [u8; 4] = [255, 0, 1, 0]; // opacity=255, material=1
-
-        // Clear previous frame's player voxels (restore to air)
-        for &(vx, vy, vz) in &self.player_shadow_voxels {
-            let idx = ((vz * VOXEL_VOLUME_SIZE * VOXEL_VOLUME_SIZE
-                      + vy * VOXEL_VOLUME_SIZE
-                      + vx) * 4) as usize;
-            if idx + 3 < self.voxel_cache.len() {
-                self.voxel_cache[idx] = 0;
-                self.voxel_cache[idx + 1] = 0;
-                self.voxel_cache[idx + 2] = 0;
-                self.voxel_cache[idx + 3] = 0;
-            }
-            // Upload cleared voxel to GPU
-            queue.write_texture(
-                wgpu::ImageCopyTexture {
-                    texture: &self.voxel_texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d { x: vx, y: vy, z: vz },
-                    aspect: wgpu::TextureAspect::All,
-                },
-                &air_pixel,
-                wgpu::ImageDataLayout {
-                    offset: 0,
-                    bytes_per_row: Some(4),
-                    rows_per_image: Some(1),
-                },
-                wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
-            );
-        }
-
-        self.player_shadow_voxels.clear();
-
-        // Calculate player voxel positions (1 wide x 2 tall x 1 deep column)
-        // Player is ~0.6 blocks wide, ~1.8 blocks tall
-        // Use round() for smoother tracking (reduces block-snapping)
-        let px = (player_feet.x.round() as i32) - volume_min.x as i32;
-        let py = (player_feet.y.round() as i32) - volume_min.y as i32;
-        let pz = (player_feet.z.round() as i32) - volume_min.z as i32;
-
-        // Write player voxels: 2 blocks tall at the player's position
-        for dy in 0..2i32 {
-            let vx = px;
-            let vy = py + dy;
-            let vz = pz;
-
-            // Bounds check
-            if vx < 0 || vx >= vol_size || vy < 0 || vy >= vol_size || vz < 0 || vz >= vol_size {
-                continue;
-            }
-
-            let uvx = vx as u32;
-            let uvy = vy as u32;
-            let uvz = vz as u32;
-
-            let idx = ((uvz * VOXEL_VOLUME_SIZE * VOXEL_VOLUME_SIZE
-                      + uvy * VOXEL_VOLUME_SIZE
-                      + uvx) * 4) as usize;
-            if idx + 3 < self.voxel_cache.len() {
-                self.voxel_cache[idx] = 255;
-                self.voxel_cache[idx + 1] = 0;
-                self.voxel_cache[idx + 2] = 1;
-                self.voxel_cache[idx + 3] = 0;
-            }
-
-            // Upload to GPU
-            queue.write_texture(
-                wgpu::ImageCopyTexture {
-                    texture: &self.voxel_texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d { x: uvx, y: uvy, z: uvz },
-                    aspect: wgpu::TextureAspect::All,
-                },
-                &solid_pixel,
-                wgpu::ImageDataLayout {
-                    offset: 0,
-                    bytes_per_row: Some(4),
-                    rows_per_image: Some(1),
-                },
-                wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
-            );
-
-            self.player_shadow_voxels.push((uvx, uvy, uvz));
-        }
     }
 
     /// Incrementally update only the dirty blocks (FAST PATH)

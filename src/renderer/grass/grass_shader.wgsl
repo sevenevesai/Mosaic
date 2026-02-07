@@ -39,6 +39,7 @@ struct VoxelVolumeUniform {
     time_of_day: vec4<f32>,    // x = time, y = shadow_mode, z = shadow_debug, w = shadow_blend
     player_light: vec4<f32>,   // xyz = position, w = intensity
     volume_origin: vec4<i32>,  // xyz = world position of voxel [0,0,0]
+    player_shadow_box: vec4<f32>, // xyz = feet position, w = half_width
 }
 
 // ============================================================================

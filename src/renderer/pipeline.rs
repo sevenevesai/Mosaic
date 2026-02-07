@@ -505,7 +505,7 @@ struct LightUniform {
     ambient_color: vec4<f32>,
 };
 
-// Voxel volume uniform (144 bytes for proper WGSL alignment)
+// Voxel volume uniform
 struct VoxelVolumeUniform {
     volume_center: vec4<f32>,
     volume_size: vec4<f32>,
@@ -516,6 +516,7 @@ struct VoxelVolumeUniform {
     time_of_day: vec4<f32>,  // x = time, y = shadow_mode (0=hard, 1=soft), z = shadow_debug, w = shadow_blend (0=no shadow, 1=full)
     player_light: vec4<f32>, // xyz = position, w = intensity (0-1, where 1 = 15 emission)
     volume_origin: vec4<i32>, // xyz = world position of voxel [0,0,0] for toroidal wrapping
+    player_shadow_box: vec4<f32>, // xyz = feet position, w = half_width (0.3)
 };
 
 @group(0) @binding(0)
@@ -640,6 +641,37 @@ fn world_to_voxel_coords(world_pos: vec3<f32>) -> vec3<i32> {
 
 fn voxel_in_bounds(v: vec3<i32>) -> bool {
     return all(v >= vec3<i32>(0)) && all(v < vec3<i32>(256));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ANALYTICAL PLAYER SHADOW: Ray-box intersection for smooth player shadow
+// No grid snapping — uses exact floating-point player position.
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn ray_intersects_player_box(ray_origin: vec3<f32>, ray_dir: vec3<f32>) -> bool {
+    // Build player AABB from feet position
+    let feet = voxel_volume.player_shadow_box.xyz;
+    let half_w = voxel_volume.player_shadow_box.w; // 0.3
+    let half_h = 0.9; // half of 1.8 block height
+
+    // Box center is at feet + half_height
+    let box_min = vec3<f32>(feet.x - half_w, feet.y, feet.z - half_w);
+    let box_max = vec3<f32>(feet.x + half_w, feet.y + half_h * 2.0, feet.z + half_w);
+
+    // Slab method ray-AABB intersection
+    let inv_dir = vec3<f32>(1.0) / max(abs(ray_dir), vec3<f32>(1e-8)) * sign(ray_dir);
+    let t1 = (box_min - ray_origin) * inv_dir;
+    let t2 = (box_max - ray_origin) * inv_dir;
+
+    let t_near = min(t1, t2);
+    let t_far = max(t1, t2);
+
+    let t_enter = max(t_near.x, max(t_near.y, t_near.z));
+    let t_exit = min(t_far.x, min(t_far.y, t_far.z));
+
+    // Hit if: ray enters before it exits, and exit is in front of ray origin
+    // t_enter can be negative (ray starts inside box) — that's fine, still a hit
+    return t_enter < t_exit && t_exit > 0.0;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -837,6 +869,13 @@ fn ray_march_shadow_soft_multitap(world_pos: vec3<f32>, light_dir: vec3<f32>, sp
 // UNIFIED SHADOW FUNCTION - picks mode based on quality + shadow mode
 // ═══════════════════════════════════════════════════════════════════════════
 fn ray_march_shadow(world_pos: vec3<f32>, light_dir: vec3<f32>, shadow_mode: f32) -> f32 {
+    // Check analytical player shadow first (smooth, no grid snapping)
+    if (voxel_volume.player_shadow_box.w > 0.0) {
+        if (ray_intersects_player_box(world_pos, light_dir)) {
+            return 0.2; // Player shadow
+        }
+    }
+
     let packed_flags = voxel_volume.volume_origin.w;
     let quality = (packed_flags >> 1) & 7;
 
@@ -1353,10 +1392,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         //
         // Note: dda_trace_shadow() adds its own light_dir * 0.3 escape offset.
         // For sun-facing faces: total offset ~0.4 along sun_dir (prevents acne).
-        // For non-sun-facing faces: we SUBTRACT to compensate, keeping total ~0.05
-        // so the ray starts near the surface and catches adjacent occluders.
+        // For non-sun-facing faces: we SUBTRACT to nearly cancel the DDA's 0.3,
+        // keeping total ~0.01 so the ray starts flush with the surface.
         let normal_offset = mix(0.05, 0.3, max(ndotl, 0.0));
-        let sun_offset = mix(-0.25, 0.1, max(ndotl, 0.0));
+        let sun_offset = mix(-0.29, 0.1, max(ndotl, 0.0));
         let shadow_origin = in.world_position + in.normal * normal_offset + sun_dir * sun_offset;
         shadow = ray_march_shadow(shadow_origin, sun_dir, shadow_mode);
     }

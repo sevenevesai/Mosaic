@@ -3015,6 +3015,7 @@ impl Renderer {
             self.torch_shadows,
             (self.total_view_distance() * CHUNK_SIZE_I32) as f32,
             self.shadow_quality,
+            player_feet_pos,
         );
         let voxel_gi_elapsed = voxel_gi_start.elapsed();
 
@@ -3881,8 +3882,7 @@ impl Renderer {
         output.present();
         let submit_elapsed = submit_start.elapsed();
 
-        // Inject player voxels AFTER submit so they aren't overwritten by GPU fill compute
-        self.voxel_gi.inject_player_shadow(&self.queue, player_feet_pos);
+        // Player shadow is now analytical (ray-box test in shader) - no voxel injection needed
 
         // Begin async readback of GPU timing
         self.gpu_profiler.begin_readback();
