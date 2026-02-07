@@ -106,3 +106,4 @@ tarpaulin-report.html
 
 # Archive folder for reference repos
 archive/
+.loom.json

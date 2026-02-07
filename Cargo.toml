@@ -70,6 +70,18 @@ harness = false
 name = "shadow_bench"
 harness = false
 
+[[bench]]
+name = "shadow_experimental_bench"
+harness = false
+
+[[bench]]
+name = "shadow_experimental2_bench"
+harness = false
+
+[[bench]]
+name = "shadow_engine_bench"
+harness = false
+
 [profile.dev]
 opt-level = 1
 
