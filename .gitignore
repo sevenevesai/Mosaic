@@ -33,6 +33,7 @@ desktop.ini
 *.log.*
 crash-*.txt
 performance_log.txt
+performance_log_archived-*.txt
 
 # Profiling
 *.prof

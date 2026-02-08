@@ -199,7 +199,7 @@ impl SoundMaterial {
 }
 
 /// Base volume level for footsteps (0.0 - 1.0), before category scaling
-const FOOTSTEP_VOLUME: f32 = 0.15;
+const FOOTSTEP_VOLUME: f32 = 0.30;
 
 /// Base volume level for block interactions (slightly louder for feedback)
 const BLOCK_SOUND_VOLUME: f32 = 0.25;
@@ -207,11 +207,14 @@ const BLOCK_SOUND_VOLUME: f32 = 0.25;
 /// Base volume level for ambient sounds
 const AMBIENT_VOLUME: f32 = 0.35;
 
-/// Time between footstep sounds when walking (seconds)
-const FOOTSTEP_INTERVAL_SECS: f32 = 0.40;
+/// Walk cycle: step1 → step2 gap (shorter — second foot lands early in the animation)
+const FOOTSTEP_WALK_SHORT: f32 = 0.35;
+/// Walk cycle: step2 → step1 gap (longer — completes the cycle back to first foot)
+const FOOTSTEP_WALK_LONG: f32 = 0.53;
 
-/// Time between footstep sounds when sprinting (seconds)
-const FOOTSTEP_INTERVAL_SPRINT_SECS: f32 = 0.28;
+/// Sprint cycle: same asymmetry scaled down
+const FOOTSTEP_SPRINT_SHORT: f32 = 0.24;
+const FOOTSTEP_SPRINT_LONG: f32 = 0.37;
 
 /// Crossfade duration for ambient transitions (seconds)
 const AMBIENT_CROSSFADE_SECS: f32 = 2.5;
@@ -300,8 +303,12 @@ pub struct AudioManager {
     /// Which place sound to play next per material
     place_indices: HashMap<SoundMaterial, usize>,
 
-    /// Accumulated time since last footstep (for even timing)
+    /// Accumulated time since last footstep
     footstep_timer: f32,
+    /// Which foot is next (false = first/left, true = second/right)
+    footstep_right: bool,
+    /// Whether footsteps were active last frame (for detecting walk start)
+    footstep_active: bool,
     /// Last material walked on (for smooth transitions)
     last_footstep_material: SoundMaterial,
 
@@ -522,6 +529,8 @@ impl AudioManager {
             break_indices: HashMap::new(),
             place_indices: HashMap::new(),
             footstep_timer: 0.0,
+            footstep_right: false,
+            footstep_active: false,
             last_footstep_material: SoundMaterial::Grass,
             spatial_sinks: Vec::new(),
             sinks: Vec::new(),
@@ -654,17 +663,32 @@ impl AudioManager {
         self.spatial_sinks.retain(|sink| !sink.empty());
         self.sinks.retain(|sink| !sink.empty());
 
-        // Only play footsteps when moving on ground
-        if !on_ground || horizontal_speed < 0.5 {
-            // Reset timer when not walking (so first step plays after short delay)
-            self.footstep_timer = 0.0;
+        // Not moving: full reset so next walk starts clean
+        if horizontal_speed < 0.5 {
+            self.footstep_active = false;
             return;
         }
 
+        // Moving but airborne (falling off edge, jumping): just pause the timer,
+        // don't reset. The cycle resumes naturally on landing.
+        if !on_ground {
+            return;
+        }
+
+        // Fresh start after a complete stop: reset cycle and prime timer
+        if !self.footstep_active {
+            self.footstep_active = true;
+            self.footstep_right = false;
+            let first_interval = if sprinting { FOOTSTEP_SPRINT_SHORT } else { FOOTSTEP_WALK_SHORT };
+            self.footstep_timer = first_interval - 0.1;
+        }
+
+        // Alternating intervals: short gap after first foot, long gap after second foot.
+        // This matches the walk animation where the second foot lands early in the cycle.
         let interval = if sprinting {
-            FOOTSTEP_INTERVAL_SPRINT_SECS
+            if self.footstep_right { FOOTSTEP_SPRINT_LONG } else { FOOTSTEP_SPRINT_SHORT }
         } else {
-            FOOTSTEP_INTERVAL_SECS
+            if self.footstep_right { FOOTSTEP_WALK_LONG } else { FOOTSTEP_WALK_SHORT }
         };
 
         // Accumulate time
@@ -672,12 +696,9 @@ impl AudioManager {
 
         // Play footstep when interval reached
         if self.footstep_timer >= interval {
-            let material = surface_block
-                .map(SoundMaterial::from_block)
-                .unwrap_or(SoundMaterial::Grass);
-            self.play_footstep(material);
-            // Subtract interval (not reset to 0) for smoother timing if frames are uneven
+            self.play_footstep(SoundMaterial::Generic);
             self.footstep_timer -= interval;
+            self.footstep_right = !self.footstep_right;
         }
     }
 

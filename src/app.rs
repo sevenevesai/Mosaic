@@ -757,7 +757,7 @@ impl App {
                     // Play block break sound (material-based, 3D spatial)
                     if let Some(ref mut audio) = self.audio {
                         let block_pos = glam::Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
-                        let player_pos = self.player.position();
+                        let player_pos = self.player.eye_position();
                         let player_dir = self.player.forward();
                         audio.play_block_break(
                             Some(block),
@@ -783,7 +783,7 @@ impl App {
                     // Play block place sound (material-based, 3D spatial)
                     if let Some(ref mut audio) = self.audio {
                         let block_pos = glam::Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
-                        let player_pos = self.player.position();
+                        let player_pos = self.player.eye_position();
                         let player_dir = self.player.forward();
                         audio.play_block_place(
                             Some(block),
@@ -799,7 +799,7 @@ impl App {
                     // Play break sound for foliage/grass
                     if let Some(ref mut audio) = self.audio {
                         let prop_pos = glam::Vec3::new(x, y, z);
-                        let player_pos = self.player.position();
+                        let player_pos = self.player.eye_position();
                         let player_dir = self.player.forward();
                         // Use foliage sound for grass/flowers, stone for rocks
                         let block = if prop_id < 15 {
@@ -823,7 +823,7 @@ impl App {
             // Process item drop request (Q key)
             if let Some((item, count)) = self.player.process_drop_request() {
                 self.item_entities.spawn_from_player(
-                    self.player.position(),
+                    self.player.eye_position(),
                     self.player.forward(),
                     item,
                     count,
@@ -920,7 +920,7 @@ impl App {
         let (lod_full, lod_half) = self.renderer.lod_thresholds();
         self.world.set_lod_thresholds(lod_full, lod_half);
         self.world.set_load_distance(self.renderer.total_view_distance());
-        self.world.update(&self.player.position());
+        self.world.update(&self.player.camera_position());
         // Update player position for water flow simulation culling
         let player_chunk = crate::world::ChunkPos::from_world_pos(self.player.position());
         self.world.update_water_player_position(player_chunk);
@@ -947,9 +947,9 @@ impl App {
 
         // Update item entities (physics, pickup, merging)
         self.profiler.begin_section("item_entities");
-        // Use a position between feet and eyes for pickup detection
+        // Use body center (between feet and eyes) for pickup detection
         let player_pos = self.player.position();
-        let pickup_pos = glam::Vec3::new(player_pos.x, player_pos.y - 0.8, player_pos.z);
+        let pickup_pos = glam::Vec3::new(player_pos.x, player_pos.y + 0.9, player_pos.z);
         let world_ref = &self.world;
         let inventory = &self.player.inventory;
         let collected = self.item_entities.update(

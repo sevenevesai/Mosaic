@@ -212,7 +212,15 @@ impl Player {
         }
     }
 
+    /// Player body position (feet). Use this for gameplay logic (pickup, audio,
+    /// spawn, environment checks). For rendering/chunk loading use `camera_position()`.
     pub fn position(&self) -> Vec3 {
+        self.feet_pos
+    }
+
+    /// Camera world position (orbits behind player in 3rd person).
+    /// Use for chunk loading and rendering — NOT for gameplay distance checks.
+    pub fn camera_position(&self) -> Vec3 {
         self.camera.position
     }
 
@@ -308,11 +316,44 @@ impl Player {
         self.inventory.is_open
     }
 
+    /// Player eye position in world space.
+    pub fn eye_position(&self) -> Vec3 {
+        Vec3::new(self.feet_pos.x, self.feet_pos.y + PLAYER_EYE_HEIGHT, self.feet_pos.z)
+    }
+
+    /// Ray origin and direction for block interaction.
+    /// In 1st person: origin = eye, direction = camera forward, max = PLAYER_REACH.
+    /// In 3rd person: origin = camera (so the ray hits what the crosshair shows),
+    /// direction = camera forward, max = extended to cover camera-to-player gap.
+    /// Callers must use `within_reach` to verify the hit is reachable.
+    fn interaction_ray(&self) -> (Vec3, Vec3, f32) {
+        let direction = self.camera.forward();
+        if self.third_person {
+            // Cast from camera so the ray matches the crosshair exactly.
+            // Extend max distance to account for camera being behind the player.
+            let cam_to_eye = (self.eye_position() - self.camera.position).length();
+            (self.camera.position, direction, PLAYER_REACH + cam_to_eye)
+        } else {
+            (self.eye_position(), direction, PLAYER_REACH)
+        }
+    }
+
+    /// Check if a hit position is within the player's reach (measured from eyes).
+    fn within_reach(&self, block_pos: [i32; 3]) -> bool {
+        let center = Vec3::new(
+            block_pos[0] as f32 + 0.5,
+            block_pos[1] as f32 + 0.5,
+            block_pos[2] as f32 + 0.5,
+        );
+        self.eye_position().distance(center) <= PLAYER_REACH + 0.75
+    }
+
     /// Get the block currently being targeted (for rendering outline)
     pub fn get_target_block(&self, world: &WorldManager) -> Option<[i32; 3]> {
-        let origin = self.camera.position;
-        let direction = self.camera.forward();
-        raycast(origin, direction, PLAYER_REACH, world).map(|hit| hit.block_pos)
+        let (origin, direction, max_dist) = self.interaction_ray();
+        raycast(origin, direction, max_dist, world)
+            .filter(|hit| self.within_reach(hit.block_pos))
+            .map(|hit| hit.block_pos)
     }
 
     pub fn handle_key(&mut self, key: KeyCode, pressed: bool) {
@@ -412,15 +453,18 @@ impl Player {
     pub fn process_block_interactions(&mut self, world: &mut WorldManager, dt: f32) -> BlockInteraction {
         // Progressive mining: hold LMB to break blocks
         if self.lmb_held && !self.inventory.is_open {
-            let origin = self.camera.position;
-            let direction = self.camera.forward();
+            let (origin, direction, max_dist) = self.interaction_ray();
 
             // Raycast against both props and blocks, take the closest hit
-            let block_hit = raycast(origin, direction, PLAYER_REACH, world);
+            let block_hit = raycast(origin, direction, max_dist, world)
+                .filter(|hit| self.within_reach(hit.block_pos));
             let prop_hit = {
                 let chunks = world.chunks_read();
-                raycast_props(origin, direction, PLAYER_REACH, &chunks)
-            };
+                raycast_props(origin, direction, max_dist, &chunks)
+            }.filter(|hit| {
+                let p = Vec3::new(hit.world_pos[0], hit.world_pos[1], hit.world_pos[2]);
+                self.eye_position().distance(p) <= PLAYER_REACH + 0.75
+            });
 
             let block_dist = block_hit.as_ref().map(|h| h.distance).unwrap_or(f32::MAX);
             let prop_dist = prop_hit.as_ref().map(|h| h.distance).unwrap_or(f32::MAX);
@@ -581,10 +625,11 @@ impl Player {
         // Check if we have a block to place
         let block_to_place = self.inventory.selected_block()?;
 
-        let origin = self.camera.position;
-        let direction = self.camera.forward();
+        let (origin, direction, max_dist) = self.interaction_ray();
 
-        if let Some(hit) = raycast(origin, direction, PLAYER_REACH, world) {
+        if let Some(hit) = raycast(origin, direction, max_dist, world)
+            .filter(|hit| self.within_reach(hit.block_pos))
+        {
             let [x, y, z] = hit.adjacent_pos;
 
             // Don't place if it would be inside the player
