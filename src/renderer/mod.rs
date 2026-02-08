@@ -4190,7 +4190,9 @@ impl DayNightCycle {
         // XZ direction: primarily along Z (north-south) with slight X lean
         // This makes shadows fall mostly along X-aligned block edges
         let sun_xz = sun_angle.cos();
-        let sun_direction = Vec3::new(sun_xz * 0.2, sun_y, sun_xz * 0.95 + 0.1).normalize();
+        // ~20° off Z axis — enough diagonal to break staircase patterns,
+        // not so much that shadows cut awkwardly across block faces
+        let sun_direction = Vec3::new(sun_xz * 0.38, sun_y, sun_xz * 0.88 + 0.15).normalize();
 
         // Moon is opposite to sun
         let moon_direction = -sun_direction;

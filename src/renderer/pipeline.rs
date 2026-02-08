@@ -686,13 +686,11 @@ fn dda_trace_shadow(world_pos: vec3<f32>, light_dir: vec3<f32>, max_steps: i32) 
 
     let center = voxel_volume.volume_center.xyz;
 
-    // Start slightly offset along light direction to escape source voxel
-    // Keep tight: with textureLoad (integer sampling), we only need to clear
-    // the surface boundary, not avoid interpolation bleed
-    let start = world_pos + light_dir * 0.3;
-
-    // Local position in volume space
-    let local_start = start - center + vec3<f32>(128.0);
+    // Start at provided position (caller adds small normal offset for float safety).
+    // We skip the starting voxel via one DDA step before the main loop to prevent
+    // self-shadowing. This replaces the old light_dir * 0.3 positional offset which
+    // shifted shadow boundaries away from block edges.
+    let local_start = world_pos - center + vec3<f32>(128.0);
 
     // Current integer voxel position
     var voxel = vec3<i32>(floor(local_start));
@@ -709,6 +707,17 @@ fn dda_trace_shadow(world_pos: vec3<f32>, light_dir: vec3<f32>, max_steps: i32) 
     let frac = local_start - vec3<f32>(floor(local_start));
     let dir_pos = vec3<bool>(light_dir.x >= 0.0, light_dir.y >= 0.0, light_dir.z >= 0.0);
     var t_max = select(frac * t_delta, (vec3<f32>(1.0) - frac) * t_delta, dir_pos);
+
+    // Skip starting voxel: advance one DDA step before testing opacity.
+    // This prevents self-shadowing without shifting the trace origin.
+    {
+        let sx = t_max.x <= t_max.y && t_max.x <= t_max.z;
+        let sy = !(t_max.x <= t_max.y) && t_max.y <= t_max.z;
+        let sz = !sx && !sy;
+        let m = vec3<bool>(sx, sy, sz);
+        voxel += select(vec3<i32>(0), step_sign, m);
+        t_max += select(vec3<f32>(0.0), t_delta, m);
+    }
 
     var solid_hits = 0.0;
     var min_dist_to_occluder = 1000.0;
@@ -1522,21 +1531,19 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Also skip when sun is too low for shadows to matter:
     // shadow_fade = smoothstep(0.0, 0.3, sun_intensity) drives final_shadow → 1.0
     // when sun_intensity < ~0.02, so DDA result is completely unused.
-    if (shadow_quality > 0 && sun_intensity > 0.02) {
+    // Only trace shadows for sun-facing faces (ndotl > 0).
+    // Non-sun-facing faces get shadow=1 (no darkening) which is correct because
+    // sun_ndotl=0 means sun_contribution=0 regardless of shadow value.
+    // This also prevents false self-shadowing where the ray would enter the
+    // surface block behind non-sun-facing faces.
+    if (shadow_quality > 0 && sun_intensity > 0.02 && ndotl > 0.0) {
         was_traced = 1.0;
 
-        // Shadow origin offset strategy:
-        // Sun-facing faces need offset along normal to prevent self-shadow acne.
-        // Non-sun-facing faces need MINIMAL offset — large offsets push the ray
-        // past adjacent occluders, creating false "lit" strips near edges.
-        //
-        // Note: dda_trace_shadow() adds its own light_dir * 0.3 escape offset.
-        // For sun-facing faces: total offset ~0.4 along sun_dir (prevents acne).
-        // For non-sun-facing faces: we SUBTRACT to nearly cancel the DDA's 0.3,
-        // keeping total ~0.01 so the ray starts flush with the surface.
-        let normal_offset = mix(0.05, 0.3, max(ndotl, 0.0));
-        let sun_offset = mix(-0.29, 0.1, max(ndotl, 0.0));
-        let shadow_origin = in.world_position + in.normal * normal_offset + sun_dir * sun_offset;
+        // Shadow origin: minimal normal offset for float precision at integer boundaries.
+        // dda_trace_shadow() skips the starting voxel to prevent self-shadowing.
+        // Keep offset small (0.02) so near block corners the DDA path stays close
+        // to the surface and correctly hits adjacent occluders.
+        let shadow_origin = in.world_position + in.normal * 0.02;
         shadow = ray_march_shadow(shadow_origin, sun_dir, shadow_mode);
     }
 
