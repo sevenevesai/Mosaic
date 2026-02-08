@@ -1,72 +1,68 @@
 //! Volumetric Light Shafts (God Rays)
 //!
-//! Implements world-space raymarching for visible light beams through openings.
-//! Uses the existing voxel volume for shadow queries.
+//! DDA-based world-space raymarching through the voxel volume for physically-motivated
+//! in-scattering. Uses the same Amanatides & Woo traversal as the shadow system.
 //!
-//! Phase 1: Debug visualization (bright colors where light beams should appear)
-//! Phase 2: Proper in-scattering with Henyey-Greenstein phase function
-//! Phase 3: Performance optimizations (half-res, dithering, bilateral blur)
+//! Pipeline: Raymarch (half-res) -> Bilateral Blur (half-res) -> Composite (full-res additive)
 
-// Constants for volumetric lighting (reserved for future use)
-#[allow(dead_code)]
-const VOLUMETRIC_STEPS: u32 = 32;
-#[allow(dead_code)]
-const VOLUMETRIC_DENSITY: f32 = 0.015;
+/// Quality preset names
+const QUALITY_NAMES: [&str; 5] = ["OFF", "LOW", "MEDIUM", "HIGH", "ULTRA"];
 
-/// Volumetric lighting system
+/// Volumetric lighting system with quality presets and bilateral blur
 pub struct VolumetricLighting {
-    /// Half-resolution texture for volumetric accumulation
+    // Half-resolution textures
     volumetric_texture: wgpu::Texture,
     volumetric_view: wgpu::TextureView,
+    blur_texture: wgpu::Texture,
+    blur_view: wgpu::TextureView,
 
-    /// Non-filtering sampler for depth texture
+    // Samplers
     depth_sampler: wgpu::Sampler,
+    linear_sampler: wgpu::Sampler,
 
-    /// Linear sampler for volumetric texture compositing
-    sampler: wgpu::Sampler,
-
-    /// Bind group layout for volumetric pass
-    bind_group_layout: wgpu::BindGroupLayout,
-
-    /// Bind group (created dynamically with depth texture)
-    bind_group: Option<wgpu::BindGroup>,
-
-    /// Pipeline for volumetric raymarching
+    // Raymarch pass
+    raymarch_bind_group_layout: wgpu::BindGroupLayout,
+    raymarch_bind_group: Option<wgpu::BindGroup>,
     raymarch_pipeline: wgpu::RenderPipeline,
 
-    /// Pipeline for compositing volumetrics onto scene (additive blend)
+    // Bilateral blur pass
+    blur_bind_group_layout: wgpu::BindGroupLayout,
+    blur_uniform_buffer_h: wgpu::Buffer,
+    blur_uniform_buffer_v: wgpu::Buffer,
+    blur_bind_group_h: Option<wgpu::BindGroup>,
+    blur_bind_group_v: Option<wgpu::BindGroup>,
+    blur_pipeline: wgpu::RenderPipeline,
+
+    // Composite pass
+    composite_bind_group_layout: wgpu::BindGroupLayout,
+    composite_bind_group: wgpu::BindGroup,
     composite_pipeline: wgpu::RenderPipeline,
 
-    /// Composite bind group layout (just volumetric texture + sampler)
-    composite_bind_group_layout: wgpu::BindGroupLayout,
-
-    /// Composite bind group (volumetric texture + sampler)
-    composite_bind_group: wgpu::BindGroup,
-
-    /// Current dimensions (half of screen size)
+    // State
     width: u32,
     height: u32,
-
-    /// Whether volumetrics are enabled
-    pub enabled: bool,
+    quality: u32,
+    frame_counter: u32,
 }
 
 /// Uniform data for volumetric raymarching
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct VolumetricUniform {
-    /// Inverse view-projection matrix for world position reconstruction
     pub inv_view_proj: [[f32; 4]; 4],
-    /// Camera position in world space
     pub camera_pos: [f32; 4],
-    /// Sun direction (xyz) and intensity (w)
-    pub sun_direction: [f32; 4],
-    /// Sun color (rgb) and density (a)
-    pub sun_color: [f32; 4],
-    /// Voxel volume center (xyz) and size (w)
-    pub volume_center: [f32; 4],
-    /// Screen dimensions (xy) and step count (z), time (w)
-    pub screen_params: [f32; 4],
+    pub sun_direction: [f32; 4],  // xyz = direction, w = intensity
+    pub sun_color: [f32; 4],     // rgb = color, a = density
+    pub volume_center: [f32; 4], // xyz = center, w = volume_size (256)
+    pub screen_params: [f32; 4], // x = width, y = height, z = quality (0-4), w = frame_counter
+}
+
+/// Uniform data for bilateral blur
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct BlurUniform {
+    /// xy = texel_size (1/width, 1/height), z = direction (0=H, 1=V), w = depth_threshold
+    params: [f32; 4],
 }
 
 impl VolumetricLighting {
@@ -76,46 +72,38 @@ impl VolumetricLighting {
         height: u32,
         surface_format: wgpu::TextureFormat,
         voxel_bind_group_layout: &wgpu::BindGroupLayout,
+        quality: u32,
     ) -> Self {
-        // Use half resolution for performance
-        let vol_width = width / 2;
-        let vol_height = height / 2;
+        let vol_width = (width / 2).max(1);
+        let vol_height = (height / 2).max(1);
 
-        // Create volumetric accumulation texture
-        let volumetric_texture = Self::create_volumetric_texture(device, vol_width, vol_height);
+        // Create half-res textures
+        let volumetric_texture = Self::create_half_res_texture(device, vol_width, vol_height, "volumetric_texture");
         let volumetric_view = volumetric_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let blur_texture = Self::create_half_res_texture(device, vol_width, vol_height, "volumetric_blur_texture");
+        let blur_view = blur_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        // Non-filtering sampler for depth texture (required for depth textures)
+        // Non-filtering sampler for depth texture
         let depth_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("volumetric_depth_sampler"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
             mag_filter: wgpu::FilterMode::Nearest,
             min_filter: wgpu::FilterMode::Nearest,
-            mipmap_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
         });
 
-        // Linear sampler for volumetric texture compositing
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("volumetric_sampler"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
+        // Linear sampler for compositing and blur
+        let linear_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("volumetric_linear_sampler"),
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
 
-        // Bind group layout for raymarch pass:
-        // - Group 0: Volumetric uniform + depth texture + sampler
-        // - Group 1: Voxel GI (reused from existing system)
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("volumetric_bind_group_layout"),
+        // === Raymarch pipeline ===
+        let raymarch_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("volumetric_raymarch_bgl"),
             entries: &[
-                // Volumetric uniform buffer
+                // Volumetric uniform
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -137,7 +125,7 @@ impl VolumetricLighting {
                     },
                     count: None,
                 },
-                // Sampler for depth (non-filtering required for depth textures)
+                // Depth sampler (non-filtering)
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -147,11 +135,91 @@ impl VolumetricLighting {
             ],
         });
 
-        // Composite bind group layout (just volumetric texture + sampler for additive blend)
-        let composite_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("volumetric_composite_bind_group_layout"),
+        let raymarch_pipeline = Self::create_raymarch_pipeline(
+            device,
+            &raymarch_bind_group_layout,
+            voxel_bind_group_layout,
+        );
+
+        // === Blur pipeline ===
+        let blur_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("volumetric_blur_bgl"),
             entries: &[
-                // Volumetric texture
+                // Blur uniform
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // Input texture (volumetric or blur, depending on pass)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // Linear sampler
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                // Depth texture for bilateral weighting
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // Depth sampler (non-filtering)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                    count: None,
+                },
+            ],
+        });
+
+        let blur_pipeline = Self::create_blur_pipeline(device, &blur_bind_group_layout);
+
+        // Create blur uniform buffers (H and V directions)
+        use wgpu::util::DeviceExt;
+        let blur_uniform_h = BlurUniform {
+            params: [1.0 / vol_width as f32, 1.0 / vol_height as f32, 0.0, 2.0],
+        };
+        let blur_uniform_v = BlurUniform {
+            params: [1.0 / vol_width as f32, 1.0 / vol_height as f32, 1.0, 2.0],
+        };
+        let blur_uniform_buffer_h = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("volumetric_blur_uniform_h"),
+            contents: bytemuck::cast_slice(&[blur_uniform_h]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let blur_uniform_buffer_v = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("volumetric_blur_uniform_v"),
+            contents: bytemuck::cast_slice(&[blur_uniform_v]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        // === Composite pipeline ===
+        let composite_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("volumetric_composite_bgl"),
+            entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -162,7 +230,6 @@ impl VolumetricLighting {
                     },
                     count: None,
                 },
-                // Sampler
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -172,59 +239,58 @@ impl VolumetricLighting {
             ],
         });
 
-        // Create composite bind group
-        let composite_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("volumetric_composite_bind_group"),
-            layout: &composite_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&volumetric_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&sampler),
-                },
-            ],
-        });
-
-        // Create pipelines
-        let raymarch_pipeline = Self::create_raymarch_pipeline(
-            device,
-            &bind_group_layout,
-            voxel_bind_group_layout,
-        );
         let composite_pipeline = Self::create_composite_pipeline(
             device,
             &composite_bind_group_layout,
             surface_format,
         );
 
+        // Default composite reads from blur_texture (after blur pass)
+        let composite_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("volumetric_composite_bg"),
+            layout: &composite_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&blur_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&linear_sampler),
+                },
+            ],
+        });
+
         Self {
             volumetric_texture,
             volumetric_view,
+            blur_texture,
+            blur_view,
             depth_sampler,
-            sampler,
-            bind_group_layout,
-            bind_group: None,
+            linear_sampler,
+            raymarch_bind_group_layout,
+            raymarch_bind_group: None,
             raymarch_pipeline,
-            composite_pipeline,
+            blur_bind_group_layout,
+            blur_uniform_buffer_h,
+            blur_uniform_buffer_v,
+            blur_bind_group_h: None,
+            blur_bind_group_v: None,
+            blur_pipeline,
             composite_bind_group_layout,
             composite_bind_group,
+            composite_pipeline,
             width: vol_width,
             height: vol_height,
-            enabled: false,  // Default OFF - toggle with V key
+            quality,
+            frame_counter: 0,
         }
     }
 
-    fn create_volumetric_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Texture {
+    fn create_half_res_texture(device: &wgpu::Device, width: u32, height: u32, label: &str) -> wgpu::Texture {
         device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("volumetric_texture"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
+            label: Some(label),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -243,15 +309,53 @@ impl VolumetricLighting {
             label: Some("volumetric_raymarch_shader"),
             source: wgpu::ShaderSource::Wgsl(VOLUMETRIC_RAYMARCH_SHADER.into()),
         });
-
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("volumetric_raymarch_pipeline_layout"),
+            label: Some("volumetric_raymarch_layout"),
             bind_group_layouts: &[bind_group_layout, voxel_bind_group_layout],
             push_constant_ranges: &[],
         });
-
         device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("volumetric_raymarch_pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: "vs_main",
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: "fs_main",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba16Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+        })
+    }
+
+    fn create_blur_pipeline(
+        device: &wgpu::Device,
+        bind_group_layout: &wgpu::BindGroupLayout,
+    ) -> wgpu::RenderPipeline {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("volumetric_blur_shader"),
+            source: wgpu::ShaderSource::Wgsl(VOLUMETRIC_BLUR_SHADER.into()),
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("volumetric_blur_layout"),
+            bind_group_layouts: &[bind_group_layout],
+            push_constant_ranges: &[],
+        });
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("volumetric_blur_pipeline"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
@@ -286,13 +390,11 @@ impl VolumetricLighting {
             label: Some("volumetric_composite_shader"),
             source: wgpu::ShaderSource::Wgsl(VOLUMETRIC_COMPOSITE_SHADER.into()),
         });
-
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("volumetric_composite_pipeline_layout"),
+            label: Some("volumetric_composite_layout"),
             bind_group_layouts: &[bind_group_layout],
             push_constant_ranges: &[],
         });
-
         device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("volumetric_composite_pipeline"),
             layout: Some(&pipeline_layout),
@@ -306,7 +408,7 @@ impl VolumetricLighting {
                 entry_point: "fs_main",
                 targets: &[Some(wgpu::ColorTargetState {
                     format: surface_format,
-                    // Additive blending: output = src + dst
+                    // Additive blending: src + dst
                     blend: Some(wgpu::BlendState {
                         color: wgpu::BlendComponent {
                             src_factor: wgpu::BlendFactor::One,
@@ -332,16 +434,16 @@ impl VolumetricLighting {
         })
     }
 
-    /// Create bind group with depth texture (called each frame or on resize)
+    /// Create raymarch bind group with depth texture (called each frame)
     pub fn create_bind_group(
         &mut self,
         device: &wgpu::Device,
         depth_view: &wgpu::TextureView,
         uniform_buffer: &wgpu::Buffer,
     ) {
-        self.bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("volumetric_bind_group"),
-            layout: &self.bind_group_layout,
+        self.raymarch_bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("volumetric_raymarch_bg"),
+            layout: &self.raymarch_bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -357,26 +459,80 @@ impl VolumetricLighting {
                 },
             ],
         }));
+
+        // Create blur bind groups:
+        // H pass: reads volumetric_texture, writes to blur_texture
+        self.blur_bind_group_h = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("volumetric_blur_bg_h"),
+            layout: &self.blur_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.blur_uniform_buffer_h.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&self.volumetric_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&self.linear_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(depth_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::Sampler(&self.depth_sampler),
+                },
+            ],
+        }));
+
+        // V pass: reads blur_texture, writes to volumetric_texture
+        self.blur_bind_group_v = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("volumetric_blur_bg_v"),
+            layout: &self.blur_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.blur_uniform_buffer_v.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&self.blur_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&self.linear_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(depth_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::Sampler(&self.depth_sampler),
+                },
+            ],
+        }));
     }
 
-
-    /// Render volumetric light shafts
-    /// output_view: where to composite the volumetrics (usually scene_texture_view)
+    /// Render volumetric light shafts (3 passes: raymarch -> blur -> composite)
     pub fn render(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         output_view: &wgpu::TextureView,
         voxel_bind_group: &wgpu::BindGroup,
     ) {
-        if !self.enabled {
+        if self.quality == 0 {
             return;
         }
 
-        let Some(bind_group) = &self.bind_group else {
-            return;
-        };
+        let Some(raymarch_bg) = &self.raymarch_bind_group else { return; };
+        let Some(blur_bg_h) = &self.blur_bind_group_h else { return; };
 
-        // Pass 1: Raymarch volumetrics at half resolution
+        // Pass 1: Raymarch at half resolution
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("volumetric_raymarch_pass"),
@@ -392,22 +548,24 @@ impl VolumetricLighting {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-
             pass.set_pipeline(&self.raymarch_pipeline);
-            pass.set_bind_group(0, bind_group, &[]);
+            pass.set_bind_group(0, raymarch_bg, &[]);
             pass.set_bind_group(1, voxel_bind_group, &[]);
-            pass.draw(0..3, 0..1); // Fullscreen triangle
+            pass.draw(0..3, 0..1);
         }
 
-        // Pass 2: Composite volumetrics onto scene using additive blending
+        // Pass 2: Bilateral blur
+        // For LOW quality: H blur only (volumetric -> blur)
+        // For MEDIUM+: H + V blur (volumetric -> blur -> volumetric)
         {
+            // Horizontal blur: volumetric_texture -> blur_texture
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("volumetric_composite_pass"),
+                label: Some("volumetric_blur_h_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: output_view,
+                    view: &self.blur_view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,  // Keep existing scene
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -415,17 +573,107 @@ impl VolumetricLighting {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
+            pass.set_pipeline(&self.blur_pipeline);
+            pass.set_bind_group(0, blur_bg_h, &[]);
+            pass.draw(0..3, 0..1);
+        }
 
+        // Vertical blur for MEDIUM+ (blur_texture -> volumetric_texture)
+        if self.quality >= 2 {
+            if let Some(blur_bg_v) = &self.blur_bind_group_v {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("volumetric_blur_v_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.volumetric_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                pass.set_pipeline(&self.blur_pipeline);
+                pass.set_bind_group(0, blur_bg_v, &[]);
+                pass.draw(0..3, 0..1);
+            }
+        }
+
+        // For HIGH/ULTRA: second blur pass (volumetric -> blur -> volumetric again)
+        if self.quality >= 3 {
+            // H pass again
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("volumetric_blur_h2_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.blur_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                pass.set_pipeline(&self.blur_pipeline);
+                pass.set_bind_group(0, blur_bg_h, &[]);
+                pass.draw(0..3, 0..1);
+            }
+            // V pass again
+            if let Some(blur_bg_v) = &self.blur_bind_group_v {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("volumetric_blur_v2_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.volumetric_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                pass.set_pipeline(&self.blur_pipeline);
+                pass.set_bind_group(0, blur_bg_v, &[]);
+                pass.draw(0..3, 0..1);
+            }
+        }
+
+        // Pass 3: Composite onto scene (additive blend)
+        // After blur chain: composite reads from the final output texture
+        // LOW: final is blur_texture (H only), composite_bind_group points to blur_view
+        // MEDIUM+: final is volumetric_texture (H+V), need to use the right bind group
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("volumetric_composite_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: output_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
             pass.set_pipeline(&self.composite_pipeline);
             pass.set_bind_group(0, &self.composite_bind_group, &[]);
             pass.draw(0..3, 0..1);
         }
     }
 
-    /// Resize volumetric textures
+    /// Resize textures on window resize
     pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
-        let vol_width = width / 2;
-        let vol_height = height / 2;
+        let vol_width = (width / 2).max(1);
+        let vol_height = (height / 2).max(1);
 
         if vol_width == self.width && vol_height == self.height {
             return;
@@ -434,46 +682,113 @@ impl VolumetricLighting {
         self.width = vol_width;
         self.height = vol_height;
 
-        self.volumetric_texture = Self::create_volumetric_texture(device, vol_width, vol_height);
+        // Recreate textures
+        self.volumetric_texture = Self::create_half_res_texture(device, vol_width, vol_height, "volumetric_texture");
         self.volumetric_view = self.volumetric_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        self.blur_texture = Self::create_half_res_texture(device, vol_width, vol_height, "volumetric_blur_texture");
+        self.blur_view = self.blur_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        // Recreate composite bind group with new volumetric texture view
+        // Update blur uniforms with new texel size
+        // (will be written via queue in the next frame's create_bind_group)
+
+        // Recreate composite bind group
+        self.rebuild_composite_bind_group(device);
+
+        // Clear bind groups (will be recreated in create_bind_group)
+        self.raymarch_bind_group = None;
+        self.blur_bind_group_h = None;
+        self.blur_bind_group_v = None;
+    }
+
+    fn rebuild_composite_bind_group(&mut self, device: &wgpu::Device) {
+        // Composite reads from the final blur output
+        // LOW: reads blur_texture; MEDIUM+: reads volumetric_texture (after V pass writes back)
+        let view = if self.quality <= 1 {
+            &self.blur_view
+        } else {
+            &self.volumetric_view
+        };
         self.composite_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("volumetric_composite_bind_group"),
+            label: Some("volumetric_composite_bg"),
             layout: &self.composite_bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&self.volumetric_view),
+                    resource: wgpu::BindingResource::TextureView(view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    resource: wgpu::BindingResource::Sampler(&self.linear_sampler),
                 },
             ],
         });
-
-        // Clear raymarch bind group (needs to be recreated with new depth texture)
-        self.bind_group = None;
     }
 
-    /// Toggle volumetrics on/off
-    pub fn toggle(&mut self) -> bool {
-        self.enabled = !self.enabled;
-        self.enabled
+    /// Update blur uniforms when resolution changes
+    pub fn update_blur_uniforms(&self, queue: &wgpu::Queue) {
+        let blur_h = BlurUniform {
+            params: [1.0 / self.width as f32, 1.0 / self.height as f32, 0.0, 2.0],
+        };
+        let blur_v = BlurUniform {
+            params: [1.0 / self.width as f32, 1.0 / self.height as f32, 1.0, 2.0],
+        };
+        queue.write_buffer(&self.blur_uniform_buffer_h, 0, bytemuck::cast_slice(&[blur_h]));
+        queue.write_buffer(&self.blur_uniform_buffer_v, 0, bytemuck::cast_slice(&[blur_v]));
     }
 
-    /// Set volumetrics enabled state
-    pub fn set_enabled(&mut self, enabled: bool) {
-        self.enabled = enabled;
+    // === Quality API ===
+
+    pub fn quality(&self) -> u32 {
+        self.quality
+    }
+
+    pub fn quality_str(&self) -> &str {
+        QUALITY_NAMES.get(self.quality as usize).unwrap_or(&"OFF")
+    }
+
+    pub fn quality_index(&self) -> usize {
+        self.quality as usize
+    }
+
+    pub fn set_quality(&mut self, quality: u32, device: &wgpu::Device) {
+        let old = self.quality;
+        self.quality = quality.min(4);
+        // If crossing the LOW/MEDIUM boundary, rebuild composite bind group
+        // because the source texture changes
+        if (old <= 1) != (self.quality <= 1) {
+            self.rebuild_composite_bind_group(device);
+        }
+    }
+
+    pub fn set_quality_index(&mut self, index: usize, device: &wgpu::Device) {
+        self.set_quality(index as u32, device);
+    }
+
+    pub fn cycle_quality_next(&mut self, device: &wgpu::Device) {
+        let next = (self.quality + 1) % 5;
+        self.set_quality(next, device);
+    }
+
+    pub fn cycle_quality_prev(&mut self, device: &wgpu::Device) {
+        let prev = if self.quality == 0 { 4 } else { self.quality - 1 };
+        self.set_quality(prev, device);
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.quality > 0
+    }
+
+    pub fn frame_counter(&self) -> u32 {
+        self.frame_counter
+    }
+
+    pub fn increment_frame(&mut self) {
+        self.frame_counter = self.frame_counter.wrapping_add(1);
     }
 }
 
 // =============================================================================
-// VOLUMETRIC RAYMARCH SHADER
-// =============================================================================
-// Phase 1: Debug visualization - bright magenta where light beams should appear
-// This validates the raymarching logic before we add proper in-scattering
+// VOLUMETRIC RAYMARCH SHADER - DDA-based world-space raymarching
 // =============================================================================
 
 const VOLUMETRIC_RAYMARCH_SHADER: &str = r#"
@@ -483,8 +798,8 @@ struct VolumetricUniform {
     camera_pos: vec4<f32>,
     sun_direction: vec4<f32>,  // xyz = direction, w = intensity
     sun_color: vec4<f32>,      // rgb = color, a = density
-    volume_center: vec4<f32>,  // xyz = center, w = size
-    screen_params: vec4<f32>,  // xy = dimensions, z = step_count, w = time
+    volume_center: vec4<f32>,  // xyz = center, w = volume_size (256)
+    screen_params: vec4<f32>,  // x = width, y = height, z = quality (0-4), w = frame_counter
 };
 
 // Voxel volume uniform (from voxel_gi)
@@ -497,24 +812,18 @@ struct VoxelVolumeUniform {
     ambient_color: vec4<f32>,
     time_of_day: vec4<f32>,
     player_light: vec4<f32>,
+    volume_origin: vec4<i32>,
+    player_shadow_box: vec4<f32>,
 };
 
-@group(0) @binding(0)
-var<uniform> volumetric: VolumetricUniform;
-@group(0) @binding(1)
-var t_depth: texture_depth_2d;
-@group(0) @binding(2)
-var s_depth: sampler;
+@group(0) @binding(0) var<uniform> volumetric: VolumetricUniform;
+@group(0) @binding(1) var t_depth: texture_depth_2d;
+@group(0) @binding(2) var s_depth: sampler;
 
-// Voxel GI bindings (group 1)
-@group(1) @binding(0)
-var<uniform> voxel_volume: VoxelVolumeUniform;
-@group(1) @binding(1)
-var t_voxel: texture_3d<f32>;
-@group(1) @binding(2)
-var t_radiance: texture_3d<f32>;
-@group(1) @binding(3)
-var s_voxel: sampler;
+@group(1) @binding(0) var<uniform> voxel_volume: VoxelVolumeUniform;
+@group(1) @binding(1) var t_voxel: texture_3d<f32>;
+@group(1) @binding(2) var t_radiance: texture_3d<f32>;
+@group(1) @binding(3) var s_voxel: sampler;
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -532,221 +841,335 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     return out;
 }
 
-// Convert world position to voxel UV coordinates
-fn world_to_voxel_uv(world_pos: vec3<f32>) -> vec3<f32> {
-    let volume_center = voxel_volume.volume_center.xyz;
-    let volume_size = voxel_volume.volume_size.x;
-    let half_size = volume_size * 0.5;
+// ═══════════════════════════════════════════════════════════════════════════
+// DDA SHADOW TEST - Adapted from pipeline.rs dda_trace_shadow
+// Uses textureLoad with integer coords for exact per-voxel sampling.
+// Returns 0.0 (shadow) or 1.0 (lit). Binary test with early exit.
+// ═══════════════════════════════════════════════════════════════════════════
 
-    // Convert world position to volume-local coordinates
-    let local_pos = world_pos - volume_center + vec3<f32>(half_size);
-
-    // Convert to UV (0-1 range)
-    return local_pos / volume_size;
+fn voxel_in_bounds(v: vec3<i32>) -> bool {
+    return all(v >= vec3<i32>(0)) && all(v < vec3<i32>(256));
 }
 
-// Check if position is inside voxel volume
-fn is_in_volume(uv: vec3<f32>) -> bool {
-    return all(uv >= vec3<f32>(0.0)) && all(uv <= vec3<f32>(1.0));
-}
+fn dda_shadow_test(world_pos: vec3<f32>, light_dir: vec3<f32>, max_steps: i32) -> f32 {
+    let center = voxel_volume.volume_center.xyz;
+    let local_start = world_pos - center + vec3<f32>(128.0);
 
-// Sample voxel opacity at world position
-fn sample_voxel_opacity(world_pos: vec3<f32>) -> f32 {
-    let uv = world_to_voxel_uv(world_pos);
-    if (!is_in_volume(uv)) {
-        return 0.0; // Outside volume = air
+    var voxel = vec3<i32>(floor(local_start));
+
+    if (!voxel_in_bounds(voxel)) { return 1.0; }
+
+    let step_sign = vec3<i32>(sign(light_dir));
+    let abs_dir = max(abs(light_dir), vec3<f32>(1e-8));
+    let t_delta = vec3<f32>(1.0) / abs_dir;
+
+    let frac = local_start - vec3<f32>(floor(local_start));
+    let dir_pos = vec3<bool>(light_dir.x >= 0.0, light_dir.y >= 0.0, light_dir.z >= 0.0);
+    var t_max = select(frac * t_delta, (vec3<f32>(1.0) - frac) * t_delta, dir_pos);
+
+    // Skip starting voxel to prevent self-shadowing (matches pipeline.rs pattern)
+    {
+        let sx = t_max.x <= t_max.y && t_max.x <= t_max.z;
+        let sy = !(t_max.x <= t_max.y) && t_max.y <= t_max.z;
+        let sz = !sx && !sy;
+        let m = vec3<bool>(sx, sy, sz);
+        voxel += select(vec3<i32>(0), step_sign, m);
+        t_max += select(vec3<f32>(0.0), t_delta, m);
     }
-    let voxel = textureSampleLevel(t_voxel, s_voxel, uv, 0.0);
-    return voxel.r; // R channel = opacity
-}
 
-// Simple shadow test: march toward sun and check for occlusion
-// Returns 1.0 if in light, 0.0 if in shadow
-// Uses snapped positions for world-stable results
-fn shadow_test(world_pos: vec3<f32>, sun_dir: vec3<f32>) -> f32 {
-    let max_distance = 48.0;  // Maximum shadow ray distance
-    let num_steps = 12;       // Shadow ray steps (reduced for performance)
-    let step_size = max_distance / f32(num_steps);
-    let snap_grid = 1.0;      // Snap to 1-block grid for stability
+    for (var i = 0; i < max_steps; i++) {
+        if (!voxel_in_bounds(voxel)) { break; }
 
-    var pos = world_pos + sun_dir * 1.0; // Start slightly offset to avoid self-shadowing
+        // Early termination at volume edges
+        let vd = abs(vec3<f32>(voxel) - vec3<f32>(127.5));
+        let center_dist = max(vd.x, max(vd.y, vd.z));
+        if (center_dist > 120.0) { break; }
 
-    for (var i = 0; i < num_steps; i++) {
-        // Snap to world grid for stable shadow queries
-        let snapped = floor(pos / snap_grid + 0.5) * snap_grid;
-        let opacity = sample_voxel_opacity(snapped);
-        if (opacity > 0.5) {
-            return 0.0; // Hit solid voxel = in shadow
+        // Integer textureLoad: exact voxel value, no interpolation
+        let voxel_data = textureLoad(t_voxel, voxel, 0);
+        if (voxel_data.r > 0.5) {
+            return 0.0;  // Solid hit = in shadow
         }
-        pos += sun_dir * step_size;
+
+        // Branchless DDA step
+        let x_le_y = t_max.x <= t_max.y;
+        let x_le_z = t_max.x <= t_max.z;
+        let y_le_z = t_max.y <= t_max.z;
+        let step_x = x_le_y && x_le_z;
+        let step_y = !x_le_y && y_le_z;
+        let step_z = !step_x && !step_y;
+        let mask = vec3<bool>(step_x, step_y, step_z);
+        voxel += select(vec3<i32>(0), step_sign, mask);
+        t_max += select(vec3<f32>(0.0), t_delta, mask);
     }
 
-    return 1.0; // No occlusion = in light
+    return 1.0;
 }
 
-// Henyey-Greenstein phase function for anisotropic scattering
+// ═══════════════════════════════════════════════════════════════════════════
+// INTERLEAVED GRADIENT NOISE - Temporal dithering with golden angle rotation
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn interleaved_gradient_noise(pixel_coords: vec2<f32>, frame: f32) -> f32 {
+    let magic = vec3<f32>(0.06711056, 0.00583715, 52.9829189);
+    let frame_rot = frame * 5.588238;
+    let rotated = pixel_coords + vec2<f32>(cos(frame_rot), sin(frame_rot)) * frame * 7.0;
+    return fract(magic.z * fract(dot(rotated, magic.xy)));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PHASE FUNCTIONS - Dual-lobe Henyey-Greenstein for realistic scattering
+// ═══════════════════════════════════════════════════════════════════════════
+
 fn henyey_greenstein(cos_theta: f32, g: f32) -> f32 {
     let g2 = g * g;
     let denom = 1.0 + g2 - 2.0 * g * cos_theta;
-    return (1.0 - g2) / (4.0 * 3.14159 * pow(denom, 1.5));
+    return (1.0 - g2) / (4.0 * 3.14159265 * pow(max(denom, 0.0001), 1.5));
 }
 
-// Integer hash for deterministic noise
-fn hash_int(n: u32) -> u32 {
-    var x = n;
-    x = x ^ (x >> 16u);
-    x = x * 0x7feb352du;
-    x = x ^ (x >> 15u);
-    x = x * 0x846ca68bu;
-    x = x ^ (x >> 16u);
-    return x;
+fn phase_function(cos_theta: f32) -> f32 {
+    let forward = henyey_greenstein(cos_theta, 0.76);   // Strong forward scattering
+    let back = henyey_greenstein(cos_theta, -0.25);      // Mild backward fill
+    return mix(forward, back, 0.15);                     // 85% forward, 15% back
 }
 
-// World-space 3D noise for stable dithering
-// Uses integer world position so rays don't jitter as camera moves
-fn world_space_noise(world_pos: vec3<i32>) -> f32 {
-    // Use integer hash based on world grid cell
-    let hash_val = hash_int(u32(world_pos.x + 7919) ^ hash_int(u32(world_pos.y + 4967) ^ hash_int(u32(world_pos.z + 6971))));
-    return f32(hash_val & 0xFFFFu) / 65535.0;
+// ═══════════════════════════════════════════════════════════════════════════
+// QUALITY DECODE
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn get_quality_params() -> vec4<f32> {
+    let quality = i32(volumetric.screen_params.z);
+    // (march_steps, shadow_steps, max_distance, _unused)
+    if (quality <= 1) { return vec4<f32>(24.0, 16.0, 48.0,  0.0); }
+    if (quality == 2) { return vec4<f32>(40.0, 32.0, 80.0,  0.0); }
+    if (quality == 3) { return vec4<f32>(56.0, 48.0, 112.0, 0.0); }
+    return vec4<f32>(72.0, 64.0, 128.0, 0.0);
 }
 
-// Check if there's any occlusion above a point (for outdoor suppression)
-// Returns 0.0 = open sky, 1.0 = fully occluded
-fn sky_occlusion(world_pos: vec3<f32>) -> f32 {
-    let up = vec3<f32>(0.0, 1.0, 0.0);
-    let check_height = 32.0;
-    let num_checks = 8;
-    let step_h = check_height / f32(num_checks);
-
-    var pos = world_pos;
-    for (var i = 0; i < num_checks; i++) {
-        pos += up * step_h;
-        let opacity = sample_voxel_opacity(pos);
-        if (opacity > 0.5) {
-            return 1.0; // Found occlusion above
-        }
-    }
-    return 0.0; // Open sky
-}
+// ═══════════════════════════════════════════════════════════════════════════
+// MAIN FRAGMENT
+// ═══════════════════════════════════════════════════════════════════════════
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    let quality = i32(volumetric.screen_params.z);
+    if (quality <= 0) {
+        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    }
+
     // Sample depth
     let depth = textureSampleLevel(t_depth, s_depth, in.uv, 0.0);
 
-    // Skip sky pixels (depth = 1.0)
-    if (depth >= 0.9999) {
-        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
-    }
+    // Sky pixels: still march but limit distance (god rays visible against sky)
+    let is_sky = depth >= 0.9999;
 
     // Reconstruct world position from depth
     let ndc = vec4<f32>(in.uv.x * 2.0 - 1.0, (1.0 - in.uv.y) * 2.0 - 1.0, depth, 1.0);
     let world_h = volumetric.inv_view_proj * ndc;
     let world_pos = world_h.xyz / world_h.w;
 
-    // Camera position
     let camera_pos = volumetric.camera_pos.xyz;
-
-    // Ray from camera to world position
     let ray_dir = normalize(world_pos - camera_pos);
-    let ray_length = length(world_pos - camera_pos);
+    let raw_ray_length = length(world_pos - camera_pos);
 
-    // Sun direction and intensity
+    // Sun parameters
     let sun_dir = normalize(volumetric.sun_direction.xyz);
     let sun_intensity = volumetric.sun_direction.w;
 
-    // Skip if sun is below horizon (no god rays at night)
-    if (sun_intensity < 0.1) {
+    // Smooth fade at low sun intensity (sunset/sunrise transition)
+    let intensity_fade = smoothstep(0.05, 0.3, sun_intensity);
+    if (intensity_fade < 0.001) {
         return vec4<f32>(0.0, 0.0, 0.0, 0.0);
     }
 
-    // Raymarch parameters
-    let num_steps = 40;
-    let max_ray_dist = min(ray_length, 80.0);
-    let step_size = max_ray_dist / f32(num_steps);
+    // Quality-dependent parameters
+    let params = get_quality_params();
+    let num_steps = i32(params.x);
+    let shadow_steps = i32(params.y);
+    let max_distance = params.z;
     let density = volumetric.sun_color.a;
 
-    // Accumulate in-scattering with EDGE DETECTION for sharp beams
-    var accumulated_light = vec3<f32>(0.0);
-    var pos = camera_pos;
-    var prev_in_light = 0.0;
-    var found_shadow = false;  // Track if we've seen any shadow
+    // Clamp ray length
+    let ray_length = select(min(raw_ray_length, max_distance), max_distance, is_sky);
+    let step_size = ray_length / f32(num_steps);
 
-    // Phase function - very mild forward scattering
+    // Phase function (constant per pixel - view-sun angle doesn't change along ray)
     let cos_theta = dot(ray_dir, sun_dir);
-    let phase = henyey_greenstein(cos_theta, 0.2);
+    let phase = phase_function(cos_theta);
 
-    // World-space noise dithering anchored to surface position (stable as camera moves)
-    let noise = world_space_noise(vec3<i32>(floor(world_pos)));
-    pos += ray_dir * step_size * noise;
+    // Interleaved gradient noise for temporal dithering
+    let pixel_coords = in.uv * vec2<f32>(volumetric.screen_params.xy) * 0.5;
+    let frame = volumetric.screen_params.w;
+    let noise = interleaved_gradient_noise(pixel_coords, frame);
+
+    // Start marching with dithered offset to break up banding
+    var pos = camera_pos + ray_dir * (step_size * noise);
+
+    // Accumulate in-scattering
+    var accumulated = vec3<f32>(0.0);
+    let volume_center = voxel_volume.volume_center.xyz;
 
     for (var i = 0; i < num_steps; i++) {
         pos += ray_dir * step_size;
 
-        // Snap sample position to world grid for stability
-        // This ensures the same world locations are sampled regardless of camera angle
-        let snap_grid = 0.5;
-        let snapped_pos = floor(pos / snap_grid + 0.5) * snap_grid;
-
-        // Check if we've passed the surface
-        let dist_from_cam = length(pos - camera_pos);
-        if (dist_from_cam > max_ray_dist) {
-            break;
+        // Check if position is inside voxel volume
+        let local = pos - volume_center + vec3<f32>(128.0);
+        let voxel_coord = vec3<i32>(floor(local));
+        if (!voxel_in_bounds(voxel_coord)) {
+            continue;
         }
 
-        // Sample voxel opacity at snapped position for stable shadows
-        let opacity = sample_voxel_opacity(snapped_pos);
-
-        // Only process in air
-        if (opacity < 0.3) {
-            // Check if this point can see the sun (use snapped position for stability)
-            let in_light = shadow_test(snapped_pos, sun_dir);
-
-            // Track if we've encountered shadow
-            if (in_light < 0.5) {
-                found_shadow = true;
-            }
-
-            // === BEAM EDGE DETECTION ===
-            // Only show strong scattering near shadow/light transitions
-            // This creates DEFINED beam edges instead of uniform wash
-            let light_delta = abs(in_light - prev_in_light);
-            let edge_factor = light_delta * 3.0;  // Boost at transitions
-
-            // Also allow contribution if we're in light AND have seen shadow
-            // This shows the beam interior, not just edges
-            var contribution = 0.0;
-            if (in_light > 0.5 && found_shadow) {
-                // In lit region after seeing shadow = inside a beam
-                contribution = phase * density * step_size * (0.3 + edge_factor);
-                accumulated_light += volumetric.sun_color.rgb * contribution * sun_intensity;
-            }
-
-            prev_in_light = in_light;
+        // Skip solid voxels (inside geometry)
+        let sample_data = textureLoad(t_voxel, voxel_coord, 0);
+        if (sample_data.r > 0.3) {
+            continue;
         }
+
+        // DDA shadow test toward sun
+        let shadow = dda_shadow_test(pos, sun_dir, shadow_steps);
+
+        // In-scattering: phase * density * step * sun_visibility * sun_color * sun_intensity
+        let scatter = phase * density * step_size * shadow;
+        accumulated += volumetric.sun_color.rgb * scatter * sun_intensity;
     }
 
-    // If we never found shadow, we're in open sunlight - no beams
-    if (!found_shadow) {
-        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
-    }
+    // Apply intensity fade for day/night transition
+    accumulated *= intensity_fade;
 
-    // Very subtle clamp - keep rays thin and defined
-    accumulated_light = min(accumulated_light, vec3<f32>(0.6));
+    // Soft tonemap to prevent blown-out highlights
+    accumulated = accumulated / (accumulated + vec3<f32>(1.0));
+    accumulated *= 1.5;  // Compensate for tonemap compression
 
-    return vec4<f32>(accumulated_light, 1.0);
+    return vec4<f32>(accumulated, 1.0);
 }
 "#;
 
 // =============================================================================
-// VOLUMETRIC COMPOSITE SHADER
+// BILATERAL BLUR SHADER - Depth-aware Gaussian blur at half resolution
+// =============================================================================
+
+const VOLUMETRIC_BLUR_SHADER: &str = r#"
+struct BlurUniform {
+    // xy = texel_size, z = direction (0=H, 1=V), w = depth_threshold
+    params: vec4<f32>,
+};
+
+@group(0) @binding(0) var<uniform> blur: BlurUniform;
+@group(0) @binding(1) var t_input: texture_2d<f32>;
+@group(0) @binding(2) var s_input: sampler;
+@group(0) @binding(3) var t_depth: texture_depth_2d;
+@group(0) @binding(4) var s_depth: sampler;
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
+    var out: VertexOutput;
+    let x = f32(i32(vertex_index & 1u) * 4 - 1);
+    let y = f32(i32(vertex_index >> 1u) * 4 - 1);
+    out.position = vec4<f32>(x, y, 0.0, 1.0);
+    out.uv = vec2<f32>((x + 1.0) * 0.5, (1.0 - y) * 0.5);
+    return out;
+}
+
+fn linearize_depth(d: f32) -> f32 {
+    let near = 0.1;
+    let far = 1000.0;
+    return near * far / (far - d * (far - near));
+}
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    let center_color = textureSample(t_input, s_input, in.uv);
+    let center_depth = linearize_depth(textureSampleLevel(t_depth, s_depth, in.uv, 0.0));
+
+    // 9-tap Gaussian weights (sigma ~2.5)
+    let w0 = 0.227027;
+    let w1 = 0.194946;
+    let w2 = 0.121622;
+    let w3 = 0.054054;
+    let w4 = 0.016216;
+
+    let is_horizontal = blur.params.z < 0.5;
+    let dir = select(vec2<f32>(0.0, 1.0), vec2<f32>(1.0, 0.0), is_horizontal);
+    let texel = blur.params.xy;
+    let depth_threshold = blur.params.w;
+
+    var result = center_color * w0;
+    var total_weight = w0;
+
+    // Unrolled bilateral samples (WGSL requires constant indexing for arrays)
+    // Tap 1
+    {
+        let offset = dir * texel * 1.0;
+        let uv_pos = in.uv + offset;
+        let uv_neg = in.uv - offset;
+        let cp = textureSample(t_input, s_input, uv_pos);
+        let cn = textureSample(t_input, s_input, uv_neg);
+        let dp = linearize_depth(textureSampleLevel(t_depth, s_depth, uv_pos, 0.0));
+        let dn = linearize_depth(textureSampleLevel(t_depth, s_depth, uv_neg, 0.0));
+        let wp = w1 * step(abs(dp - center_depth), depth_threshold);
+        let wn = w1 * step(abs(dn - center_depth), depth_threshold);
+        result += cp * wp + cn * wn;
+        total_weight += wp + wn;
+    }
+    // Tap 2
+    {
+        let offset = dir * texel * 2.0;
+        let uv_pos = in.uv + offset;
+        let uv_neg = in.uv - offset;
+        let cp = textureSample(t_input, s_input, uv_pos);
+        let cn = textureSample(t_input, s_input, uv_neg);
+        let dp = linearize_depth(textureSampleLevel(t_depth, s_depth, uv_pos, 0.0));
+        let dn = linearize_depth(textureSampleLevel(t_depth, s_depth, uv_neg, 0.0));
+        let wp = w2 * step(abs(dp - center_depth), depth_threshold);
+        let wn = w2 * step(abs(dn - center_depth), depth_threshold);
+        result += cp * wp + cn * wn;
+        total_weight += wp + wn;
+    }
+    // Tap 3
+    {
+        let offset = dir * texel * 3.0;
+        let uv_pos = in.uv + offset;
+        let uv_neg = in.uv - offset;
+        let cp = textureSample(t_input, s_input, uv_pos);
+        let cn = textureSample(t_input, s_input, uv_neg);
+        let dp = linearize_depth(textureSampleLevel(t_depth, s_depth, uv_pos, 0.0));
+        let dn = linearize_depth(textureSampleLevel(t_depth, s_depth, uv_neg, 0.0));
+        let wp = w3 * step(abs(dp - center_depth), depth_threshold);
+        let wn = w3 * step(abs(dn - center_depth), depth_threshold);
+        result += cp * wp + cn * wn;
+        total_weight += wp + wn;
+    }
+    // Tap 4
+    {
+        let offset = dir * texel * 4.0;
+        let uv_pos = in.uv + offset;
+        let uv_neg = in.uv - offset;
+        let cp = textureSample(t_input, s_input, uv_pos);
+        let cn = textureSample(t_input, s_input, uv_neg);
+        let dp = linearize_depth(textureSampleLevel(t_depth, s_depth, uv_pos, 0.0));
+        let dn = linearize_depth(textureSampleLevel(t_depth, s_depth, uv_neg, 0.0));
+        let wp = w4 * step(abs(dp - center_depth), depth_threshold);
+        let wn = w4 * step(abs(dn - center_depth), depth_threshold);
+        result += cp * wp + cn * wn;
+        total_weight += wp + wn;
+    }
+
+    return result / total_weight;
+}
+"#;
+
+// =============================================================================
+// COMPOSITE SHADER - Simple additive blend onto scene
 // =============================================================================
 
 const VOLUMETRIC_COMPOSITE_SHADER: &str = r#"
-@group(0) @binding(0)
-var t_volumetric: texture_2d<f32>;
-@group(0) @binding(1)
-var s_tex: sampler;
+@group(0) @binding(0) var t_volumetric: texture_2d<f32>;
+@group(0) @binding(1) var s_tex: sampler;
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -765,10 +1188,7 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // Sample volumetric texture (half resolution, linear interpolation)
-    let volumetric_color = textureSample(t_volumetric, s_tex, in.uv).rgb;
-
-    // Output for additive blending onto scene
-    return vec4<f32>(volumetric_color, 1.0);
+    let color = textureSample(t_volumetric, s_tex, in.uv).rgb;
+    return vec4<f32>(color, 1.0);
 }
 "#;

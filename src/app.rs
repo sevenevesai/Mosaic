@@ -421,12 +421,8 @@ impl App {
                             }
                         }
                         KeyCode::KeyV if pressed => {
-                            let enabled = self.renderer.toggle_volumetrics();
-                            if enabled {
-                                tracing::info!("Volumetric light shafts: ON");
-                            } else {
-                                tracing::info!("Volumetric light shafts: OFF");
-                            }
+                            self.renderer.cycle_volumetrics_quality_next();
+                            tracing::info!("Volumetric light shafts: {}", self.renderer.volumetrics_quality_str());
                         }
                         KeyCode::KeyG if pressed => {
                             let enabled = self.renderer.toggle_gpu_culling();

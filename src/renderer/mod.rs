@@ -786,13 +786,14 @@ impl Renderer {
         });
         let menu_blur_texture_view = menu_blur_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        // Create volumetric light shafts system
+        // Create volumetric light shafts system (default MEDIUM quality = 2)
         let volumetrics = VolumetricLighting::new(
             &device,
             size.width,
             size.height,
             surface_format,
             voxel_gi.bind_group_layout(),
+            2, // MEDIUM quality
         );
         let volumetric_uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Volumetric Uniform Buffer"),
@@ -800,9 +801,9 @@ impl Renderer {
                 inv_view_proj: Mat4::IDENTITY.to_cols_array_2d(),
                 camera_pos: [0.0; 4],
                 sun_direction: [0.5, 0.8, 0.3, 1.0],
-                sun_color: [1.0, 0.95, 0.85, 0.015], // a = density
+                sun_color: [1.0, 0.95, 0.85, 0.006], // a = density
                 volume_center: [0.0; 4],
-                screen_params: [size.width as f32, size.height as f32, 32.0, 0.0],
+                screen_params: [size.width as f32, size.height as f32, 2.0, 0.0], // z = quality, w = frame
             }]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -1321,9 +1322,29 @@ impl Renderer {
         self.shadow_debug
     }
 
-    /// Toggle volumetric light shafts on/off
-    pub fn toggle_volumetrics(&mut self) -> bool {
-        self.volumetrics.toggle()
+    /// Cycle volumetric quality forward: OFF -> LOW -> MEDIUM -> HIGH -> ULTRA -> OFF
+    pub fn cycle_volumetrics_quality_next(&mut self) {
+        self.volumetrics.cycle_quality_next(&self.device);
+    }
+
+    /// Cycle volumetric quality backward
+    pub fn cycle_volumetrics_quality_prev(&mut self) {
+        self.volumetrics.cycle_quality_prev(&self.device);
+    }
+
+    /// Get volumetric quality as string
+    pub fn volumetrics_quality_str(&self) -> &str {
+        self.volumetrics.quality_str()
+    }
+
+    /// Get volumetric quality as index (0-4)
+    pub fn volumetrics_quality_index(&self) -> usize {
+        self.volumetrics.quality_index()
+    }
+
+    /// Set volumetric quality by index
+    pub fn set_volumetrics_quality_index(&mut self, index: usize) {
+        self.volumetrics.set_quality_index(index, &self.device);
     }
 
     /// Toggle GPU frustum culling on/off for A/B testing
@@ -1342,9 +1363,9 @@ impl Renderer {
         new_state
     }
 
-    /// Check if volumetrics are enabled
+    /// Check if volumetrics are enabled (quality > 0)
     pub fn volumetrics_enabled(&self) -> bool {
-        self.volumetrics.enabled
+        self.volumetrics.is_enabled()
     }
 
     /// Check if GPU culling is enabled
@@ -1373,9 +1394,10 @@ impl Renderer {
         self.bloom_enabled = enabled;
     }
 
-    /// Set volumetrics enabled state directly
+    /// Set volumetrics enabled state directly (maps to OFF/MEDIUM)
     pub fn set_volumetrics_enabled(&mut self, enabled: bool) {
-        self.volumetrics.set_enabled(enabled);
+        let quality = if enabled { 2 } else { 0 };
+        self.volumetrics.set_quality(quality, &self.device);
     }
 
     /// Set GPU voxel fill enabled state directly
@@ -2431,7 +2453,9 @@ impl Renderer {
             _ => 2,
         };
         self.bloom_enabled = settings.bloom_enabled;
-        self.volumetrics.set_enabled(settings.volumetrics_enabled);
+        self.volumetrics.set_quality(match settings.volumetrics_quality.to_uppercase().as_str() {
+            "OFF" => 0, "LOW" => 1, "MEDIUM" => 2, "HIGH" => 3, "ULTRA" => 4, _ => 2,
+        }, &self.device);
         if self.mdi_count_available {
             self.use_gpu_culling = settings.gpu_culling;
         }
@@ -2568,7 +2592,7 @@ impl Renderer {
             shadow_mode: self.shadow_mode,
             shadow_quality: self.shadow_quality_str().to_string(),
             bloom_enabled: self.bloom_enabled,
-            volumetrics_enabled: self.volumetrics.enabled,
+            volumetrics_quality: self.volumetrics.quality_str().to_string(),
             gpu_culling: self.use_gpu_culling,
             gpu_voxel_fill: self.voxel_gi.is_gpu_fill_enabled(),
             cycle_speed: self.cycle_speed,
@@ -2620,7 +2644,7 @@ impl Renderer {
             water_quality: self.refraction_quality().as_str().to_string(),
             impostor_quality: self.impostor_renderer.range.as_str().to_string(),
             bloom_enabled: self.bloom_enabled,
-            volumetrics_enabled: self.volumetrics.enabled,
+            volumetrics_quality: self.volumetrics.quality_str().to_string(),
             gpu_culling: self.use_gpu_culling,
             shadow_mode: if self.shadow_mode > 0.5 { "SOFT".to_string() } else { "HARD".to_string() },
             torch_shadows: self.torch_shadows,
@@ -2971,12 +2995,13 @@ impl Renderer {
             inv_view_proj: camera.view_projection_matrix().inverse().to_cols_array_2d(),
             camera_pos: camera.position.extend(1.0).to_array(),
             sun_direction: [cycle.sun_direction.x, cycle.sun_direction.y, cycle.sun_direction.z, cycle.sun_intensity],
-            sun_color: [cycle.sun_color.x, cycle.sun_color.y, cycle.sun_color.z, 0.006], // a = density (very low for thin rays)
+            sun_color: [cycle.sun_color.x, cycle.sun_color.y, cycle.sun_color.z, 0.006], // a = density
             volume_center: [camera.position.x, camera.position.y, camera.position.z, 256.0],
-            screen_params: [self.size.width as f32, self.size.height as f32, 40.0, current_time],
+            screen_params: [self.size.width as f32, self.size.height as f32, self.volumetrics.quality() as f32, self.volumetrics.frame_counter() as f32],
         };
         self.queue
             .write_buffer(&self.volumetric_uniform_buffer, 0, bytemuck::cast_slice(&[volumetric_uniform]));
+        self.volumetrics.increment_frame();
 
         // Update SSAO uniforms (skip if disabled)
         if self.ssao.is_enabled() {

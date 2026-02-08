@@ -15,7 +15,8 @@ pub struct Settings {
     /// Shadow quality preset: OFF, LOW, MEDIUM, HIGH, ULTRA
     pub shadow_quality: String,
     pub bloom_enabled: bool,
-    pub volumetrics_enabled: bool,
+    /// Volumetric light shaft quality: OFF, LOW, MEDIUM, HIGH, ULTRA
+    pub volumetrics_quality: String,
     pub gpu_culling: bool,
     pub gpu_voxel_fill: bool,
     pub cycle_speed: f32,
@@ -98,7 +99,7 @@ impl Default for Settings {
             shadow_mode: 0.0, // HARD
             shadow_quality: "MEDIUM".to_string(), // Default shadow quality
             bloom_enabled: true,
-            volumetrics_enabled: true,
+            volumetrics_quality: "MEDIUM".to_string(),
             gpu_culling: true,
             gpu_voxel_fill: true,
             cycle_speed: 1.0,
@@ -194,8 +195,12 @@ impl Settings {
                     "bloom_enabled" => {
                         settings.bloom_enabled = value == "true";
                     }
+                    "volumetrics_quality" => {
+                        settings.volumetrics_quality = value.to_string();
+                    }
+                    // Backward compat: old bool setting
                     "volumetrics_enabled" => {
-                        settings.volumetrics_enabled = value == "true";
+                        settings.volumetrics_quality = if value == "true" { "MEDIUM".to_string() } else { "OFF".to_string() };
                     }
                     "gpu_culling" => {
                         settings.gpu_culling = value == "true";
@@ -352,7 +357,7 @@ impl Settings {
              shadow_mode={}\n\
              shadow_quality={}\n\
              bloom_enabled={}\n\
-             volumetrics_enabled={}\n\
+             volumetrics_quality={}\n\
              gpu_culling={}\n\
              gpu_voxel_fill={}\n\
              cycle_speed={}\n\
@@ -397,7 +402,7 @@ impl Settings {
             self.shadow_mode,
             self.shadow_quality,
             self.bloom_enabled,
-            self.volumetrics_enabled,
+            self.volumetrics_quality,
             self.gpu_culling,
             self.gpu_voxel_fill,
             self.cycle_speed,
