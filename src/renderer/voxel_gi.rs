@@ -975,6 +975,7 @@ impl VoxelGI {
         torch_shadows: bool,
         fog_distance: f32,
         shadow_quality: u32,
+        ao_quality: u32,
         player_feet_pos: Vec3,
     ) {
         // Use smoothed_center for gradual transitions (already tracks camera smoothly)
@@ -994,7 +995,7 @@ impl VoxelGI {
 
         // If no updates needed, just update uniforms
         if !needs_full_refresh && !has_dirty_blocks {
-            self.update_uniform(queue, self.last_update_center, sun_direction, sun_color, ambient_color, time_of_day, shadow_mode, shadow_debug, camera_pos, held_light_emission, torch_shadows, fog_distance, shadow_quality, player_feet_pos);
+            self.update_uniform(queue, self.last_update_center, sun_direction, sun_color, ambient_color, time_of_day, shadow_mode, shadow_debug, camera_pos, held_light_emission, torch_shadows, fog_distance, shadow_quality, ao_quality, player_feet_pos);
             return;
         }
 
@@ -1016,7 +1017,7 @@ impl VoxelGI {
             }
 
             // Update uniforms with current volume center
-            self.update_uniform(queue, self.last_update_center, sun_direction, sun_color, ambient_color, time_of_day, shadow_mode, shadow_debug, camera_pos, held_light_emission, torch_shadows, fog_distance, shadow_quality, player_feet_pos);
+            self.update_uniform(queue, self.last_update_center, sun_direction, sun_color, ambient_color, time_of_day, shadow_mode, shadow_debug, camera_pos, held_light_emission, torch_shadows, fog_distance, shadow_quality, ao_quality, player_feet_pos);
             return;
         }
 
@@ -1031,7 +1032,7 @@ impl VoxelGI {
             // We just need to update the uniform with the values gpu_fill_volume set.
 
             // Always use the actual volume center for uniforms (where the voxel data is)
-            self.update_uniform(queue, self.last_update_center, sun_direction, sun_color, ambient_color, time_of_day, shadow_mode, shadow_debug, camera_pos, held_light_emission, torch_shadows, fog_distance, shadow_quality, player_feet_pos);
+            self.update_uniform(queue, self.last_update_center, sun_direction, sun_color, ambient_color, time_of_day, shadow_mode, shadow_debug, camera_pos, held_light_emission, torch_shadows, fog_distance, shadow_quality, ao_quality, player_feet_pos);
             return;
         }
 
@@ -1049,7 +1050,7 @@ impl VoxelGI {
         self.last_update_center = snapped_center;
 
         // Update uniform buffer
-        self.update_uniform(queue, snapped_center, sun_direction, sun_color, ambient_color, time_of_day, shadow_mode, shadow_debug, camera_pos, held_light_emission, torch_shadows, fog_distance, shadow_quality, player_feet_pos);
+        self.update_uniform(queue, snapped_center, sun_direction, sun_color, ambient_color, time_of_day, shadow_mode, shadow_debug, camera_pos, held_light_emission, torch_shadows, fog_distance, shadow_quality, ao_quality, player_feet_pos);
 
         // Time the voxel cache fill
         let fill_start = std::time::Instant::now();
@@ -1103,6 +1104,7 @@ impl VoxelGI {
         torch_shadows: bool,
         fog_distance: f32,
         shadow_quality: u32,
+        ao_quality: u32,
         player_feet_pos: Vec3,
     ) {
         // Volume origin is the world position of voxel [0,0,0]
@@ -1114,8 +1116,8 @@ impl VoxelGI {
             center.z.floor() as i32 - half_size,
         );
 
-        // Pack volume_origin.w: bit 0 = torch_shadows, bits 1-3 = shadow_quality (0-4)
-        let packed_w = (if torch_shadows { 1i32 } else { 0 }) | ((shadow_quality as i32) << 1);
+        // Pack volume_origin.w: bit 0 = torch_shadows, bits 1-3 = shadow_quality (0-4), bits 4-6 = ao_quality (0-4)
+        let packed_w = (if torch_shadows { 1i32 } else { 0 }) | ((shadow_quality as i32) << 1) | ((ao_quality as i32) << 4);
 
         let uniform = VoxelVolumeUniform {
             volume_center: [center.x, center.y, center.z, fog_distance],
@@ -1127,7 +1129,7 @@ impl VoxelGI {
             ambient_color: [ambient_color.x, ambient_color.y, ambient_color.z, 1.0],
             time_of_day: [time_of_day, shadow_mode, shadow_debug, self.shadow_blend],
             player_light: [player_pos.x, player_pos.y, player_pos.z, held_light_emission as f32 / 15.0],
-            // W component: bit 0 = torch_shadows, bits 1-3 = shadow_quality
+            // W component: bit 0 = torch_shadows, bits 1-3 = shadow_quality, bits 4-6 = ao_quality
             volume_origin: [origin.x, origin.y, origin.z, packed_w],
             // Player shadow box: feet position + half-width (0.3 blocks)
             // Shader builds the full box: center = (x, y+0.9, z), half = (0.3, 0.9, 0.3)

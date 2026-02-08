@@ -205,6 +205,8 @@ pub struct Renderer {
     shadow_debug: f32,
     // Shadow quality: 0=OFF, 1=LOW, 2=MEDIUM, 3=HIGH, 4=ULTRA
     shadow_quality: u32,
+    // Voxel AO quality: 0=OFF, 1=LOW, 2=MEDIUM, 3=HIGH, 4=ULTRA
+    ao_quality: u32,
 
     // Graphics settings
     bloom_enabled: bool,
@@ -943,6 +945,7 @@ impl Renderer {
             shadow_mode: 0.0,    // Start with hard shadows (0=hard, 1=soft)
             shadow_debug: 0.0,   // Shadow debug off by default
             shadow_quality: 2,   // MEDIUM default
+            ao_quality: 2,       // MEDIUM default
             bloom_enabled: true,
             render_distance: crate::constants::RENDER_DISTANCE,
             lod_distance: crate::constants::LOD_FULL_DETAIL, // Default: LOD starts at 12 chunks
@@ -1276,6 +1279,35 @@ impl Renderer {
     /// Cycle shadow quality backward
     pub fn cycle_shadow_quality_prev(&mut self) {
         self.shadow_quality = if self.shadow_quality == 0 { 4 } else { self.shadow_quality - 1 };
+    }
+
+    // === VOXEL AO QUALITY METHODS ===
+
+    pub fn ao_quality_str(&self) -> &'static str {
+        match self.ao_quality {
+            0 => "OFF",
+            1 => "LOW",
+            2 => "MEDIUM",
+            3 => "HIGH",
+            4 => "ULTRA",
+            _ => "MEDIUM",
+        }
+    }
+
+    pub fn ao_quality_index(&self) -> usize {
+        self.ao_quality as usize
+    }
+
+    pub fn set_ao_quality_index(&mut self, index: usize) {
+        self.ao_quality = (index as u32).min(4);
+    }
+
+    pub fn cycle_ao_quality_next(&mut self) {
+        self.ao_quality = (self.ao_quality + 1) % 5;
+    }
+
+    pub fn cycle_ao_quality_prev(&mut self) {
+        self.ao_quality = if self.ao_quality == 0 { 4 } else { self.ao_quality - 1 };
     }
 
     /// Toggle shadow debug visualization
@@ -2409,6 +2441,15 @@ impl Renderer {
         self.display_mode = settings.display_mode;
         self.voxel_gi.set_update_threshold(settings.shadow_update_step);
         self.torch_shadows = settings.torch_shadows;
+        // Apply voxel AO quality setting
+        self.ao_quality = match settings.ao_quality.to_uppercase().as_str() {
+            "OFF" => 0,
+            "LOW" => 1,
+            "MEDIUM" => 2,
+            "HIGH" => 3,
+            "ULTRA" => 4,
+            _ => 2,
+        };
         // Apply SSAO quality setting
         let ssao_quality = match settings.ssao_quality.to_uppercase().as_str() {
             "OFF" => SsaoQuality::Off,
@@ -2544,6 +2585,7 @@ impl Renderer {
             audio_music: self.audio_music,
             music_enabled: self.music_enabled,
             ssao_quality: self.ssao.quality.as_str().to_string(),
+            ao_quality: self.ao_quality_str().to_string(),
             dof_quality: self.dof.quality.as_str().to_string(),
             aa_quality: self.aa.quality.as_str().to_string(),
             dof_focus_distance: self.dof.params.manual_focus_distance,
@@ -2573,6 +2615,7 @@ impl Renderer {
         crate::utils::profiler::SettingsSnapshot {
             render_distance: self.render_distance,
             ssao_quality: self.ssao.quality.as_str().to_string(),
+            ao_quality: self.ao_quality_str().to_string(),
             dof_quality: self.dof.quality.as_str().to_string(),
             water_quality: self.refraction_quality().as_str().to_string(),
             impostor_quality: self.impostor_renderer.range.as_str().to_string(),
@@ -3022,6 +3065,7 @@ impl Renderer {
             self.torch_shadows,
             (self.total_view_distance() * CHUNK_SIZE_I32) as f32,
             self.shadow_quality,
+            self.ao_quality,
             player_feet_pos,
         );
         let voxel_gi_elapsed = voxel_gi_start.elapsed();

@@ -29,6 +29,8 @@ pub struct Settings {
     pub torch_shadows: bool,
     /// SSAO quality preset: OFF, LOW, MEDIUM, HIGH, ULTRA
     pub ssao_quality: String,
+    /// Voxel AO quality preset: OFF, LOW, MEDIUM, HIGH, ULTRA
+    pub ao_quality: String,
     /// DoF quality preset: OFF, LOW, MEDIUM, HIGH, ULTRA
     pub dof_quality: String,
     /// Anti-aliasing quality preset: OFF, LOW, MEDIUM, HIGH, ULTRA
@@ -106,7 +108,8 @@ impl Default for Settings {
             windowed_height: 720,
             shadow_update_step: 2.0, // Frequent small updates (options: 2, 4, 8, 16, 32, 48)
             torch_shadows: false,    // Default OFF for performance
-            ssao_quality: "MEDIUM".to_string(), // Default SSAO quality
+            ssao_quality: "MEDIUM".to_string(), // Default SSAO quality (disabled by default, kept for legacy)
+            ao_quality: "MEDIUM".to_string(),   // Default voxel AO quality
             dof_quality: "LOW".to_string(),     // Default DoF quality
             aa_quality: "MEDIUM".to_string(),   // Default AA quality
             dof_focus_distance: 20.0,           // Default focus distance in blocks
@@ -236,6 +239,9 @@ impl Settings {
                     "ssao_quality" => {
                         settings.ssao_quality = value.to_string();
                     }
+                    "ao_quality" => {
+                        settings.ao_quality = value.to_string();
+                    }
                     "dof_quality" => {
                         settings.dof_quality = value.to_string();
                     }
@@ -357,6 +363,7 @@ impl Settings {
              shadow_update_step={}\n\
              torch_shadows={}\n\
              ssao_quality={}\n\
+             ao_quality={}\n\
              dof_quality={}\n\
              aa_quality={}\n\
              dof_focus_distance={}\n\
@@ -401,6 +408,7 @@ impl Settings {
             self.shadow_update_step,
             self.torch_shadows,
             self.ssao_quality,
+            self.ao_quality,
             self.dof_quality,
             self.aa_quality,
             self.dof_focus_distance,

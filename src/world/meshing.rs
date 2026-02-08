@@ -1387,6 +1387,102 @@ fn binary_greedy_mesh_axis(
         }
 
         // ═══════════════════════════════════════════════════════════════════
+        // PHASE 3.5: Compute AO boundary mask
+        // For each visible face, check if it has any AO occluders (blocks
+        // adjacent above the face). Blocks WITH occluders can't merge with
+        // blocks WITHOUT — this prevents AO gradient smearing across large
+        // greedy quads. Uses same is_block_solid_at() as calculate_ao().
+        // ═══════════════════════════════════════════════════════════════════
+
+        let mut ao_occluded_mask = [0u16; CHUNK_SIZE];
+        for v in 0..CHUNK_SIZE {
+            let mut row_bits = visible_mask[v];
+            while row_bits != 0 {
+                let u = row_bits.trailing_zeros() as usize;
+                row_bits &= row_bits - 1;
+
+                let (x, y, z) = match axis {
+                    Axis::X => (d as i32, v as i32, u as i32),
+                    Axis::Y => (u as i32, d as i32, v as i32),
+                    Axis::Z => (u as i32, v as i32, d as i32),
+                };
+
+                // Check for AO occluders on the face above (along the positive face normal).
+                // For +Y face at (x,y,z): check y+1 neighbors.
+                // For -Y face: check y-1 neighbors. Etc.
+                // We check the 4 edge-adjacent blocks (not corners) for a fast approximation.
+                let (n0, n1, n2, n3) = match (axis, positive) {
+                    (Axis::Y, true) => (
+                        is_block_solid_at(chunk, neighbors, x - 1, y + 1, z),
+                        is_block_solid_at(chunk, neighbors, x + 1, y + 1, z),
+                        is_block_solid_at(chunk, neighbors, x, y + 1, z - 1),
+                        is_block_solid_at(chunk, neighbors, x, y + 1, z + 1),
+                    ),
+                    (Axis::Y, false) => (
+                        is_block_solid_at(chunk, neighbors, x - 1, y - 1, z),
+                        is_block_solid_at(chunk, neighbors, x + 1, y - 1, z),
+                        is_block_solid_at(chunk, neighbors, x, y - 1, z - 1),
+                        is_block_solid_at(chunk, neighbors, x, y - 1, z + 1),
+                    ),
+                    (Axis::X, true) => (
+                        is_block_solid_at(chunk, neighbors, x + 1, y - 1, z),
+                        is_block_solid_at(chunk, neighbors, x + 1, y + 1, z),
+                        is_block_solid_at(chunk, neighbors, x + 1, y, z - 1),
+                        is_block_solid_at(chunk, neighbors, x + 1, y, z + 1),
+                    ),
+                    (Axis::X, false) => (
+                        is_block_solid_at(chunk, neighbors, x - 1, y - 1, z),
+                        is_block_solid_at(chunk, neighbors, x - 1, y + 1, z),
+                        is_block_solid_at(chunk, neighbors, x - 1, y, z - 1),
+                        is_block_solid_at(chunk, neighbors, x - 1, y, z + 1),
+                    ),
+                    (Axis::Z, true) => (
+                        is_block_solid_at(chunk, neighbors, x - 1, y, z + 1),
+                        is_block_solid_at(chunk, neighbors, x + 1, y, z + 1),
+                        is_block_solid_at(chunk, neighbors, x, y - 1, z + 1),
+                        is_block_solid_at(chunk, neighbors, x, y + 1, z + 1),
+                    ),
+                    (Axis::Z, false) => (
+                        is_block_solid_at(chunk, neighbors, x - 1, y, z - 1),
+                        is_block_solid_at(chunk, neighbors, x + 1, y, z - 1),
+                        is_block_solid_at(chunk, neighbors, x, y - 1, z - 1),
+                        is_block_solid_at(chunk, neighbors, x, y + 1, z - 1),
+                    ),
+                };
+
+                if n0 || n1 || n2 || n3 {
+                    ao_occluded_mask[v] |= 1 << u;
+                }
+            }
+        }
+
+        // Split texture masks by AO class: "clean" (no occluders) vs "occluded".
+        // This prevents the greedy merger from merging across AO boundaries,
+        // eliminating the gradient smearing that causes dark blobs on terrain.
+        let mut texture_masks_occluded = [[0u16; CHUNK_SIZE]; MAX_TEXTURES];
+        let mut textures_present_occluded: u64 = 0;
+        for tex_idx in 0..MAX_TEXTURES {
+            for v in 0..CHUNK_SIZE {
+                let occluded_bits = texture_masks[tex_idx][v] & ao_occluded_mask[v];
+                if occluded_bits != 0 {
+                    texture_masks_occluded[tex_idx][v] = occluded_bits;
+                    textures_present_occluded |= 1 << tex_idx;
+                }
+                texture_masks[tex_idx][v] &= !ao_occluded_mask[v]; // Clean only
+            }
+        }
+        // Recompute textures_present for clean masks (some textures may now be empty)
+        textures_present = 0;
+        for tex_idx in 0..MAX_TEXTURES {
+            for v in 0..CHUNK_SIZE {
+                if texture_masks[tex_idx][v] != 0 {
+                    textures_present |= 1 << tex_idx;
+                    break;
+                }
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════════════
         // PHASE 4: Binary Greedy Merge for each texture
         //
         // For each row:
@@ -1400,10 +1496,10 @@ fn binary_greedy_mesh_axis(
         // All operations work on 16 bits simultaneously.
         // ═══════════════════════════════════════════════════════════════════
 
+        // --- Pass 1: Clean faces (no AO occluders) ---
         while textures_present != 0 {
-            // Get next texture that has faces
             let tex_idx = textures_present.trailing_zeros() as usize;
-            textures_present &= textures_present - 1; // Clear this texture's bit
+            textures_present &= textures_present - 1;
 
             let tex_mask = &mut texture_masks[tex_idx];
 
@@ -1490,6 +1586,74 @@ fn binary_greedy_mesh_axis(
                     );
 
                     // Leaves (texture index 9) are foliage - enable wind animation
+                    let is_foliage = tex_idx == 9;
+
+                    emit_greedy_quad(
+                        vertices,
+                        indices,
+                        world_origin,
+                        axis,
+                        positive,
+                        d,
+                        start_u,
+                        start_v,
+                        width,
+                        height,
+                        tex_idx as u32,
+                        light,
+                        ao_values,
+                        is_foliage,
+                    );
+                }
+            }
+        }
+
+        // --- Pass 2: Occluded faces (have AO occluders) ---
+        // Same greedy merge algorithm, applied to the occluded sub-masks
+        while textures_present_occluded != 0 {
+            let tex_idx = textures_present_occluded.trailing_zeros() as usize;
+            textures_present_occluded &= textures_present_occluded - 1;
+
+            let tex_mask = &mut texture_masks_occluded[tex_idx];
+
+            for start_v in 0..CHUNK_SIZE {
+                while tex_mask[start_v] != 0 {
+                    let start_u = tex_mask[start_v].trailing_zeros() as usize;
+                    let shifted = tex_mask[start_v] >> start_u;
+                    let width = ((!shifted).trailing_zeros() as usize).min(CHUNK_SIZE - start_u);
+                    let run_mask: u16 = (((1u32 << width) - 1) << start_u) as u16;
+                    tex_mask[start_v] &= !run_mask;
+
+                    let mut height = 1usize;
+                    for v in (start_v + 1)..CHUNK_SIZE {
+                        if (tex_mask[v] & run_mask) == run_mask {
+                            tex_mask[v] &= !run_mask;
+                            height += 1;
+                        } else {
+                            break;
+                        }
+                    }
+
+                    let corners = [
+                        (start_u, start_v),
+                        (start_u + width - 1, start_v),
+                        (start_u, start_v + height - 1),
+                        (start_u + width - 1, start_v + height - 1),
+                    ];
+                    let light = corners.iter().map(|&(u, v)| {
+                        let (bx, by, bz) = match axis {
+                            Axis::X => (d, v, u),
+                            Axis::Y => (u, d, v),
+                            Axis::Z => (u, v, d),
+                        };
+                        get_face_light(chunk, neighbors, bx, by, bz, axis, positive)
+                    }).max().unwrap_or(0);
+
+                    let ao_values = calculate_greedy_ao(
+                        chunk, neighbors, axis, positive,
+                        d, start_u, start_v, width, height,
+                    );
+
                     let is_foliage = tex_idx == 9;
 
                     emit_greedy_quad(
@@ -1819,14 +1983,14 @@ fn calculate_ao(side1: bool, side2: bool, corner: bool) -> f32 {
 
     let occluders = (side1 as u8) + (side2 as u8) + (effective_corner as u8);
 
-    // Professional AO curve using smooth hermite interpolation
-    // This creates natural-looking soft shadows without harsh banding
-    // The values are carefully tuned to match Minecraft/Vintage Story style
+    // AO curve: only real corners (2-3 occluders) should darken noticeably.
+    // 1 occluder (common on terrain slopes) should be nearly invisible
+    // to avoid dark patches on gentle hillsides.
     let ao_table: [f32; 4] = [
         1.0,    // 0 occluders: fully exposed
-        0.85,   // 1 occluder: subtle shadow
-        0.65,   // 2 occluders: moderate shadow (edge)
-        0.45,   // 3 occluders: deep corner shadow
+        0.95,   // 1 occluder: barely visible (terrain steps)
+        0.75,   // 2 occluders: visible edge shadow
+        0.50,   // 3 occluders: deep corner shadow
     ];
 
     ao_table[occluders as usize]

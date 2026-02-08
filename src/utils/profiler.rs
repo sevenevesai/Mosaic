@@ -13,6 +13,7 @@ use crate::renderer::RenderStats;
 pub struct SettingsSnapshot {
     pub render_distance: i32,
     pub ssao_quality: String,
+    pub ao_quality: String,
     pub dof_quality: String,
     pub water_quality: String,
     pub impostor_quality: String,
@@ -28,8 +29,9 @@ impl SettingsSnapshot {
     /// Format settings as a compact string for log lines
     pub fn as_compact_string(&self) -> String {
         format!(
-            "SSAO:{} DOF:{} Water:{} Imp:{} Bloom:{} Vol:{} Cull:{} Shad:{}",
+            "SSAO:{} AO:{} DOF:{} Water:{} Imp:{} Bloom:{} Vol:{} Cull:{} Shad:{}",
             self.ssao_quality,
+            self.ao_quality,
             self.dof_quality,
             self.water_quality,
             self.impostor_quality,
@@ -46,6 +48,7 @@ impl SettingsSnapshot {
             format!("  Resolution: {}x{}", self.resolution.0, self.resolution.1),
             format!("  Render Distance: {} chunks", self.render_distance),
             format!("  SSAO: {}", self.ssao_quality),
+            format!("  Voxel AO: {}", self.ao_quality),
             format!("  DOF: {}", self.dof_quality),
             format!("  Water: {}", self.water_quality),
             format!("  Impostors: {}", self.impostor_quality),
