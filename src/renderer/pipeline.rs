@@ -971,19 +971,13 @@ fn get_ao_quality() -> i32 {
     return (packed_flags >> 4) & 7;
 }
 
-// DDA trace a single AO ray: returns occlusion amount (0=clear, higher=occluded)
-// normal_offset: the surface normal, used to start the ray above the surface
-fn dda_trace_ao(world_pos: vec3<f32>, normal: vec3<f32>, direction: vec3<f32>, max_steps: i32) -> f32 {
+// DDA trace a single AO ray: returns occlusion amount (0=clear, 1=fully occluded)
+fn dda_trace_ao(start_pos: vec3<f32>, direction: vec3<f32>, max_steps: i32) -> f32 {
     let center = voxel_volume.volume_center.xyz;
 
-    // Start 1 full block above the surface along the normal, then a small
-    // push along the ray direction. This prevents 45°-tilted rays from
-    // immediately hitting the terrain blocks that form the surface itself.
-    let start = world_pos + normal * 1.0 + direction * 0.2;
-    let local_start = start - center + vec3<f32>(128.0);
+    let local_start = start_pos - center + vec3<f32>(128.0);
     var voxel = vec3<i32>(floor(local_start));
 
-    // Bounds check starting voxel
     if (!voxel_in_bounds(voxel)) { return 0.0; }
 
     let step_sign = vec3<i32>(sign(direction));
@@ -994,6 +988,10 @@ fn dda_trace_ao(world_pos: vec3<f32>, normal: vec3<f32>, direction: vec3<f32>, m
     let dir_pos = vec3<bool>(direction.x >= 0.0, direction.y >= 0.0, direction.z >= 0.0);
     var t_max = select(frac * t_delta, (vec3<f32>(1.0) - frac) * t_delta, dir_pos);
 
+    // Falloff range: occlusion drops to zero at this distance (in blocks).
+    // Decoupled from step count — steps control search range, falloff controls shadow width.
+    // AO should darken within 1-3 blocks of geometry, not 5-10.
+    let falloff_range = 4.0;
     var occlusion = 0.0;
 
     for (var i = 0; i < max_steps; i++) {
@@ -1011,23 +1009,29 @@ fn dda_trace_ao(world_pos: vec3<f32>, normal: vec3<f32>, direction: vec3<f32>, m
         if (!voxel_in_bounds(voxel)) { break; }
 
         let voxel_data = textureLoad(t_voxel, voxel, 0);
-        let opacity = voxel_data.r;
 
-        if (opacity > 0.5) {
-            // Distance from ray origin (in voxel units)
+        if (voxel_data.r > 0.5) {
             let dist = min(t_max.x, min(t_max.y, t_max.z));
-            // Inverse-square falloff: blocks at distance 1 contribute most,
-            // blocks far away contribute almost nothing
-            let contribution = 1.0 / (1.0 + dist * dist);
-            occlusion += contribution;
-            // Don't break — accumulate across the full trace.
-            // Enclosed spaces (caves, corners) will have multiple hits
-            // from multiple directions, producing strong AO naturally.
-            // A single isolated block barely registers.
+            // Linear falloff: smooth gradient, squared for natural decay
+            let falloff = max(0.0, 1.0 - dist / falloff_range);
+            // DDA traverses in distance order — first hit is closest, dominates max().
+            // No later hit can exceed this value, so break immediately.
+            return falloff * falloff;
         }
     }
 
-    return occlusion;
+    return 0.0;
+}
+
+// Stable world-space hash for AO spatial jitter
+fn ao_hash31(p: vec3<f32>) -> f32 {
+    let q = fract(p * 127.1);
+    return fract(dot(q, q.yzx + 31.17));
+}
+fn ao_hash32(p: vec3<f32>) -> vec2<f32> {
+    let q = fract(p * vec3<f32>(127.1, 311.7, 74.7));
+    let d = dot(q, q.yzx + 33.33);
+    return fract(vec2<f32>(d * 1.37, d * 2.79));
 }
 
 fn trace_voxel_ao(world_pos: vec3<f32>, normal: vec3<f32>) -> f32 {
@@ -1043,78 +1047,90 @@ fn trace_voxel_ao(world_pos: vec3<f32>, normal: vec3<f32>) -> f32 {
     }
     let bitangent = cross(normal, tangent);
 
-    // Determine step count per quality level
+    // Spatial jitter: shift sample position in the surface plane.
+    // World-space hash = stable (no flicker), breaks up voxel-aligned shadow edges.
+    let noise = ao_hash32(world_pos);
+    let jitter = tangent * (noise.x - 0.5) * 0.25 + bitangent * (noise.y - 0.5) * 0.25;
+
+    // Trace start: barely above surface (0.1 blocks along normal).
+    // Block surfaces sit on integer coordinates, so 0.1 safely clears the surface
+    // while staying close enough that angled rays hit adjacent walls correctly.
+    let trace_origin = world_pos + jitter + normal * 0.1;
+
+    // Step count per quality — with first-hit early break, most rays terminate
+    // in 1-3 steps near geometry. Steps only matter in open areas (miss case).
+    // Falloff at step N: (1-N/max)^2. At step 8 of 10: 0.04 — negligible.
     var max_steps: i32;
-    if (quality <= 1) { max_steps = 5; }
-    else if (quality == 2) { max_steps = 6; }
-    else if (quality == 3) { max_steps = 7; }
-    else { max_steps = 8; }
+    if (quality <= 1) { max_steps = 6; }
+    else if (quality == 2) { max_steps = 8; }
+    else if (quality == 3) { max_steps = 8; }
+    else { max_steps = 10; }
 
     var total_occlusion = 0.0;
     var total_weight = 0.0;
 
-    // === Direction 1: Normal (center, highest weight) ===
-    // Always traced at all quality levels
-    let w_center = 0.35;
-    total_occlusion += dda_trace_ao(world_pos, normal, normal, max_steps) * w_center;
+    // === Direction 1: Normal (straight out from surface) ===
+    // Detects ceilings, overhangs directly above
+    let w_center = 0.20;
+    total_occlusion += dda_trace_ao(trace_origin, normal, max_steps) * w_center;
     total_weight += w_center;
 
-    // === Directions 2-3: Side pair along tangent (30° tilt from normal) ===
-    // LOW and above — shallower tilt to stay above terrain
-    let tilt30 = 0.866;  // cos(30°)
-    let sin30 = 0.5;     // sin(30°)
-    let w_ring1 = 0.20;
+    // === Directions 2-3: Tangent pair at 40° tilt from normal ===
+    // LOW+ — mid-hemisphere, catches nearby walls and overhangs
+    let tilt40_n = 0.766;  // cos(40°)
+    let tilt40_s = 0.643;  // sin(40°)
+    let w_mid = 0.18;
 
-    let dir_t_pos = normalize(normal * tilt30 + tangent * sin30);
-    let dir_t_neg = normalize(normal * tilt30 - tangent * sin30);
-    total_occlusion += dda_trace_ao(world_pos, normal, dir_t_pos, max_steps) * w_ring1;
-    total_occlusion += dda_trace_ao(world_pos, normal, dir_t_neg, max_steps) * w_ring1;
-    total_weight += w_ring1 * 2.0;
+    let dir_t_pos = normalize(normal * tilt40_n + tangent * tilt40_s);
+    let dir_t_neg = normalize(normal * tilt40_n - tangent * tilt40_s);
+    total_occlusion += dda_trace_ao(trace_origin, dir_t_pos, max_steps) * w_mid;
+    total_occlusion += dda_trace_ao(trace_origin, dir_t_neg, max_steps) * w_mid;
+    total_weight += w_mid * 2.0;
 
-    // === Directions 4-5: Side pair along bitangent (30° tilt) ===
-    // MEDIUM and above
+    // === Directions 4-5: Bitangent pair at 40° tilt ===
+    // MEDIUM+ — same tier, orthogonal axis
     if (quality >= 2) {
-        let dir_b_pos = normalize(normal * tilt30 + bitangent * sin30);
-        let dir_b_neg = normalize(normal * tilt30 - bitangent * sin30);
-        total_occlusion += dda_trace_ao(world_pos, normal, dir_b_pos, max_steps) * w_ring1;
-        total_occlusion += dda_trace_ao(world_pos, normal, dir_b_neg, max_steps) * w_ring1;
-        total_weight += w_ring1 * 2.0;
+        let dir_b_pos = normalize(normal * tilt40_n + bitangent * tilt40_s);
+        let dir_b_neg = normalize(normal * tilt40_n - bitangent * tilt40_s);
+        total_occlusion += dda_trace_ao(trace_origin, dir_b_pos, max_steps) * w_mid;
+        total_occlusion += dda_trace_ao(trace_origin, dir_b_neg, max_steps) * w_mid;
+        total_weight += w_mid * 2.0;
     }
 
-    // === Directions 6-7: Diagonal pair (45° tilt, wider spread) ===
-    // HIGH and above
+    // === Directions 6-7: Grazing tangent pair at 72° tilt ===
+    // HIGH+ — near-surface rays that reliably detect adjacent walls at distance.
+    // These stay close to the surface plane and catch geometry the steeper rays miss.
     if (quality >= 3) {
-        let tilt45 = 0.707;
-        let w_ring2 = 0.15;
+        let tilt72_n = 0.309;  // cos(72°) — small upward component
+        let tilt72_s = 0.951;  // sin(72°) — mostly sideways
+        let w_graze = 0.16;
 
-        let diag1 = normalize(normal * tilt45 + (tangent + bitangent) * 0.5);
-        let diag2 = normalize(normal * tilt45 + (tangent - bitangent) * 0.5);
-        total_occlusion += dda_trace_ao(world_pos, normal, diag1, max_steps) * w_ring2;
-        total_occlusion += dda_trace_ao(world_pos, normal, diag2, max_steps) * w_ring2;
-        total_weight += w_ring2 * 2.0;
+        let dir_g1 = normalize(normal * tilt72_n + tangent * tilt72_s);
+        let dir_g2 = normalize(normal * tilt72_n - tangent * tilt72_s);
+        total_occlusion += dda_trace_ao(trace_origin, dir_g1, max_steps) * w_graze;
+        total_occlusion += dda_trace_ao(trace_origin, dir_g2, max_steps) * w_graze;
+        total_weight += w_graze * 2.0;
     }
 
-    // === Directions 8-9: Opposite diagonal pair (45° tilt) ===
-    // ULTRA only
+    // === Directions 8-9: Grazing bitangent pair at 72° tilt ===
+    // ULTRA — complete near-surface coverage
     if (quality >= 4) {
-        let tilt45 = 0.707;
-        let w_ring2 = 0.15;
+        let tilt72_n = 0.309;
+        let tilt72_s = 0.951;
+        let w_graze = 0.16;
 
-        let diag3 = normalize(normal * tilt45 + (-tangent + bitangent) * 0.5);
-        let diag4 = normalize(normal * tilt45 + (-tangent - bitangent) * 0.5);
-        total_occlusion += dda_trace_ao(world_pos, normal, diag3, max_steps) * w_ring2;
-        total_occlusion += dda_trace_ao(world_pos, normal, diag4, max_steps) * w_ring2;
-        total_weight += w_ring2 * 2.0;
+        let dir_g3 = normalize(normal * tilt72_n + bitangent * tilt72_s);
+        let dir_g4 = normalize(normal * tilt72_n - bitangent * tilt72_s);
+        total_occlusion += dda_trace_ao(trace_origin, dir_g3, max_steps) * w_graze;
+        total_occlusion += dda_trace_ao(trace_origin, dir_g4, max_steps) * w_graze;
+        total_weight += w_graze * 2.0;
     }
 
-    // Normalize by total weight
+    // Normalize — each ray returns 0-1 so weighted average is 0-1
     let ao = total_occlusion / total_weight;
 
-    // The raw occlusion is an accumulated inverse-square sum.
-    // Typical values: 0 (open sky), ~0.3 (near a wall), ~1.0+ (enclosed cave)
-    // Use saturate + power curve to map to a nice 0-1 range
-    let ao_normalized = saturate(ao * 1.5);  // Scale so caves hit ~1.0
-    let ao_shaped = pow(ao_normalized, 0.7);  // Soften the curve
+    // Power curve: < 1.0 strengthens near-crease darkening, preserves smooth gradient
+    let ao_shaped = pow(saturate(ao), 0.65);
 
     return 1.0 - ao_shaped;
 }
@@ -1593,22 +1609,29 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // TODO: Re-enable once shadows are stable
     let gi = vec3<f32>(0.0);
 
-    // Voxel AO - short range occlusion from nearby geometry
-    let voxel_ao_raw = trace_voxel_ao(in.world_position, in.normal);
-    // Map AO to visible range: 0.55 (fully occluded) to 1.0 (clear)
-    // Subtle enough that terrain steps don't over-darken, strong enough
-    // that caves/corners are clearly shaded
-    let voxel_ao = mix(0.55, 1.0, voxel_ao_raw);
+    // Per-vertex AO — direct contact shadows at block corners.
+    // AO-aware mesh splitting prevents gradient smearing across large quads,
+    // so we can use the baked values directly for strong crease darkening.
+    // Table: [1.0, 0.85, 0.65, 0.40] — 3 occluders = 60% dark.
+    let vertex_ao = in.ao;
 
-    // Per-vertex AO — single smoothstep for gentle gradient.
-    // The baked AO values already encode corner darkness (0.5-1.0 range),
-    // so we just need a mild remap, not an aggressive double-S curve.
-    let ao_raw = in.ao;
-    let ao_smooth = smoothstep(0.0, 1.0, ao_raw);
-    let vertex_ao = mix(0.70, 1.0, ao_smooth);
+    // Voxel AO - smooth world-space occlusion from nearby geometry.
+    // Skip the expensive trace if vertex AO says no blocks are nearby (ao=1.0).
+    // This saves 100% of trace cost on open flat terrain (majority of fragments).
+    var voxel_ao = 1.0;
+    if (vertex_ao < 0.99) {
+        let voxel_ao_raw = trace_voxel_ao(in.world_position, in.normal);
+        // Mapping: 0.30 in deep corners/caves, 1.0 in open areas
+        voxel_ao = mix(0.30, 1.0, voxel_ao_raw);
+    }
 
-    // Combined AO
-    let combined_ao = vertex_ao * voxel_ao;
+    // Combined AO — both layers multiply for corner darkness.
+    // Reduce AO strength in shadowed areas to prevent double-darkening.
+    // In full shadow (final_shadow≈0), AO effect is halved.
+    // In full light (final_shadow=1), AO applies at full strength.
+    let raw_ao = vertex_ao * voxel_ao;
+    let ao_strength = mix(0.5, 1.0, final_shadow);
+    let combined_ao = mix(1.0, raw_ao, ao_strength);
 
     // Block light (torches) - now using voxel-based sampling
     // Sample emissive light from nearby voxels in the volume
