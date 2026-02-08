@@ -4175,13 +4175,22 @@ impl DayNightCycle {
         let t = time.fract();
         if t < 0.0 { t + 1.0 } else { t };
 
-        // Sun rotates around X axis: rises at 0.25, peaks at 0.5, sets at 0.75
-        // Offset by ~20 degrees so sun is never directly overhead (always casts shadows)
-        let sun_angle = (t - 0.25) * std::f32::consts::TAU; // Full rotation
-        let sun_y = sun_angle.sin() * 0.94; // Cap max height (~20° from zenith)
+        // Sun arc optimized for voxel terrain shadow aesthetics.
+        // Key principles:
+        // - High noon (~70° elevation) gives short, clean shadows down block sides
+        // - Rise/set along Z axis so low-angle shadows run along block edges (not diagonal)
+        // - Steeper arc spends less time at awkward 30-45° angles
+        // - Small X offset keeps shadows slightly off pure-axis (avoids perfectly flat shadows)
+        let sun_angle = (t - 0.25) * std::f32::consts::TAU;
+
+        // Elevation: steeper power curve — sun climbs quickly, stays high longer
+        let raw_sin = sun_angle.sin();
+        let sun_y = raw_sin.abs().powf(0.75) * raw_sin.signum() * 0.92;
+
+        // XZ direction: primarily along Z (north-south) with slight X lean
+        // This makes shadows fall mostly along X-aligned block edges
         let sun_xz = sun_angle.cos();
-        // Add slight north offset so there's always shadow direction
-        let sun_direction = Vec3::new(sun_xz * 0.5, sun_y, sun_xz * 0.866 + 0.34).normalize();
+        let sun_direction = Vec3::new(sun_xz * 0.2, sun_y, sun_xz * 0.95 + 0.1).normalize();
 
         // Moon is opposite to sun
         let moon_direction = -sun_direction;

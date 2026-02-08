@@ -1621,8 +1621,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var voxel_ao = 1.0;
     if (vertex_ao < 0.99) {
         let voxel_ao_raw = trace_voxel_ao(in.world_position, in.normal);
-        // Mapping: 0.30 in deep corners/caves, 1.0 in open areas
-        voxel_ao = mix(0.30, 1.0, voxel_ao_raw);
+        // Mapping: 0.40 in deep corners/caves, 1.0 in open areas
+        voxel_ao = mix(0.40, 1.0, voxel_ao_raw);
     }
 
     // Combined AO — both layers multiply for corner darkness.

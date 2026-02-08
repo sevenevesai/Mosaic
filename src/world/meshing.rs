@@ -1984,13 +1984,12 @@ fn calculate_ao(side1: bool, side2: bool, corner: bool) -> f32 {
     let occluders = (side1 as u8) + (side2 as u8) + (effective_corner as u8);
 
     // Per-vertex AO provides tight contact shadows at block corners.
-    // Keep values subtle — the voxel DDA AO handles medium-range darkening.
-    // These just need to mark corners/creases, not create heavy shadows.
+    // Moderate values — stacks with voxel AO + shadows, so don't go too dark.
     let ao_table: [f32; 4] = [
         1.0,    // 0 occluders: fully exposed
-        0.85,   // 1 occluder: subtle edge hint
-        0.65,   // 2 occluders: visible crease
-        0.40,   // 3 occluders: inner corner
+        0.88,   // 1 occluder: subtle edge hint
+        0.72,   // 2 occluders: visible crease
+        0.55,   // 3 occluders: inner corner
     ];
 
     ao_table[occluders as usize]
