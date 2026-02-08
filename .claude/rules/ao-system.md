@@ -27,21 +27,21 @@ Two AO layers exist, multiplied together in the chunk fragment shader (`pipeline
 
 | Quality | Directions | Description |
 |---------|-----------|-------------|
-| Center (always) | 1 | Normal direction, weight 0.35 |
-| Ring 1 (LOW+) | 2 | ±tangent at 45° tilt, weight 0.20 each |
-| Ring 1 (MED+) | 2 | ±bitangent at 45° tilt, weight 0.20 each |
-| Ring 2 (HIGH+) | 2 | +diagonal pair at 60° tilt, weight 0.15 each |
-| Ring 2 (ULTRA) | 2 | -diagonal pair at 60° tilt, weight 0.15 each |
+| Center (always) | 1 | Normal direction, weight 0.20 |
+| Ring 1 (LOW+) | 2 | ±tangent at 40° tilt, weight 0.18 each |
+| Ring 1 (MED+) | 2 | ±bitangent at 40° tilt, weight 0.18 each |
+| Ring 2 (HIGH+) | 2 | ±tangent at 55° tilt, weight 0.16 each |
+| Ring 2 (ULTRA) | 2 | ±bitangent at 70° tilt, weight 0.16 each |
 
 ### Quality Presets (AMBIENT OCCLUSION in ESC menu)
 
-| Preset | Directions | Steps/Dir | Notes |
-|--------|-----------|-----------|-------|
-| OFF | 0 | 0 | Zero cost, returns 1.0 |
-| LOW | 3 | 5 | Center + tangent pair |
-| MEDIUM (default) | 5 | 6 | + bitangent pair |
-| HIGH | 7 | 7 | + diagonal pair |
-| ULTRA | 9 | 8 | + opposite diagonal pair |
+| Preset | Directions | Steps/Dir | Falloff | Notes |
+|--------|-----------|-----------|---------|-------|
+| OFF | 0 | 0 | — | Zero cost, returns 1.0 |
+| LOW | 3 | 6 | 4 blocks | Center + tangent pair |
+| MEDIUM (default) | 5 | 8 | 5 blocks | + bitangent pair |
+| HIGH | 7 | 12 | 7 blocks | + 55° tangent pair (longer range, more contrast) |
+| ULTRA | 9 | 16 | 9 blocks | + 70° bitangent pair (maximum range/coverage) |
 
 Quality is packed into `volume_origin.w` bits 4-6 (alongside shadow_quality in bits 1-3 and torch_shadows in bit 0).
 
@@ -83,7 +83,8 @@ Quality is packed into `volume_origin.w` bits 4-6 (alongside shadow_quality in b
 
 - **SSAO is disabled by default** and no longer has a menu item. Enabling it programmatically WILL show grid lines.
 - **Bloom composite uses textureLoad** for scene texture. Do not revert to textureSample.
-- **Block surfaces sit on integer coordinates**, same as voxel volume boundaries. The DDA start offset (0.6 blocks) prevents self-occlusion.
+- **Block surfaces sit on integer coordinates**, same as voxel volume boundaries. The AO DDA start offset (0.1 blocks along normal) prevents self-occlusion.
 - **Per-vertex AO is stable** — baked during meshing, no camera-dependent artifacts. Keep it as the base AO layer.
+- **Falloff range scales with quality** (4/5/7/9 blocks for LOW/MED/HIGH/ULTRA). Passed as parameter to `dda_trace_ao()`. Higher quality = longer-range darkening.
 - **AO quality packed into bits 4-6** of `volume_origin.w`. Shadow quality uses bits 1-3, torch_shadows uses bit 0.
-- **The 0.4-1.0 mapping range** gives strong visual darkening in corners/caves. Adjust `mix(0.4, 1.0, ...)` in pipeline.rs:~1591 to tune intensity.
+- **The 0.40-1.0 mapping range** gives strong visual darkening in corners/caves. Adjust `mix(0.40, 1.0, ...)` in pipeline.rs:~1625 to tune intensity.

@@ -981,7 +981,7 @@ fn get_ao_quality() -> i32 {
 }
 
 // DDA trace a single AO ray: returns occlusion amount (0=clear, 1=fully occluded)
-fn dda_trace_ao(start_pos: vec3<f32>, direction: vec3<f32>, max_steps: i32) -> f32 {
+fn dda_trace_ao(start_pos: vec3<f32>, direction: vec3<f32>, max_steps: i32, falloff_range: f32) -> f32 {
     let center = voxel_volume.volume_center.xyz;
 
     let local_start = start_pos - center + vec3<f32>(128.0);
@@ -997,10 +997,6 @@ fn dda_trace_ao(start_pos: vec3<f32>, direction: vec3<f32>, max_steps: i32) -> f
     let dir_pos = vec3<bool>(direction.x >= 0.0, direction.y >= 0.0, direction.z >= 0.0);
     var t_max = select(frac * t_delta, (vec3<f32>(1.0) - frac) * t_delta, dir_pos);
 
-    // Falloff range: occlusion drops to zero at this distance (in blocks).
-    // Decoupled from step count — steps control search range, falloff controls shadow width.
-    // AO should darken within 1-3 blocks of geometry, not 5-10.
-    let falloff_range = 4.0;
     var occlusion = 0.0;
 
     for (var i = 0; i < max_steps; i++) {
@@ -1066,14 +1062,15 @@ fn trace_voxel_ao(world_pos: vec3<f32>, normal: vec3<f32>) -> f32 {
     // while staying close enough that angled rays hit adjacent walls correctly.
     let trace_origin = world_pos + jitter + normal * 0.1;
 
-    // Step count per quality — with first-hit early break, most rays terminate
-    // in 1-3 steps near geometry. Steps only matter in open areas (miss case).
-    // Falloff at step N: (1-N/max)^2. At step 8 of 10: 0.04 — negligible.
+    // Step count per quality — more steps = longer AO range.
+    // With first-hit early break, most rays terminate in 1-3 steps near geometry.
+    // Steps matter in open areas and for detecting distant walls/overhangs.
     var max_steps: i32;
-    if (quality <= 1) { max_steps = 6; }
-    else if (quality == 2) { max_steps = 8; }
-    else if (quality == 3) { max_steps = 8; }
-    else { max_steps = 10; }
+    var falloff: f32;
+    if (quality <= 1) { max_steps = 6; falloff = 4.0; }
+    else if (quality == 2) { max_steps = 8; falloff = 5.0; }
+    else if (quality == 3) { max_steps = 12; falloff = 7.0; }
+    else { max_steps = 16; falloff = 9.0; }
 
     var total_occlusion = 0.0;
     var total_weight = 0.0;
@@ -1081,7 +1078,7 @@ fn trace_voxel_ao(world_pos: vec3<f32>, normal: vec3<f32>) -> f32 {
     // === Direction 1: Normal (straight out from surface) ===
     // Detects ceilings, overhangs directly above
     let w_center = 0.20;
-    total_occlusion += dda_trace_ao(trace_origin, normal, max_steps) * w_center;
+    total_occlusion += dda_trace_ao(trace_origin, normal, max_steps, falloff) * w_center;
     total_weight += w_center;
 
     // === Directions 2-3: Tangent pair at 40° tilt from normal ===
@@ -1092,8 +1089,8 @@ fn trace_voxel_ao(world_pos: vec3<f32>, normal: vec3<f32>) -> f32 {
 
     let dir_t_pos = normalize(normal * tilt40_n + tangent * tilt40_s);
     let dir_t_neg = normalize(normal * tilt40_n - tangent * tilt40_s);
-    total_occlusion += dda_trace_ao(trace_origin, dir_t_pos, max_steps) * w_mid;
-    total_occlusion += dda_trace_ao(trace_origin, dir_t_neg, max_steps) * w_mid;
+    total_occlusion += dda_trace_ao(trace_origin, dir_t_pos, max_steps, falloff) * w_mid;
+    total_occlusion += dda_trace_ao(trace_origin, dir_t_neg, max_steps, falloff) * w_mid;
     total_weight += w_mid * 2.0;
 
     // === Directions 4-5: Bitangent pair at 40° tilt ===
@@ -1101,37 +1098,38 @@ fn trace_voxel_ao(world_pos: vec3<f32>, normal: vec3<f32>) -> f32 {
     if (quality >= 2) {
         let dir_b_pos = normalize(normal * tilt40_n + bitangent * tilt40_s);
         let dir_b_neg = normalize(normal * tilt40_n - bitangent * tilt40_s);
-        total_occlusion += dda_trace_ao(trace_origin, dir_b_pos, max_steps) * w_mid;
-        total_occlusion += dda_trace_ao(trace_origin, dir_b_neg, max_steps) * w_mid;
+        total_occlusion += dda_trace_ao(trace_origin, dir_b_pos, max_steps, falloff) * w_mid;
+        total_occlusion += dda_trace_ao(trace_origin, dir_b_neg, max_steps, falloff) * w_mid;
         total_weight += w_mid * 2.0;
     }
 
-    // === Directions 6-7: Grazing tangent pair at 72° tilt ===
-    // HIGH+ — near-surface rays that reliably detect adjacent walls at distance.
-    // These stay close to the surface plane and catch geometry the steeper rays miss.
+    // === Directions 6-7: Mid-grazing tangent pair at 55° tilt ===
+    // HIGH+ — between the steep 40° rays and the surface plane.
+    // Catches walls and overhangs at medium distance that steeper rays overshoot.
     if (quality >= 3) {
-        let tilt72_n = 0.309;  // cos(72°) — small upward component
-        let tilt72_s = 0.951;  // sin(72°) — mostly sideways
+        let tilt55_n = 0.574;  // cos(55°)
+        let tilt55_s = 0.819;  // sin(55°)
         let w_graze = 0.16;
 
-        let dir_g1 = normalize(normal * tilt72_n + tangent * tilt72_s);
-        let dir_g2 = normalize(normal * tilt72_n - tangent * tilt72_s);
-        total_occlusion += dda_trace_ao(trace_origin, dir_g1, max_steps) * w_graze;
-        total_occlusion += dda_trace_ao(trace_origin, dir_g2, max_steps) * w_graze;
+        let dir_g1 = normalize(normal * tilt55_n + tangent * tilt55_s);
+        let dir_g2 = normalize(normal * tilt55_n - tangent * tilt55_s);
+        total_occlusion += dda_trace_ao(trace_origin, dir_g1, max_steps, falloff) * w_graze;
+        total_occlusion += dda_trace_ao(trace_origin, dir_g2, max_steps, falloff) * w_graze;
         total_weight += w_graze * 2.0;
     }
 
-    // === Directions 8-9: Grazing bitangent pair at 72° tilt ===
-    // ULTRA — complete near-surface coverage
+    // === Directions 8-9: Grazing bitangent pair at 70° tilt ===
+    // ULTRA — near-surface coverage on the orthogonal axis.
+    // At 70° these rays skim walls and catch long-range occlusion.
     if (quality >= 4) {
-        let tilt72_n = 0.309;
-        let tilt72_s = 0.951;
+        let tilt70_n = 0.342;  // cos(70°)
+        let tilt70_s = 0.940;  // sin(70°)
         let w_graze = 0.16;
 
-        let dir_g3 = normalize(normal * tilt72_n + bitangent * tilt72_s);
-        let dir_g4 = normalize(normal * tilt72_n - bitangent * tilt72_s);
-        total_occlusion += dda_trace_ao(trace_origin, dir_g3, max_steps) * w_graze;
-        total_occlusion += dda_trace_ao(trace_origin, dir_g4, max_steps) * w_graze;
+        let dir_g3 = normalize(normal * tilt70_n + bitangent * tilt70_s);
+        let dir_g4 = normalize(normal * tilt70_n - bitangent * tilt70_s);
+        total_occlusion += dda_trace_ao(trace_origin, dir_g3, max_steps, falloff) * w_graze;
+        total_occlusion += dda_trace_ao(trace_origin, dir_g4, max_steps, falloff) * w_graze;
         total_weight += w_graze * 2.0;
     }
 
