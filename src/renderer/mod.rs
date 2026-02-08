@@ -2935,16 +2935,18 @@ impl Renderer {
         self.queue
             .write_buffer(&self.volumetric_uniform_buffer, 0, bytemuck::cast_slice(&[volumetric_uniform]));
 
-        // Update SSAO uniforms
-        self.ssao.update_uniforms(
-            &self.queue,
-            camera.projection_matrix().inverse(),
-            camera.projection_matrix(),
-            0.1,   // near plane
-            1000.0, // far plane
-            self.size.width,
-            self.size.height,
-        );
+        // Update SSAO uniforms (skip if disabled)
+        if self.ssao.is_enabled() {
+            self.ssao.update_uniforms(
+                &self.queue,
+                camera.projection_matrix().inverse(),
+                camera.projection_matrix(),
+                0.1,   // near plane
+                1000.0, // far plane
+                self.size.width,
+                self.size.height,
+            );
+        }
 
         // Update DoF uniforms
         self.dof.update_uniforms(
@@ -3714,8 +3716,10 @@ impl Renderer {
         if let Some(idx) = self.gpu_profiler.begin_pass("SSAO") {
             self.gpu_profiler.write_timestamp(&mut encoder, idx);
         }
-        self.ssao.create_bind_groups(&self.device, &self.depth_texture);
-        self.ssao.render(&mut encoder, &self.scene_texture_view);
+        if self.ssao.is_enabled() {
+            self.ssao.create_bind_groups(&self.device, &self.depth_texture);
+            self.ssao.render(&mut encoder, &self.scene_texture_view);
+        }
         // GPU timestamp: end SSAO
         if let Some(idx) = self.gpu_profiler.end_pass() {
             self.gpu_profiler.write_timestamp(&mut encoder, idx);

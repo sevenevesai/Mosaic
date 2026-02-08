@@ -772,6 +772,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 "#;
 
 /// Bloom composite shader - combines scene with bloom
+/// Uses textureLoad for scene (exact pixel, no filtering) to prevent
+/// bilinear bleeding at quad boundaries that causes visible grid lines.
 const BLOOM_COMPOSITE_SHADER: &str = r#"
 @group(0) @binding(0)
 var t_scene: texture_2d<f32>;
@@ -797,7 +799,13 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let scene_color = textureSample(t_scene, s_tex, in.uv).rgb;
+    // Use textureLoad for scene: exact pixel fetch with no bilinear filtering.
+    // This prevents sub-pixel bleeding at greedy mesh quad boundaries that
+    // causes visible grid lines when combined with nonlinear tone mapping.
+    let pixel = vec2<i32>(in.position.xy);
+    let scene_color = textureLoad(t_scene, pixel, 0).rgb;
+
+    // Bloom is at half-res so it needs the linear sampler for smooth upscale
     let bloom_color = textureSample(t_bloom, s_tex, in.uv).rgb;
 
     // Additive blending with intensity control

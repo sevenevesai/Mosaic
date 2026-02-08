@@ -14,9 +14,9 @@ use wgpu::util::DeviceExt;
 /// SSAO quality preset
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SsaoQuality {
+    #[default]
     Off,
     Low,
-    #[default]
     Medium,
     High,
     Ultra,
