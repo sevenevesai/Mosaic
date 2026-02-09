@@ -687,6 +687,8 @@ var t_voxel: texture_3d<f32>;
 var t_radiance: texture_3d<f32>;
 @group(3) @binding(3)
 var s_voxel: sampler;
+@group(3) @binding(4)
+var<storage, read> torch_lights: array<vec4<f32>>;
 
 // Per-vertex attributes
 struct VertexInput {

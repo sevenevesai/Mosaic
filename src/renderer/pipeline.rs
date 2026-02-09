@@ -1209,6 +1209,10 @@ fn dda_trace_point_shadow(world_pos: vec3<f32>, light_pos: vec3<f32>, max_steps:
 
     let light_dir = to_light / dist_to_light;
 
+    // Compute the light source's voxel coordinate (for mount-block skip)
+    let light_local = light_pos - center + vec3<f32>(128.0);
+    let light_voxel = vec3<i32>(floor(light_local));
+
     // Current integer voxel position
     var voxel = vec3<i32>(floor(local_start));
 
@@ -1248,16 +1252,23 @@ fn dda_trace_point_shadow(world_pos: vec3<f32>, light_pos: vec3<f32>, max_steps:
             return 1.0;
         }
 
-        // Solid voxel blocks the light
-        if (voxel_data.r > 0.5) {
-            return 0.0;
-        }
+        // Check if this solid voxel is the torch's mounting block.
+        // A block directly adjacent to the light source (within 1 voxel on each axis)
+        // should not cast shadow for that light — the torch illuminates its own base.
+        let delta = abs(voxel - light_voxel);
+        let is_mount_block = delta.x <= 1 && delta.y <= 1 && delta.z <= 1;
 
-        // Semi-transparent (leaves, water): partial attenuation
-        // Leaves (0.75) attenuate more than water (0.25)
-        if (voxel_data.r > 0.1) {
-            // Treat as partial blocker — one hit dims significantly
-            return 0.35;
+        // Solid voxel blocks the light (unless it's the mount block)
+        if (voxel_data.r > 0.5) {
+            if (!is_mount_block) {
+                return 0.0;
+            }
+            // Mount block: skip it, continue tracing
+        } else if (voxel_data.r > 0.1) {
+            // Semi-transparent (leaves, water): partial attenuation
+            if (!is_mount_block) {
+                return 0.35;
+            }
         }
 
         // Branchless DDA step (same pattern as sun shadow)
