@@ -50,7 +50,7 @@ const TEXTURE_FILES: &[&str] = &[
     "64_Ore_Uranium.png",           // 29: Uranium ore (glows!)
     // Tree bark variants (30-31)
     "64_Bark_Oak_Dark.png",         // 30: Oak bark (dark variant)
-    "64_Bark_Birch.png",            // 31: Birch bark (white)
+    "64_Bark_Paper.png",            // 31: Birch bark (papery texture)
 
     // === NEW BIOME TEXTURES (32-56) ===
     // Using existing textures where possible, procedural fallback otherwise
@@ -71,8 +71,8 @@ const TEXTURE_FILES: &[&str] = &[
 
     // Jungle (40-43)
     "256_Grass 02 Blades.png",      // 40: Jungle grass top (grass blades)
-    "256_Roots 01 Mud.png",         // 41: Jungle grass side (roots)
-    "64_Leaves_Grass_Dense.png",    // 42: Jungle leaves (same as regular leaves)
+    "256_Dirt Rocks 01.png",        // 41: Jungle grass side (rocky dirt)
+    "64_Leaves_Broad_Tropical.png", // 42: Jungle leaves (broad tropical)
     "256_Roots 02 Mud.png",         // 43: Vines (roots texture)
 
     // Mountain (44)
@@ -94,9 +94,15 @@ const TEXTURE_FILES: &[&str] = &[
     "256_Dirt Cracked 01.png",      // 53: Dead bush (cracked earth)
 
     // Additional trees (54-56)
-    "256_Dirt Rocks 02.png",        // 54: Pine bark (dark rocky)
-    "256_Roots 02 Mud.png",         // 55: Jungle bark (roots)
-    "64_Leaves_Grass_Dense.png",    // 56: Spruce leaves (same as leaves)
+    "64_Bark_Pine_Mossy.png",       // 54: Pine bark (mossy)
+    "64_Bark_Jungle.png",           // 55: Jungle bark
+    "64_Leaves_Frost_Blue.png",     // 56: Spruce leaves (frost blue for tundra/alpine)
+
+    // Extra tree textures (57-60)
+    "64_Bark_Oak_Light.png",        // 57: Oak bark light variant
+    "64_Leaves_Pine.png",           // 58: Pine/conifer needle leaves
+    "64_Leaves_Tropical_Large.png", // 59: Large tropical leaves (jungle variant)
+    "64_Leaves_Palm_Frond.png",     // 60: Palm frond leaves (pine variation)
 ];
 
 const TEXTURE_DIR: &str = "assets/textures/256x256 Pixel Textures";

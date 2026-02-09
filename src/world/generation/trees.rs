@@ -66,7 +66,8 @@ impl TreeType {
         match self {
             TreeType::SmallOak | TreeType::LargeOak => Block::Leaves,
             TreeType::Birch | TreeType::BushyShrub => Block::Leaves,
-            TreeType::TallPine | TreeType::Spruce => Block::SpruceLeaves,
+            TreeType::TallPine => Block::Leaves,           // Green pine needles
+            TreeType::Spruce => Block::SpruceLeaves,       // Frost blue (tundra only)
             TreeType::JungleTree | TreeType::GiantJungle => Block::JungleLeaves,
             TreeType::DeadTree => Block::Air, // No leaves
             TreeType::Cactus => Block::Air,   // No leaves
@@ -224,6 +225,17 @@ impl TreeNoise {
             return false;
         }
 
+        // === Rare scattered lone trees outside forests ===
+        // Very sparse: ~0.05% chance = roughly 1 lone tree every 2 chunks
+        let scatter_hash = ((x.wrapping_mul(73856093))
+            ^ (z.wrapping_mul(19349663))
+            ^ (self.seed.wrapping_mul(668265263) as i32)) as u32;
+        let scatter_roll = (scatter_hash % 100000) as f64 / 100000.0;
+        if scatter_roll < 0.0005 * biome_density {
+            return true;
+        }
+
+        // === Forest region trees (original logic preserved) ===
         // Forest biome noise - low frequency creates large forest regions
         let forest_value = self.forest_noise.get([x as f64 * 0.008, z as f64 * 0.008]);
 
@@ -366,6 +378,7 @@ impl<'a> TreeGenerator<'a> {
                     BiomeId::Mountains => (35, 180), // Mountains can have trees at high altitude
                     BiomeId::Jungle => (30, 100),    // Jungle trees at various elevations
                     BiomeId::Swamp => (28, 45),      // Swamp is low and flat
+                    BiomeId::Tundra => (35, 55),     // Low treeline in tundra
                     _ => (35, 90),                   // Default range
                 };
 

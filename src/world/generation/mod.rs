@@ -29,7 +29,7 @@ use caves::CaveNoise;
 use formations::{FormationGenerator, FormationNoise};
 use ruins::RuinGenerator;
 use trees::{TreeGenerator, TreeNoise};
-use util::fast_hash_3d;
+use util::{fast_hash_3d, smoothstep};
 use vegetation::{VegetationGenerator, VegetationNoise};
 
 use std::cell::RefCell;
@@ -149,6 +149,9 @@ fn generate_chunk_with_generator(pos: ChunkPos, generator: &TerrainGenerator) ->
         }
     }
 
+    // Add cave decorations (stalactites, stalagmites)
+    generator.add_cave_decorations(&mut chunk, pos);
+
     // Add stone formations (arches, hoodoos, boulders)
     generator.add_formations(&mut chunk, pos);
 
@@ -245,6 +248,9 @@ pub struct TerrainGenerator {
     overhang_noise: Perlin,
     outcrop_noise: Perlin,
 
+    // Terrain variety - creates flat meadow patches within hilly biomes
+    flatness_noise: Perlin,
+
     // Biome registry
     biome_registry: BiomeRegistry,
 
@@ -291,6 +297,9 @@ impl TerrainGenerator {
             // Structures
             overhang_noise: Perlin::new(seed.wrapping_add(50)),
             outcrop_noise: Perlin::new(seed.wrapping_add(52)),
+
+            // Terrain variety - large-scale flat meadow patches
+            flatness_noise: Perlin::new(seed.wrapping_add(80)),
 
             // Biome registry
             biome_registry: BiomeRegistry::new(seed),
@@ -442,18 +451,25 @@ impl TerrainGenerator {
         self.get_block_cached(x, y, z, &col)
     }
 
-    /// Calculate terrain height with mountains, ridges, and detail
+    /// Calculate terrain height with mountains, ridges, detail, and flatness variation
     fn get_terrain_height(&self, x: i32, z: i32) -> i32 {
         let xf = x as f64;
         let zf = z as f64;
 
-        // Base continental terrain
-        let base = self.height_noise.get([xf, zf]) * 25.0;
+        // Flatness factor: medium-scale noise creates gentle valleys and meadows between hills
+        // Higher frequency (0.005) for smaller, more organic flat patches
+        let flatness_value = self.flatness_noise.get([xf * 0.005, zf * 0.005]);
+        let flatness_factor = smoothstep(0.1, 0.5, flatness_value);
+        // terrain_dampen: 1.0 in hilly areas, 0.55 in gentle meadows (subtle, not dramatic)
+        let terrain_dampen = 1.0 - flatness_factor * 0.45;
 
-        // Small detail variation
+        // Base continental terrain (gently dampened in meadow regions)
+        let base = self.height_noise.get([xf, zf]) * 25.0 * terrain_dampen;
+
+        // Small detail variation (always present for natural micro-variation)
         let detail = self.detail_noise.get([xf * 0.08, zf * 0.08]) * 4.0;
 
-        // Mountain regions using ridged noise
+        // Mountain regions using ridged noise (flatness doesn't affect mountains)
         let mountain_mask = self.get_mountain_mask(x, z);
         let mountain_height = if mountain_mask > 0.0 {
             let ridge = self.mountain_noise.get([xf, zf]);
@@ -464,10 +480,10 @@ impl TerrainGenerator {
             0.0
         };
 
-        // Gentle hills in non-mountain areas
+        // Gentle hills in non-mountain areas (reduced in meadow regions)
         let hills = if mountain_mask < 0.2 {
             let hill_noise = self.detail_noise.get([xf * 0.02, zf * 0.02]);
-            (hill_noise * 15.0).max(0.0) * (1.0 - mountain_mask * 5.0).max(0.0)
+            (hill_noise * 15.0).max(0.0) * (1.0 - mountain_mask * 5.0).max(0.0) * terrain_dampen
         } else {
             0.0
         };
@@ -511,7 +527,12 @@ impl TerrainGenerator {
         let xf = x as f64;
         let zf = z as f64;
 
-        let base = self.height_noise.get([xf, zf]) * 25.0;
+        // Apply flatness factor consistently with get_terrain_height
+        let flatness_value = self.flatness_noise.get([xf * 0.005, zf * 0.005]);
+        let flatness_factor = smoothstep(0.1, 0.5, flatness_value);
+        let terrain_dampen = 1.0 - flatness_factor * 0.45;
+
+        let base = self.height_noise.get([xf, zf]) * 25.0 * terrain_dampen;
         let mountain_mask = self.get_mountain_mask(x, z);
         let mountain_height = if mountain_mask > 0.0 {
             let ridge = self.mountain_noise.get([xf, zf]);
@@ -680,6 +701,56 @@ impl TerrainGenerator {
         }
 
         true
+    }
+
+    /// Add cave decorations (stalactites on ceilings, stalagmites on floors)
+    /// Post-pass: scans already-placed blocks for air/stone boundaries
+    fn add_cave_decorations(&self, chunk: &mut Chunk, pos: ChunkPos) {
+        let world_y = pos.y * CHUNK_SIZE_I32;
+
+        // Only decorate underground chunks (skip surface/sky chunks)
+        if world_y > 60 {
+            return;
+        }
+
+        for z in 0..CHUNK_SIZE {
+            for x in 0..CHUNK_SIZE {
+                for y in 1..(CHUNK_SIZE - 1) {
+                    let block = chunk.get_block(x, y, z);
+                    if block != Block::Air {
+                        continue;
+                    }
+
+                    let above = chunk.get_block(x, y + 1, z);
+                    let below = chunk.get_block(x, y - 1, z);
+
+                    let wx = pos.x * CHUNK_SIZE_I32 + x as i32;
+                    let wy = world_y + y as i32;
+                    let wz = pos.z * CHUNK_SIZE_I32 + z as i32;
+
+                    // Stalactite: air block with solid stone ceiling
+                    if above == Block::Stone {
+                        if let Some(deco) =
+                            self.cavern_generator
+                                .get_cave_decoration(wx, wy, wz, true, false)
+                        {
+                            chunk.set_block(x, y, z, deco);
+                            continue;
+                        }
+                    }
+
+                    // Stalagmite: air block with solid stone floor
+                    if below == Block::Stone {
+                        if let Some(deco) =
+                            self.cavern_generator
+                                .get_cave_decoration(wx, wy, wz, false, true)
+                        {
+                            chunk.set_block(x, y, z, deco);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Add stone formations to a chunk (arches, hoodoos, boulders)

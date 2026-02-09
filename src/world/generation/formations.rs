@@ -21,6 +21,10 @@ pub enum FormationType {
     SeaStack,
     /// Boulder cluster
     Boulders,
+    /// Tall tapered stone spire (landmark)
+    Spire,
+    /// Large standing stone monolith
+    Monolith,
 }
 
 /// Parameters for arch generation
@@ -53,6 +57,32 @@ pub struct PillarParams {
     pub top_radius: f32,
     /// Whether to add a mushroom cap
     pub has_cap: bool,
+}
+
+/// Parameters for stone spire generation
+#[derive(Debug, Clone)]
+pub struct SpireParams {
+    /// Base position in world coordinates
+    pub base: [f32; 3],
+    /// Total height
+    pub height: f32,
+    /// Radius at base
+    pub base_radius: f32,
+    /// Radius at top
+    pub top_radius: f32,
+}
+
+/// Parameters for standing monolith generation
+#[derive(Debug, Clone)]
+pub struct MonolithParams {
+    /// Base position in world coordinates
+    pub base: [f32; 3],
+    /// Total height
+    pub height: f32,
+    /// Horizontal radius along X
+    pub radius_x: f32,
+    /// Horizontal radius along Z
+    pub radius_z: f32,
 }
 
 /// Stone formation noise and placement
@@ -112,8 +142,8 @@ impl FormationNoise {
 
     /// Check if boulders should be placed at this grid cell
     pub fn should_place_boulders(&self, cell_x: i32, cell_z: i32, biome_id: BiomeId) -> bool {
-        // Boulders in mountains, highlands, tundra
-        if !matches!(biome_id, BiomeId::Mountains | BiomeId::CavernousHighlands | BiomeId::Tundra) {
+        // Boulders in mountains, highlands, tundra, grasslands
+        if !matches!(biome_id, BiomeId::Mountains | BiomeId::CavernousHighlands | BiomeId::Tundra | BiomeId::Grasslands) {
             return false;
         }
 
@@ -178,6 +208,81 @@ impl FormationNoise {
         }
     }
 
+    /// Check if a stone spire should be placed at this grid cell
+    pub fn should_place_spire(&self, cell_x: i32, cell_z: i32, biome_id: BiomeId) -> bool {
+        // Spires in grasslands, tundra, mountains, highlands
+        if !matches!(
+            biome_id,
+            BiomeId::Grasslands | BiomeId::Tundra | BiomeId::Mountains | BiomeId::CavernousHighlands
+        ) {
+            return false;
+        }
+
+        let hash = self.cell_hash(cell_x, cell_z, 3);
+        let noise_val = self.placement_noise.get([
+            cell_x as f64 * 0.12 + 300.0,
+            cell_z as f64 * 0.12 + 300.0,
+        ]);
+
+        // ~4% chance per cell, boosted by noise
+        (hash % 100) < 4 && noise_val > 0.35
+    }
+
+    /// Check if a monolith should be placed at this grid cell
+    pub fn should_place_monolith(&self, cell_x: i32, cell_z: i32, biome_id: BiomeId) -> bool {
+        // Monoliths in most biomes except ocean and desert
+        if matches!(biome_id, BiomeId::Ocean | BiomeId::Desert) {
+            return false;
+        }
+
+        let hash = self.cell_hash(cell_x, cell_z, 4);
+        let noise_val = self.placement_noise.get([
+            cell_x as f64 * 0.08 + 400.0,
+            cell_z as f64 * 0.08 + 400.0,
+        ]);
+
+        // ~3% chance per cell
+        (hash % 100) < 3 && noise_val > 0.4
+    }
+
+    /// Get spire parameters for a grid cell
+    pub fn get_spire_params(&self, cell_x: i32, cell_z: i32, base_y: f32) -> SpireParams {
+        let hash = self.cell_hash(cell_x, cell_z, 40);
+
+        let jitter_x = ((hash >> 8) & 0xFF) as f32 / 255.0 * 30.0 - 15.0;
+        let jitter_z = ((hash >> 16) & 0xFF) as f32 / 255.0 * 30.0 - 15.0;
+
+        SpireParams {
+            base: [
+                (cell_x * SPIRE_SPACING) as f32 + jitter_x,
+                base_y,
+                (cell_z * SPIRE_SPACING) as f32 + jitter_z,
+            ],
+            height: 15.0 + ((hash >> 4) & 0x1F) as f32 * 1.0, // 15-46 blocks
+            base_radius: 3.0 + ((hash >> 10) & 0x7) as f32 * 0.5, // 3-6.5 blocks
+            top_radius: 0.8 + ((hash >> 14) & 0x3) as f32 * 0.3, // 0.8-1.7 blocks
+        }
+    }
+
+    /// Get monolith parameters for a grid cell
+    pub fn get_monolith_params(&self, cell_x: i32, cell_z: i32, base_y: f32) -> MonolithParams {
+        let hash = self.cell_hash(cell_x, cell_z, 50);
+
+        let jitter_x = ((hash >> 8) & 0xFF) as f32 / 255.0 * 40.0 - 20.0;
+        let jitter_z = ((hash >> 16) & 0xFF) as f32 / 255.0 * 40.0 - 20.0;
+
+        MonolithParams {
+            base: [
+                (cell_x * MONOLITH_SPACING) as f32 + jitter_x,
+                base_y,
+                (cell_z * MONOLITH_SPACING) as f32 + jitter_z,
+            ],
+            height: 8.0 + ((hash >> 4) & 0xF) as f32 * 0.8, // 8-20 blocks
+            radius_x: 2.0 + ((hash >> 10) & 0x7) as f32 * 0.4, // 2-4.8 blocks
+            radius_z: 1.5 + ((hash >> 14) & 0x3) as f32 * 0.3, // 1.5-2.4 blocks
+        }
+    }
+
     /// Deterministic hash for grid cells
     fn cell_hash(&self, cell_x: i32, cell_z: i32, variant: u32) -> u32 {
         let mut h = self.seed.wrapping_add(variant);
@@ -200,6 +305,8 @@ impl FormationNoise {
 const ARCH_SPACING: i32 = 200;
 const HOODOO_SPACING: i32 = 80;
 const BOULDER_SPACING: i32 = 40;
+const SPIRE_SPACING: i32 = 150;
+const MONOLITH_SPACING: i32 = 250;
 
 /// Signed distance function for a capped torus (arch shape)
 fn arch_sdf(x: f32, y: f32, z: f32, params: &ArchParams) -> f32 {
@@ -274,6 +381,49 @@ fn boulder_sdf(x: f32, y: f32, z: f32, center: [f32; 3], radius: f32, squash: f3
     let dz = z - center[2];
 
     (dx * dx + dy * dy + dz * dz).sqrt() - radius
+}
+
+/// Signed distance function for a tapered stone spire
+fn spire_sdf(x: f32, y: f32, z: f32, params: &SpireParams) -> f32 {
+    let dx = x - params.base[0];
+    let dy = y - params.base[1];
+    let dz = z - params.base[2];
+
+    if dy < 0.0 || dy > params.height {
+        return f32::MAX;
+    }
+
+    let t = dy / params.height;
+    // Concave taper: faster narrowing at base, graceful point at top
+    let taper = 1.0 - t.powf(0.6);
+    let radius = params.top_radius + (params.base_radius - params.top_radius) * taper;
+
+    let horizontal_dist = (dx * dx + dz * dz).sqrt();
+    horizontal_dist - radius
+}
+
+/// Signed distance function for an oblong standing stone monolith
+fn monolith_sdf(x: f32, y: f32, z: f32, params: &MonolithParams) -> f32 {
+    let dx = x - params.base[0];
+    let dy = y - params.base[1];
+    let dz = z - params.base[2];
+
+    if dy < 0.0 || dy > params.height {
+        return f32::MAX;
+    }
+
+    // Rounded top: narrow as we approach the peak
+    let top_round = if dy > params.height * 0.75 {
+        let t = (dy - params.height * 0.75) / (params.height * 0.25);
+        1.0 - t * t * 0.6
+    } else {
+        1.0
+    };
+
+    // Elliptical cross-section
+    let nx = dx / (params.radius_x * top_round);
+    let nz = dz / (params.radius_z * top_round);
+    (nx * nx + nz * nz).sqrt() - 1.0
 }
 
 fn lerp(a: f32, b: f32, t: f32) -> f32 {
@@ -361,6 +511,46 @@ impl<'a> FormationGenerator<'a> {
                 if self.noise.should_place_boulders(cell_x, cell_z, biome_id) {
                     let base_y = get_terrain_height(sample_x, sample_z) as f32;
                     self.build_boulders(chunk, pos, cell_x, cell_z, base_y, biome_id);
+                }
+            }
+        }
+
+        // Check for stone spires (tall tapered landmarks)
+        let spire_cell_x_start = (world_x - 10) / SPIRE_SPACING;
+        let spire_cell_x_end = (world_x + CHUNK_SIZE_I32 + 10) / SPIRE_SPACING;
+        let spire_cell_z_start = (world_z - 10) / SPIRE_SPACING;
+        let spire_cell_z_end = (world_z + CHUNK_SIZE_I32 + 10) / SPIRE_SPACING;
+
+        for cell_z in spire_cell_z_start..=spire_cell_z_end {
+            for cell_x in spire_cell_x_start..=spire_cell_x_end {
+                let sample_x = cell_x * SPIRE_SPACING;
+                let sample_z = cell_z * SPIRE_SPACING;
+                let biome_id = get_biome_id(sample_x, sample_z);
+
+                if self.noise.should_place_spire(cell_x, cell_z, biome_id) {
+                    let base_y = get_terrain_height(sample_x, sample_z) as f32;
+                    let params = self.noise.get_spire_params(cell_x, cell_z, base_y);
+                    self.build_spire(chunk, pos, &params, biome_id);
+                }
+            }
+        }
+
+        // Check for standing monoliths (oblong stone landmarks)
+        let monolith_cell_x_start = (world_x - 10) / MONOLITH_SPACING;
+        let monolith_cell_x_end = (world_x + CHUNK_SIZE_I32 + 10) / MONOLITH_SPACING;
+        let monolith_cell_z_start = (world_z - 10) / MONOLITH_SPACING;
+        let monolith_cell_z_end = (world_z + CHUNK_SIZE_I32 + 10) / MONOLITH_SPACING;
+
+        for cell_z in monolith_cell_z_start..=monolith_cell_z_end {
+            for cell_x in monolith_cell_x_start..=monolith_cell_x_end {
+                let sample_x = cell_x * MONOLITH_SPACING;
+                let sample_z = cell_z * MONOLITH_SPACING;
+                let biome_id = get_biome_id(sample_x, sample_z);
+
+                if self.noise.should_place_monolith(cell_x, cell_z, biome_id) {
+                    let base_y = get_terrain_height(sample_x, sample_z) as f32;
+                    let params = self.noise.get_monolith_params(cell_x, cell_z, base_y);
+                    self.build_monolith(chunk, pos, &params, biome_id);
                 }
             }
         }
@@ -511,6 +701,94 @@ impl<'a> FormationGenerator<'a> {
                             if current == Block::Air {
                                 chunk.set_block(x, y, z, block);
                             }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Build a stone spire (tapered column landmark)
+    fn build_spire(&self, chunk: &mut Chunk, pos: ChunkPos, params: &SpireParams, biome_id: BiomeId) {
+        let world_x = pos.x * CHUNK_SIZE_I32;
+        let world_y = pos.y * CHUNK_SIZE_I32;
+        let world_z = pos.z * CHUNK_SIZE_I32;
+
+        let block = match biome_id {
+            BiomeId::Tundra => Block::Stone,
+            _ => Block::Stone,
+        };
+
+        let max_radius = params.base_radius + 2.0;
+
+        for z in 0..CHUNK_SIZE {
+            for x in 0..CHUNK_SIZE {
+                for y in 0..CHUNK_SIZE {
+                    let wx = (world_x + x as i32) as f32;
+                    let wy = (world_y + y as i32) as f32;
+                    let wz = (world_z + z as i32) as f32;
+
+                    // Quick bounds check
+                    let dx = (wx - params.base[0]).abs();
+                    let dz = (wz - params.base[2]).abs();
+                    if dx > max_radius || dz > max_radius {
+                        continue;
+                    }
+                    if wy < params.base[1] || wy > params.base[1] + params.height + 2.0 {
+                        continue;
+                    }
+
+                    let sdf = spire_sdf(wx, wy, wz, params);
+                    let noise_offset = self.noise.get_surface_noise(wx, wy, wz) * 0.4;
+
+                    if sdf + noise_offset < 0.0 {
+                        let current = chunk.get_block(x, y, z);
+                        if current == Block::Air {
+                            chunk.set_block(x, y, z, block);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Build a standing monolith (oblong stone landmark)
+    fn build_monolith(&self, chunk: &mut Chunk, pos: ChunkPos, params: &MonolithParams, biome_id: BiomeId) {
+        let world_x = pos.x * CHUNK_SIZE_I32;
+        let world_y = pos.y * CHUNK_SIZE_I32;
+        let world_z = pos.z * CHUNK_SIZE_I32;
+
+        let block = match biome_id {
+            BiomeId::Tundra => Block::Stone,
+            _ => Block::Stone,
+        };
+
+        let max_radius = params.radius_x.max(params.radius_z) + 2.0;
+
+        for z in 0..CHUNK_SIZE {
+            for x in 0..CHUNK_SIZE {
+                for y in 0..CHUNK_SIZE {
+                    let wx = (world_x + x as i32) as f32;
+                    let wy = (world_y + y as i32) as f32;
+                    let wz = (world_z + z as i32) as f32;
+
+                    // Quick bounds check
+                    let dx = (wx - params.base[0]).abs();
+                    let dz = (wz - params.base[2]).abs();
+                    if dx > max_radius || dz > max_radius {
+                        continue;
+                    }
+                    if wy < params.base[1] || wy > params.base[1] + params.height + 2.0 {
+                        continue;
+                    }
+
+                    let sdf = monolith_sdf(wx, wy, wz, params);
+                    let noise_offset = self.noise.get_surface_noise(wx, wy, wz) * 0.3;
+
+                    if sdf + noise_offset < 0.0 {
+                        let current = chunk.get_block(x, y, z);
+                        if current == Block::Air {
+                            chunk.set_block(x, y, z, block);
                         }
                     }
                 }

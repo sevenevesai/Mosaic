@@ -20,10 +20,10 @@ impl Biome for TundraBiome {
 
     fn terrain_params(&self) -> TerrainParams {
         TerrainParams {
-            base_height: 40,         // Slightly lower
-            height_scale: 20.0,      // Gentle rolling terrain
-            mountain_influence: 0.5, // Some mountains
-            cliff_threshold: 0.5,    // More exposed rock on cliffs
+            base_height: 42,         // Match grasslands baseline
+            height_scale: 35.0,      // Dramatic height variation for proper mountains
+            mountain_influence: 1.3, // Strong mountains with snow-capped peaks
+            cliff_threshold: 0.4,    // More exposed rock faces on steep slopes
         }
     }
 
@@ -42,9 +42,19 @@ impl Biome for TundraBiome {
     fn surface_params(&self) -> SurfaceParams {
         SurfaceParams {
             tree_density: 0.15,     // Sparse spruce trees
-            formations_enabled: false,
+            formations_enabled: true, // Stone spires and boulders
             surface_block: Block::SnowGrass,
             subsurface_block: Block::Dirt,
+        }
+    }
+
+    fn get_surface_block(&self, _x: i32, y: i32, _z: i32) -> Block {
+        if y > 75 {
+            Block::Snow       // High peaks: pure snow
+        } else if y > 60 {
+            Block::Gravel     // Mid altitude: exposed gravel/rock
+        } else {
+            Block::SnowGrass  // Low altitude: normal tundra grass
         }
     }
 

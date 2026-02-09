@@ -856,7 +856,7 @@ impl Block {
             Block::StoneDirt => [4; 6],         // Dirty stone variant
             Block::Brick => [5; 6],             // Brick building material
             Block::Water => [6; 6],
-            Block::Wood => [8, 8, 7, 7, 7, 7], // Top/Bottom=cross-section, Sides=bark
+            Block::Wood => [7; 6],            // Bark on all sides
             Block::Leaves => [9; 6],
             Block::StoneRubble2 => [10; 6],    // Stone rubble variant
             Block::IronOre => [11; 6],
@@ -880,8 +880,8 @@ impl Block {
             Block::TitaniumOre => [28; 6],
             Block::UraniumOre => [29; 6],
             // Tree logs (30-31, 52-53)
-            Block::OakLog => [8, 8, 30, 30, 30, 30],
-            Block::BirchLog => [8, 8, 31, 31, 31, 31],
+            Block::OakLog => [30; 6],      // Bark on all sides
+            Block::BirchLog => [31; 6],    // Paper bark on all sides
 
             // === NEW BIOME BLOCKS ===
 
@@ -923,9 +923,9 @@ impl Block {
             Block::DeadBush => [53; 6],        // Dead shrub
 
             // Additional trees (54-56)
-            Block::PineLog => [8, 8, 54, 54, 54, 54],   // Pine bark
-            Block::JungleLog => [8, 8, 55, 55, 55, 55], // Jungle bark
-            Block::SpruceLeaves => [56; 6],    // Blue-green needles
+            Block::PineLog => [54; 6],         // Pine mossy bark on all sides
+            Block::JungleLog => [55; 6],       // Jungle bark on all sides
+            Block::SpruceLeaves => [56; 6],    // Frost blue needles (tundra)
 
             // Storage/furniture
             Block::Chest => [7; 6],            // Wood planks (rendered as vox prop)
@@ -1031,7 +1031,7 @@ impl Block {
             Block::DeadBush => [130, 100, 60],      // Brown dead plant
             Block::PineLog => [100, 80, 45],        // Dark pine brown
             Block::JungleLog => [110, 85, 50],      // Tropical wood
-            Block::SpruceLeaves => [45, 75, 40],    // Dark spruce green
+            Block::SpruceLeaves => [140, 180, 200],   // Frost blue
             Block::Chest => [140, 100, 55],         // Chest wood color
         }
     }

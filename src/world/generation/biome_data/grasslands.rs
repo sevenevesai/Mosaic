@@ -74,7 +74,7 @@ impl Biome for GrasslandsBiome {
 }
 
 impl GrasslandsBiome {
-    /// Grasslands caves: stay underground, tunnel entrances, no surface openings
+    /// Grasslands caves: connected multi-layer system with rooms, corridors, and vertical shafts
     #[inline]
     fn is_cave_grasslands(
         &self,
@@ -88,30 +88,49 @@ impl GrasslandsBiome {
         let yf = y as f64;
         let zf = z as f64;
 
-        // Primary worm cave system - narrower tunnels
+        // === Layer 1: Primary worm tunnels (shallow-mid depth) ===
         let worm_scale = 0.04;
         let worm1 = cave_noise.get_worm1(xf, yf, zf, worm_scale);
         let worm2 = cave_noise.get_worm2(xf, yf, zf, worm_scale);
 
-        // Narrower threshold for Grasslands (0.07 vs 0.09)
         if worm1.abs() < 0.07 && worm2.abs() < 0.07 {
             return true;
         }
 
-        // Small chambers deep underground only
-        if y > 8 && y < 35 && depth > 10 {
-            let chamber = cave_noise.get_chamber(xf, yf, zf, 0.03);
-            // Higher threshold = rarer chambers (0.68)
-            if chamber > 0.68 {
+        // === Layer 2: Mid-depth longer tunnels (different scale for variety) ===
+        // These use a larger scale (0.03) creating longer, more winding passages
+        if y > 12 && y < 50 && depth > 8 {
+            let worm3 = cave_noise.get_worm1_offset(xf, yf, zf, 0.03, 500.0);
+            let worm4 = cave_noise.get_worm2_offset(xf, yf, zf, 0.03, 500.0);
+            if worm3.abs() < 0.065 && worm4.abs() < 0.065 {
                 return true;
             }
         }
 
-        // Rare large caverns - only very deep underground
-        if y > 5 && y < 25 && depth > 20 {
+        // === Layer 3: Room nodes (medium chambers at tunnel intersections) ===
+        // Lowered threshold and expanded Y range for more frequent, better-connected rooms
+        if y > 10 && y < 45 && depth > 8 {
+            let chamber = cave_noise.get_chamber(xf, yf, zf, 0.025);
+            if chamber > 0.55 {
+                return true;
+            }
+        }
+
+        // === Layer 4: Vertical shafts connecting depth layers ===
+        // Thin vertical passages that connect horizontal tunnel layers
+        if depth > 12 && y > 8 && y < 40 {
+            let shaft1 = cave_noise.get_worm1(xf, yf * 0.3, zf, 0.06);
+            let shaft2 = cave_noise.get_worm2(xf, yf * 0.3, zf, 0.06);
+            // Very narrow threshold + compressed Y = vertical tendency
+            if shaft1.abs() < 0.035 && shaft2.abs() < 0.035 {
+                return true;
+            }
+        }
+
+        // === Layer 5: Deep caverns (larger underground spaces) ===
+        if y > 5 && y < 35 && depth > 15 {
             let cavern = cave_noise.get_cavern(xf, yf, zf, 0.015);
-            // Very high threshold = rare (0.72)
-            if cavern > 0.72 {
+            if cavern > 0.65 {
                 return true;
             }
         }
