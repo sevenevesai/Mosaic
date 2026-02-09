@@ -80,7 +80,7 @@ pub struct VoxelVolumeUniform {
     pub inv_volume_size: [f32; 4],
     /// Sun direction for shadow rays
     pub sun_direction: [f32; 4],
-    /// Sun color and intensity
+    /// Sun color (rgb) + torch_count in w
     pub sun_color: [f32; 4],
     /// Ambient color
     pub ambient_color: [f32; 4],
@@ -199,6 +199,18 @@ struct LightPropagateUniforms {
     _padding: [f32; 2],
 }
 
+/// Maximum number of torch/emissive light sources tracked per frame.
+/// 256 is generous — most scenes have < 50 torches in a 256^3 volume.
+pub const MAX_TORCH_LIGHTS: usize = 256;
+
+/// GPU-side torch light data: position + intensity packed into vec4
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GpuTorchLight {
+    /// World-space position (x, y, z) + emission intensity in w (0-1)
+    pub pos_intensity: [f32; 4],
+}
+
 /// Manages the 3D voxel volume for GI calculations
 pub struct VoxelGI {
     /// 3D texture storing voxel opacity/emissive data
@@ -213,6 +225,11 @@ pub struct VoxelGI {
 
     /// Uniform buffer for volume parameters
     pub uniform_buffer: wgpu::Buffer,
+
+    /// Storage buffer for torch/emissive light positions (read by fragment shader)
+    pub torch_buffer: wgpu::Buffer,
+    /// Number of active torch lights this frame
+    pub torch_count: u32,
 
     /// Bind group layout for voxel GI
     pub bind_group_layout: wgpu::BindGroupLayout,
@@ -354,6 +371,15 @@ impl VoxelGI {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
+        // Create torch light storage buffer (read by fragment shader for point-light DDA shadows)
+        let torch_buffer_size = (MAX_TORCH_LIGHTS * std::mem::size_of::<GpuTorchLight>()) as u64;
+        let torch_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Torch Light Buffer"),
+            size: torch_buffer_size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         // Create sampler for voxel textures
         let voxel_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("Voxel Sampler"),
@@ -410,6 +436,17 @@ impl VoxelGI {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                // Torch light positions (storage buffer, read-only in fragment shader)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -433,6 +470,10 @@ impl VoxelGI {
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: wgpu::BindingResource::Sampler(&voxel_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: torch_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -463,6 +504,8 @@ impl VoxelGI {
             radiance_texture_view,
             radiance_mip_views,
             uniform_buffer,
+            torch_buffer,
+            torch_count: 0,
             bind_group_layout,
             bind_group,
             update_pipeline,
@@ -1054,8 +1097,13 @@ impl VoxelGI {
 
         // Time the voxel cache fill
         let fill_start = std::time::Instant::now();
-        self.fill_voxel_cache(chunks, time_of_day, snapped_center);
+        let light_sources = self.fill_voxel_cache(chunks, time_of_day, snapped_center);
         let fill_time = fill_start.elapsed();
+
+        // Upload torch positions for DDA point-light shadows
+        let half_size_f = (VOXEL_VOLUME_SIZE / 2) as f32;
+        let vol_min = snapped_center - Vec3::splat(half_size_f);
+        self.upload_torch_lights(queue, &light_sources, vol_min);
 
         // Time the GPU upload
         let upload_start = std::time::Instant::now();
@@ -1125,7 +1173,7 @@ impl VoxelGI {
             inv_volume_size: [1.0 / VOXEL_VOLUME_SIZE as f32; 4],
             // W component is sun intensity (0-1), calculated from sun height
             sun_direction: [sun_direction.x, sun_direction.y, sun_direction.z, sun_direction.y.max(0.0).min(1.0)],
-            sun_color: [sun_color.x, sun_color.y, sun_color.z, 1.0],
+            sun_color: [sun_color.x, sun_color.y, sun_color.z, self.torch_count as f32],
             ambient_color: [ambient_color.x, ambient_color.y, ambient_color.z, 1.0],
             time_of_day: [time_of_day, shadow_mode, shadow_debug, self.shadow_blend],
             player_light: [player_pos.x, player_pos.y, player_pos.z, held_light_emission as f32 / 15.0],
@@ -1907,7 +1955,7 @@ impl VoxelGI {
         self.update_threshold
     }
 
-    fn fill_voxel_cache(&mut self, chunks: &Arc<RwLock<AHashMap<ChunkPos, Arc<Chunk>>>>, time_of_day: f32, center: Vec3) {
+    fn fill_voxel_cache(&mut self, chunks: &Arc<RwLock<AHashMap<ChunkPos, Arc<Chunk>>>>, time_of_day: f32, center: Vec3) -> Vec<(i32, i32, i32, u8)> {
         let half_size = (VOXEL_VOLUME_SIZE / 2) as f32;
         let volume_min = self.volume_center - Vec3::splat(half_size);
         let volume_max = self.volume_center + Vec3::splat(half_size);
@@ -2060,6 +2108,8 @@ impl VoxelGI {
             env_type,
             time_phase
         );
+
+        light_sources
     }
 
     /// Propagate light from emissive sources through the volume
@@ -2136,6 +2186,102 @@ impl VoxelGI {
                 }
             }
         }
+    }
+
+    /// Upload torch/emissive light positions to the GPU storage buffer.
+    /// Called after volume fill to provide the fragment shader with exact light positions.
+    /// light_sources: (voxel_x, voxel_y, voxel_z, emissive_u8) in volume-local coords.
+    /// volume_min: world-space origin of voxel [0,0,0].
+    pub fn upload_torch_lights(&mut self, queue: &wgpu::Queue, light_sources: &[(i32, i32, i32, u8)], volume_min: Vec3) {
+        let count = light_sources.len().min(MAX_TORCH_LIGHTS);
+        self.torch_count = count as u32;
+
+        if count == 0 {
+            return;
+        }
+
+        let mut gpu_lights = Vec::with_capacity(count);
+        for &(vx, vy, vz, emissive) in light_sources.iter().take(count) {
+            // Convert voxel coords back to world coords (center of block)
+            let world_x = vx as f32 + volume_min.x + 0.5;
+            let world_y = vy as f32 + volume_min.y + 0.5;
+            let world_z = vz as f32 + volume_min.z + 0.5;
+            let intensity = emissive as f32 / 255.0;
+            gpu_lights.push(GpuTorchLight {
+                pos_intensity: [world_x, world_y, world_z, intensity],
+            });
+        }
+
+        queue.write_buffer(&self.torch_buffer, 0, bytemuck::cast_slice(&gpu_lights));
+    }
+
+    /// Collect torch positions from chunks overlapping the volume (for GPU fill path).
+    /// Returns light sources in voxel-local coordinates + world volume_min.
+    pub fn collect_torch_positions_from_chunks(
+        &self,
+        chunks: &Arc<RwLock<AHashMap<ChunkPos, Arc<Chunk>>>>,
+    ) -> (Vec<(i32, i32, i32, u8)>, Vec3) {
+        let half_size = (VOXEL_VOLUME_SIZE / 2) as f32;
+        let volume_min = self.volume_center - Vec3::splat(half_size);
+        let volume_max = self.volume_center + Vec3::splat(half_size);
+
+        let vol_min_xi = volume_min.x as i32;
+        let vol_min_yi = volume_min.y as i32;
+        let vol_min_zi = volume_min.z as i32;
+        let vol_max_xi = volume_max.x as i32;
+        let vol_max_yi = volume_max.y as i32;
+        let vol_max_zi = volume_max.z as i32;
+        let vol_size = VOXEL_VOLUME_SIZE as i32;
+
+        let mut light_sources = Vec::new();
+        let chunks_read = chunks.read();
+
+        for (chunk_pos, chunk) in chunks_read.iter() {
+            let chunk_min_x = chunk_pos.x * CHUNK_SIZE_I32;
+            let chunk_min_y = chunk_pos.y * CHUNK_SIZE_I32;
+            let chunk_min_z = chunk_pos.z * CHUNK_SIZE_I32;
+            let chunk_max_x = chunk_min_x + 16;
+            let chunk_max_y = chunk_min_y + 16;
+            let chunk_max_z = chunk_min_z + 16;
+
+            // Skip chunks outside volume
+            if chunk_max_x <= vol_min_xi || chunk_min_x >= vol_max_xi ||
+               chunk_max_y <= vol_min_yi || chunk_min_y >= vol_max_yi ||
+               chunk_max_z <= vol_min_zi || chunk_min_z >= vol_max_zi {
+                continue;
+            }
+
+            for lz in 0..16i32 {
+                for ly in 0..16i32 {
+                    for lx in 0..16i32 {
+                        let block = chunk.get_block(lx as usize, ly as usize, lz as usize);
+                        let emission = block.light_emission();
+                        if emission == 0 {
+                            continue;
+                        }
+
+                        let wx = chunk_min_x + lx;
+                        let wy = chunk_min_y + ly;
+                        let wz = chunk_min_z + lz;
+
+                        // Convert to voxel coords
+                        let vx = wx - vol_min_xi;
+                        let vy = wy - vol_min_yi;
+                        let vz = wz - vol_min_zi;
+
+                        if (vx as u32) < vol_size as u32 &&
+                           (vy as u32) < vol_size as u32 &&
+                           (vz as u32) < vol_size as u32 {
+                            // Map emission (0-15) to voxel emissive (0-255 range)
+                            let emissive = ((emission as u32) * 255 / 15) as u8;
+                            light_sources.push((vx, vy, vz, emissive));
+                        }
+                    }
+                }
+            }
+        }
+
+        (light_sources, volume_min)
     }
 
     /// Get the bind group layout for use in render pipelines

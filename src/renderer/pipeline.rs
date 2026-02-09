@@ -539,6 +539,8 @@ var t_voxel: texture_3d<f32>;
 var t_radiance: texture_3d<f32>;
 @group(3) @binding(3)
 var s_voxel: sampler;
+@group(3) @binding(4)
+var<storage, read> torch_lights: array<vec4<f32>>;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -1185,94 +1187,122 @@ fn trace_sky_occlusion(world_pos: vec3<f32>) -> f32 {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// VOXEL-BASED TORCH/EMISSIVE LIGHTING
+// DDA TORCH LIGHTING SYSTEM
+// Point-light shadows using Amanatides & Woo DDA — same engine as sun shadows.
+// Each fragment traces toward light sources using integer textureLoad for
+// exact voxel-accurate shadow casting from torches and held lights.
 // ═══════════════════════════════════════════════════════════════════════════
 
-// Trace shadow ray from surface toward held light
-fn trace_held_light_shadow(world_pos: vec3<f32>, light_pos: vec3<f32>) -> f32 {
+// DDA shadow trace from a surface point toward a known light position.
+// Uses the same Amanatides & Woo traversal as sun shadows for consistency.
+// Returns: 0.0 = fully blocked, 1.0 = clear line of sight.
+// Stops early when reaching the light voxel or an emissive voxel.
+fn dda_trace_point_shadow(world_pos: vec3<f32>, light_pos: vec3<f32>, max_steps: i32) -> f32 {
+    let center = voxel_volume.volume_center.xyz;
+    let local_start = world_pos - center + vec3<f32>(128.0);
     let to_light = light_pos - world_pos;
     let dist_to_light = length(to_light);
-    let light_dir = to_light / dist_to_light;
 
-    // Start slightly off surface to avoid self-shadowing
-    var pos = world_pos + light_dir * 0.3;
-    let max_steps = 32;
-    let step_size = max(dist_to_light / f32(max_steps), 0.5);
-
-    var accumulated_opacity = 0.0;
-
-    for (var i = 0; i < max_steps; i++) {
-        pos += light_dir * step_size;
-
-        // Check if we've reached or passed the light
-        if (distance(world_pos, pos) >= dist_to_light - 0.5) {
-            break;
-        }
-
-        let uv = world_to_voxel_uv(pos);
-        if (!is_in_volume(uv)) {
-            continue;
-        }
-
-        let voxel = textureSampleLevel(t_voxel, s_voxel, uv, 0.0);
-        let opacity = voxel.r;
-
-        // Solid block blocks light
-        if (opacity > 0.5) {
-            accumulated_opacity += 0.5;
-        } else if (opacity > 0.1) {
-            accumulated_opacity += opacity * 0.3;
-        }
-
-        if (accumulated_opacity >= 1.0) {
-            return 0.0;  // Fully blocked
-        }
+    if (dist_to_light < 1.0) {
+        return 1.0; // Too close to light, no shadow
     }
 
-    return 1.0 - clamp(accumulated_opacity, 0.0, 1.0);
+    let light_dir = to_light / dist_to_light;
+
+    // Current integer voxel position
+    var voxel = vec3<i32>(floor(local_start));
+
+    // Step direction: +1 or -1 per axis
+    let step_sign = vec3<i32>(sign(light_dir));
+
+    // tDelta: parametric distance to cross one voxel per axis
+    let abs_dir = max(abs(light_dir), vec3<f32>(1e-8));
+    let t_delta = vec3<f32>(1.0) / abs_dir;
+
+    // tMax: parametric distance to first boundary crossing per axis
+    let frac = local_start - vec3<f32>(floor(local_start));
+    let dir_pos = vec3<bool>(light_dir.x >= 0.0, light_dir.y >= 0.0, light_dir.z >= 0.0);
+    var t_max = select(frac * t_delta, (vec3<f32>(1.0) - frac) * t_delta, dir_pos);
+
+    // Skip starting voxel (same as sun shadow DDA — prevents self-shadowing)
+    {
+        let sx = t_max.x <= t_max.y && t_max.x <= t_max.z;
+        let sy = !(t_max.x <= t_max.y) && t_max.y <= t_max.z;
+        let sz = !sx && !sy;
+        let m = vec3<bool>(sx, sy, sz);
+        voxel += select(vec3<i32>(0), step_sign, m);
+        t_max += select(vec3<f32>(0.0), t_delta, m);
+    }
+
+    // Limit steps to distance to light (no need to trace past the source)
+    let steps_to_light = i32(ceil(dist_to_light)) + 1;
+    let actual_max = min(max_steps, steps_to_light);
+
+    for (var i = 0; i < actual_max; i++) {
+        if (!voxel_in_bounds(voxel)) { break; }
+
+        let voxel_data = textureLoad(t_voxel, voxel, 0);
+
+        // If we reached an emissive voxel, we hit the light source — no shadow
+        if (voxel_data.g > 0.3) {
+            return 1.0;
+        }
+
+        // Solid voxel blocks the light
+        if (voxel_data.r > 0.5) {
+            return 0.0;
+        }
+
+        // Semi-transparent (leaves, water): partial attenuation
+        // Leaves (0.75) attenuate more than water (0.25)
+        if (voxel_data.r > 0.1) {
+            // Treat as partial blocker — one hit dims significantly
+            return 0.35;
+        }
+
+        // Branchless DDA step (same pattern as sun shadow)
+        let x_le_y = t_max.x <= t_max.y;
+        let x_le_z = t_max.x <= t_max.z;
+        let y_le_z = t_max.y <= t_max.z;
+        let step_x = x_le_y && x_le_z;
+        let step_y = !x_le_y && y_le_z;
+        let step_z = !step_x && !step_y;
+        let mask = vec3<bool>(step_x, step_y, step_z);
+        voxel += select(vec3<i32>(0), step_sign, mask);
+        t_max += select(vec3<f32>(0.0), t_delta, mask);
+    }
+
+    return 1.0; // No occlusion found
 }
 
 // === TORCH FLICKER UTILITIES ===
-// Hash function for per-position variation (returns 0-1)
 fn hash31(p: vec3<f32>) -> f32 {
     var p3 = fract(p * 0.1031);
     p3 += dot(p3, p3.yzx + 33.33);
     return fract((p3.x + p3.y) * p3.z);
 }
 
-// Multi-octave smooth noise for natural torch flicker
-// torch_pos should be the actual torch block position (or estimate)
-// Returns a multiplier around 1.0 (range: ~0.88 to ~1.12)
+// Per-torch flicker based on torch position (each torch flickers independently)
 fn torch_flicker_at_source(torch_pos: vec3<f32>, time: f32) -> f32 {
-    // Per-torch phase offset based on torch position (so each torch flickers differently)
     let phase_offset = hash31(torch_pos) * 6.28318;
-
-    // Multiple frequency components for natural look:
-    // - Slow breathing (like fire expanding/contracting)
-    // - Medium flicker (like flame movement)
-    // - Fast shimmer (like heat distortion)
     let slow_wave = sin(time * 2.5 + phase_offset) * 0.06;
     let med_wave = sin(time * 7.3 + phase_offset * 1.3) * 0.04;
     let fast_wave = sin(time * 15.7 + phase_offset * 2.1) * 0.02;
-
-    // Combine: base 1.0 + variations (range ~0.88 to ~1.12)
     return 1.0 + slow_wave + med_wave + fast_wave;
 }
 
-// Simple time-based flicker for when we don't know torch position
-// Provides subtle ambient variation without position-based artifacts
-fn torch_flicker_simple(time: f32) -> f32 {
-    let slow_wave = sin(time * 2.5) * 0.04;
-    let med_wave = sin(time * 7.3) * 0.03;
-    return 1.0 + slow_wave + med_wave;
-}
-
-// Get torch color (warm orange, constant - flicker applied to intensity only)
 fn get_torch_color() -> vec3<f32> {
-    return vec3<f32>(1.0, 0.85, 0.6);  // Warm orange
+    return vec3<f32>(1.0, 0.85, 0.6);
 }
 
-// Calculate light from player's held torch (with shadow casting and flicker)
+// Get torch shadow max DDA steps from quality setting (bit 0 of volume_origin.w)
+fn get_torch_shadow_steps() -> i32 {
+    let enabled = (voxel_volume.volume_origin.w & 1) > 0;
+    if (!enabled) { return 0; }
+    return 16; // DDA is efficient — 16 steps covers 16 blocks which is torch radius
+}
+
+// Calculate light from player's held torch using DDA shadow tracing
 fn calculate_held_light(world_pos: vec3<f32>) -> vec3<f32> {
     let player_pos = voxel_volume.player_light.xyz;
     let intensity = voxel_volume.player_light.w;
@@ -1281,159 +1311,92 @@ fn calculate_held_light(world_pos: vec3<f32>) -> vec3<f32> {
         return vec3<f32>(0.0);
     }
 
-    // Distance-based falloff
     let dist = distance(world_pos, player_pos);
-    let max_radius = intensity * 24.0;  // ~24 blocks for full torch
+    let max_radius = intensity * 24.0;
 
     if (dist >= max_radius) {
         return vec3<f32>(0.0);
     }
 
-    // Trace shadow from surface toward held light
-    let shadow = trace_held_light_shadow(world_pos, player_pos);
+    // DDA shadow trace toward held light position (known exactly)
+    var shadow = 1.0;
+    let torch_steps = get_torch_shadow_steps();
+    if (torch_steps > 0) {
+        let shadow_origin = world_pos + normalize(player_pos - world_pos) * 0.02;
+        shadow = dda_trace_point_shadow(shadow_origin, player_pos, torch_steps);
+    }
 
-    // Get animation time and calculate flicker (based on player position)
     let time = camera.anim_data.x;
     let flicker = torch_flicker_at_source(floor(player_pos), time);
     let torch_color = get_torch_color();
 
-    // Quartic falloff: smaller bright core, dims quickly, long subtle tail to edge
+    // Quartic falloff for natural point light
     let falloff = 1.0 - (dist / max_radius);
     let light_strength = pow(falloff, 4.0) * intensity * flicker;
 
-    // Apply shadow - light blocked by geometry between surface and player
     return torch_color * light_strength * shadow * 2.5;
 }
 
-// Trace shadow toward estimated torch light source
-// Uses light gradient to find direction toward the brightest source
-fn trace_torch_shadow(world_pos: vec3<f32>, max_dist: f32) -> f32 {
-    // Sample light gradient to find direction toward light source
-    let step = 2.0;
-    let uv = world_to_voxel_uv(world_pos);
-    let inv_size = 1.0 / 256.0;
-
-    // Sample neighbors to compute gradient
-    let sample_x_pos = textureSampleLevel(t_voxel, s_voxel, uv + vec3<f32>(step * inv_size, 0.0, 0.0), 0.0).a;
-    let sample_x_neg = textureSampleLevel(t_voxel, s_voxel, uv - vec3<f32>(step * inv_size, 0.0, 0.0), 0.0).a;
-    let sample_y_pos = textureSampleLevel(t_voxel, s_voxel, uv + vec3<f32>(0.0, step * inv_size, 0.0), 0.0).a;
-    let sample_y_neg = textureSampleLevel(t_voxel, s_voxel, uv - vec3<f32>(0.0, step * inv_size, 0.0), 0.0).a;
-    let sample_z_pos = textureSampleLevel(t_voxel, s_voxel, uv + vec3<f32>(0.0, 0.0, step * inv_size), 0.0).a;
-    let sample_z_neg = textureSampleLevel(t_voxel, s_voxel, uv - vec3<f32>(0.0, 0.0, step * inv_size), 0.0).a;
-
-    // Gradient points toward higher light (toward source)
-    let gradient = vec3<f32>(
-        sample_x_pos - sample_x_neg,
-        sample_y_pos - sample_y_neg,
-        sample_z_pos - sample_z_neg
-    );
-
-    let grad_len = length(gradient);
-    if (grad_len < 0.01) {
-        return 1.0;  // No clear gradient, assume no shadow
-    }
-
-    let light_dir = normalize(gradient);
-
-    // Short ray march toward light source
-    var accumulated_opacity = 0.0;
-    var pos = world_pos + light_dir * 0.5;  // Start slightly offset
-    let step_size = 1.0;
-    let max_steps = i32(min(max_dist / step_size, 12.0));  // Limit for performance
-
-    for (var i = 0; i < max_steps; i++) {
-        let sample_uv = world_to_voxel_uv(pos);
-        if (!is_in_volume(sample_uv)) {
-            break;
-        }
-
-        let sample_voxel = textureSampleLevel(t_voxel, s_voxel, sample_uv, 0.0);
-
-        // If we hit an emissive voxel, we reached the source
-        if (sample_voxel.g > 0.5) {
-            break;
-        }
-
-        // Accumulate opacity from solid blocks
-        if (sample_voxel.r > 0.5) {
-            accumulated_opacity += 0.25;
-        } else if (sample_voxel.r > 0.2) {
-            accumulated_opacity += sample_voxel.r * 0.15;
-        }
-
-        if (accumulated_opacity >= 1.0) {
-            return 0.0;  // Fully blocked
-        }
-
-        pos += light_dir * step_size;
-    }
-
-    return 1.0 - clamp(accumulated_opacity, 0.0, 1.0);
+// Get the number of active torch lights from sun_color.w
+fn get_torch_count() -> i32 {
+    return i32(voxel_volume.sun_color.w);
 }
 
-fn sample_torch_light(world_pos: vec3<f32>) -> vec3<f32> {
-    // Sample pre-propagated light from the voxel volume
-    // Light is propagated via GPU compute shader and stored in the A channel
-
-    let uv = world_to_voxel_uv(world_pos);
-    if (!is_in_volume(uv)) {
+// Main torch lighting: loops over torch buffer, computes point-light + DDA shadow per source
+fn sample_torch_light(world_pos: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+    let torch_count = get_torch_count();
+    if (torch_count <= 0) {
         return vec3<f32>(0.0);
     }
 
-    // Sample the voxel - A channel contains propagated light intensity
-    // Linear filtering provides smooth interpolation between voxels
-    let voxel = textureSampleLevel(t_voxel, s_voxel, uv, 0.0);
-    let light_intensity = voxel.a;  // A channel = propagated light (0-1)
-
-    if (light_intensity < 0.01) {
-        return vec3<f32>(0.0);
-    }
-
-    // Estimate torch position by following light gradient
-    // This ensures all surfaces lit by the same torch flicker together
-    let inv_size = 1.0 / 256.0;
-    let step = 2.0;
-    let sample_x_pos = textureSampleLevel(t_voxel, s_voxel, uv + vec3<f32>(step * inv_size, 0.0, 0.0), 0.0).a;
-    let sample_x_neg = textureSampleLevel(t_voxel, s_voxel, uv - vec3<f32>(step * inv_size, 0.0, 0.0), 0.0).a;
-    let sample_y_pos = textureSampleLevel(t_voxel, s_voxel, uv + vec3<f32>(0.0, step * inv_size, 0.0), 0.0).a;
-    let sample_y_neg = textureSampleLevel(t_voxel, s_voxel, uv - vec3<f32>(0.0, step * inv_size, 0.0), 0.0).a;
-    let sample_z_pos = textureSampleLevel(t_voxel, s_voxel, uv + vec3<f32>(0.0, 0.0, step * inv_size), 0.0).a;
-    let sample_z_neg = textureSampleLevel(t_voxel, s_voxel, uv - vec3<f32>(0.0, 0.0, step * inv_size), 0.0).a;
-
-    let gradient = vec3<f32>(
-        sample_x_pos - sample_x_neg,
-        sample_y_pos - sample_y_neg,
-        sample_z_pos - sample_z_neg
-    );
-
-    // Estimate torch position: current position + normalized gradient * estimated distance
-    // Distance estimate: light_intensity maps to ~14 blocks radius, so inverse
-    let estimated_dist = (1.0 - light_intensity) * 14.0;
-    var estimated_torch_pos = world_pos;
-    let grad_len = length(gradient);
-    if (grad_len > 0.01) {
-        estimated_torch_pos = world_pos + normalize(gradient) * estimated_dist;
-    }
-
-    // Check if torch shadows are enabled (stored in volume_origin.w)
-    let torch_shadows_enabled = (voxel_volume.volume_origin.w & 1) > 0;
-    var shadow_factor = 1.0;
-    if (torch_shadows_enabled && grad_len > 0.01) {
-        // Trace shadow toward light source
-        shadow_factor = trace_torch_shadow(world_pos, estimated_dist);
-    }
-
-    // Get animation time and calculate flicker based on estimated torch position
-    // This ensures all surfaces lit by the same torch flicker together
-    let time = camera.anim_data.x;
-    let flicker = torch_flicker_at_source(floor(estimated_torch_pos), time);
     let torch_color = get_torch_color();
+    let time = camera.anim_data.x;
+    let torch_steps = get_torch_shadow_steps();
+    var total_light = vec3<f32>(0.0);
 
-    // Apply softer gamma curve for longer falloff trail, modulated by flicker and shadow
-    let curved_light = pow(light_intensity, 1.2) * flicker * shadow_factor;
+    // Loop over all torch lights (max 256, typically < 50)
+    for (var i = 0; i < torch_count; i++) {
+        let torch_data = torch_lights[i];
+        let torch_pos = torch_data.xyz;
+        let emission = torch_data.w;  // 0-1 normalized
 
-    // Brighter placed torches
-    return torch_color * curved_light * 3.0;
+        // Distance from fragment to this torch
+        let to_torch = torch_pos - world_pos;
+        let dist = length(to_torch);
+
+        // Max light radius based on emission (torch=14/15 → ~16 blocks, uranium=8/15 → ~10 blocks)
+        let max_radius = emission * 18.0;
+
+        // Early out: skip torches that are too far
+        if (dist >= max_radius) {
+            continue;
+        }
+
+        // Smooth quadratic falloff: bright near source, gradual fade
+        let falloff_raw = 1.0 - (dist / max_radius);
+        let falloff = falloff_raw * falloff_raw;
+
+        // Normal-weighted contribution: faces pointing toward the light get more
+        let light_dir = to_torch / max(dist, 0.001);
+        let ndotl = max(dot(normal, light_dir), 0.05); // 0.05 minimum = subtle wraparound
+
+        // DDA shadow trace toward this torch
+        var shadow = 1.0;
+        if (torch_steps > 0 && dist > 1.5) {
+            let shadow_origin = world_pos + normal * 0.02;
+            shadow = dda_trace_point_shadow(shadow_origin, torch_pos, torch_steps);
+        }
+
+        // Per-torch flicker
+        let flicker = torch_flicker_at_source(floor(torch_pos), time);
+
+        // Accumulate this torch's contribution
+        let strength = falloff * ndotl * emission * flicker * shadow;
+        total_light += torch_color * strength;
+    }
+
+    // Scale to match expected brightness
+    return total_light * 4.0;
 }
 
 @fragment
@@ -1640,7 +1603,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Block light (torches) - now using voxel-based sampling
     // Sample emissive light from nearby voxels in the volume
-    let voxel_torch_light = sample_torch_light(in.world_position);
+    let voxel_torch_light = sample_torch_light(in.world_position, in.normal);
 
     // Add player's held torch light (dynamic, follows player)
     let held_torch_light = calculate_held_light(in.world_position);

@@ -3070,6 +3070,10 @@ impl Renderer {
                 &chunks,
                 camera.position,
             );
+
+            // Collect and upload torch positions for DDA point-light shadows
+            let (light_sources, vol_min) = self.voxel_gi.collect_torch_positions_from_chunks(&chunks);
+            self.voxel_gi.upload_torch_lights(&self.queue, &light_sources, vol_min);
         }
 
         // Always call update_from_chunks for:
