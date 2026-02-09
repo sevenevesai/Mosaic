@@ -9,7 +9,7 @@ cargo build --release
 ./target/release/mosaic.exe
 ```
 
-**Controls:** WASD move, Space jump/fly-up, Shift fly-down, Ctrl sprint, F fly mode, E inventory, 1-9 hotbar slots, Scroll wheel cycle slots, LMB break, RMB place, F3 debug, F4 body part editor, T day/night speed, Y shadow mode, U shadow debug, V volumetric light shafts, P perf log, Esc menu.
+**Controls:** WASD move, Space jump/fly-up, Shift fly-down, Ctrl sprint, F fly mode, E inventory, 1-9 hotbar slots, Scroll wheel cycle slots, LMB break, RMB place, F3 debug, F4 body part editor, T day/night speed, Y shadow mode, U shadow debug, V volumetrics quality cycle, P perf log, Esc menu.
 
 ## Commands
 
@@ -45,7 +45,7 @@ src/
 │   ├── voxel_gi.rs  # Voxel GI: 256^3 volume, Amanatides & Woo DDA shadows, VCT, player shadow injection
 │   ├── ssao.rs      # Screen-space ambient occlusion
 │   ├── aa.rs        # Hybrid Morphological-Temporal AA
-│   ├── volumetrics.rs # Volumetric light shafts (god rays)
+│   ├── volumetrics.rs # Volumetric light shafts: DDA raymarch + bilateral blur + composite
 │   └── chunk_pool.rs # MDI mega-buffers
 ├── entity/
 │   ├── mod.rs       # EntityManager, Skeleton, AnimationComponent (looping/clamp), player_entity tracking
@@ -85,7 +85,7 @@ WATER_SEA_LEVEL: 32      // Y level for water generation
 
 **Winding Order**: CCW front faces. Triangles: 0-2-1 and 0-3-2. Left/right faces have reordered UVs.
 
-**Render Pipeline Order**: Sky pass -> Opaque geometry (MDI) -> Character entities (w/ voxel GI shadows) -> Block outline -> Crack overlay -> Water pass -> Volumetrics -> Post-process (SSAO, AA, DOF, Bloom) -> UI
+**Render Pipeline Order**: Sky pass -> Opaque geometry (MDI) -> Character entities (w/ voxel GI shadows) -> Block outline -> Crack overlay -> Water pass -> SSAO -> Volumetrics (raymarch + blur + composite) -> Post-process (DoF, AA, Bloom) -> UI
 
 **3rd Person Camera**:
 - Camera orbits behind player: `position = player_center - forward * 10.0`
