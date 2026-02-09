@@ -787,6 +787,138 @@ fn char_ray_march_shadow(world_pos: vec3<f32>, light_dir: vec3<f32>) -> f32 {
     return 1.0;  // No occlusion
 }
 
+// === TORCH POINT-LIGHT FOR CHARACTERS ===
+
+// DDA shadow trace from character surface toward a torch position
+fn char_dda_torch_shadow(world_pos: vec3<f32>, light_pos: vec3<f32>) -> f32 {
+    let center = voxel_volume.volume_center.xyz;
+    let to_light = light_pos - world_pos;
+    let dist_to_light = length(to_light);
+
+    if (dist_to_light < 1.5) {
+        return 1.0;
+    }
+
+    let light_dir = to_light / dist_to_light;
+    let light_local = light_pos - center + vec3<f32>(128.0);
+    let light_voxel = vec3<i32>(floor(light_local));
+
+    // Start offset to escape the character's own voxels
+    let start = world_pos + light_dir * 1.2;
+    let local_start = start - center + vec3<f32>(128.0);
+
+    var voxel = vec3<i32>(floor(local_start));
+    let step_sign = vec3<i32>(sign(light_dir));
+    let abs_dir = max(abs(light_dir), vec3<f32>(1e-8));
+    let t_delta = vec3<f32>(1.0) / abs_dir;
+
+    let frac = local_start - vec3<f32>(floor(local_start));
+    var t_max: vec3<f32>;
+    if (light_dir.x >= 0.0) { t_max.x = (1.0 - frac.x) * t_delta.x; } else { t_max.x = frac.x * t_delta.x; }
+    if (light_dir.y >= 0.0) { t_max.y = (1.0 - frac.y) * t_delta.y; } else { t_max.y = frac.y * t_delta.y; }
+    if (light_dir.z >= 0.0) { t_max.z = (1.0 - frac.z) * t_delta.z; } else { t_max.z = frac.z * t_delta.z; }
+
+    let max_steps = min(16, i32(ceil(dist_to_light)) + 1);
+
+    for (var i = 0; i < max_steps; i++) {
+        if (!voxel_in_bounds(voxel)) { break; }
+
+        let voxel_data = textureLoad(t_voxel, voxel, 0);
+
+        // Reached emissive = clear line of sight
+        if (voxel_data.g > 0.3) { return 1.0; }
+
+        // Solid block — skip if adjacent to light source (mount block)
+        if (voxel_data.r > 0.5) {
+            let delta = abs(voxel - light_voxel);
+            if (delta.x > 1 || delta.y > 1 || delta.z > 1) {
+                return 0.0;
+            }
+        }
+
+        // DDA step
+        if (t_max.x < t_max.y) {
+            if (t_max.x < t_max.z) { voxel.x += step_sign.x; t_max.x += t_delta.x; }
+            else { voxel.z += step_sign.z; t_max.z += t_delta.z; }
+        } else {
+            if (t_max.y < t_max.z) { voxel.y += step_sign.y; t_max.y += t_delta.y; }
+            else { voxel.z += step_sign.z; t_max.z += t_delta.z; }
+        }
+    }
+
+    return 1.0;
+}
+
+fn char_hash31(p: vec3<f32>) -> f32 {
+    var p3 = fract(p * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+fn char_torch_flicker(torch_pos: vec3<f32>, time: f32) -> f32 {
+    let phase = char_hash31(torch_pos) * 6.28318;
+    return 1.0 + sin(time * 2.5 + phase) * 0.06 + sin(time * 7.3 + phase * 1.3) * 0.04;
+}
+
+// Accumulate torch light on character: loops over torch buffer, point-light + DDA shadow
+fn char_sample_torch_light(world_pos: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+    let torch_count = i32(voxel_volume.sun_color.w);
+    if (torch_count <= 0) { return vec3<f32>(0.0); }
+
+    let torch_color = vec3<f32>(1.0, 0.85, 0.6);
+    let time = camera.anim_data.x;
+    let torch_shadows_enabled = (voxel_volume.volume_origin.w & 1) > 0;
+    var total = vec3<f32>(0.0);
+
+    for (var i = 0; i < torch_count; i++) {
+        let td = torch_lights[i];
+        let tpos = td.xyz;
+        let emission = td.w;
+
+        let to_torch = tpos - world_pos;
+        let dist = length(to_torch);
+        let max_radius = emission * 18.0;
+        if (dist >= max_radius) { continue; }
+
+        let falloff_raw = 1.0 - (dist / max_radius);
+        let falloff = falloff_raw * falloff_raw;
+        let light_dir = to_torch / max(dist, 0.001);
+        let ndotl = max(dot(normal, light_dir), 0.05);
+
+        var shadow = 1.0;
+        if (torch_shadows_enabled && dist > 1.5) {
+            shadow = char_dda_torch_shadow(world_pos, tpos);
+        }
+
+        let flicker = char_torch_flicker(floor(tpos), time);
+        total += torch_color * falloff * ndotl * emission * flicker * shadow;
+    }
+
+    return total * 4.0;
+}
+
+// Held torch light on character
+fn char_held_light(world_pos: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+    let player_pos = voxel_volume.player_light.xyz;
+    let intensity = voxel_volume.player_light.w;
+    if (intensity <= 0.0) { return vec3<f32>(0.0); }
+
+    let dist = distance(world_pos, player_pos);
+    let max_radius = intensity * 24.0;
+    if (dist >= max_radius) { return vec3<f32>(0.0); }
+
+    let light_dir = normalize(player_pos - world_pos);
+    let ndotl = max(dot(normal, light_dir), 0.05);
+    let falloff_raw = 1.0 - (dist / max_radius);
+    let falloff = pow(falloff_raw, 4.0) * intensity;
+
+    let torch_color = vec3<f32>(1.0, 0.85, 0.6);
+    let time = camera.anim_data.x;
+    let flicker = char_torch_flicker(floor(player_pos), time);
+
+    return torch_color * falloff * ndotl * flicker * 2.5;
+}
+
 // === VERTEX SHADER ===
 
 @vertex
@@ -870,7 +1002,16 @@ fn fs_character(in: VertexOutput) -> @location(0) vec4<f32> {
     let up_factor = dot(normal, vec3<f32>(0.0, 1.0, 0.0)) * 0.5 + 0.5;
     let hemisphere_ambient = ambient * mix(0.6, 1.0, up_factor);
 
-    let lighting = hemisphere_ambient + sun_diffuse + moon_diffuse;
+    // Torch/emissive point lights (DDA shadow-casting)
+    let torch_light = char_sample_torch_light(in.world_position, normal);
+    let held_light = char_held_light(in.world_position, normal);
+
+    // Context-aware torch boost (same as chunk shader)
+    let night_factor = 1.0 - sun_intensity;
+    let torch_boost = 1.5 + night_factor * 0.8;
+    let block_light = (torch_light + held_light) * torch_boost;
+
+    let lighting = hemisphere_ambient + sun_diffuse + moon_diffuse + block_light;
 
     return vec4<f32>(albedo.rgb * lighting, albedo.a);
 }

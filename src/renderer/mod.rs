@@ -3516,44 +3516,50 @@ impl Renderer {
 
             // === UPDATE WATER PRESENCE TEXTURE ===
             // This tells the water shader where water actually exists (not just sea level y=32)
+            // Uses ChunkWaterData (generated heightfield) instead of scanning Block::Water,
+            // which correctly captures shallow edges where terrain is at y=31
             let presence_changed = self.water_system.set_presence_center(camera.position.x, camera.position.z);
             if presence_changed {
                 // Clear and rebuild presence texture when camera moves significantly
                 self.water_system.clear_presence();
 
-                // Update presence by scanning for actual Block::Water at sea level
-                // We check chunks that contain the water level (y=31, since WATER_SEA_LEVEL=32)
-                let water_y = crate::constants::WATER_SEA_LEVEL - 1; // y=31 is the top water block
-                let water_chunk_y = water_y / 16; // Which vertical chunk contains water level
-
                 let chunks_read = chunks.read();
                 for (pos, chunk) in chunks_read.iter() {
-                    // Only check chunks at the water level height
-                    if pos.y != water_chunk_y {
-                        continue;
-                    }
+                    // Use the ChunkWaterData that was populated during generation
+                    // This has accurate per-column water info including shallow edges
+                    if let Some(water_data) = chunk.water_data() {
+                        if !water_data.has_water() {
+                            continue;
+                        }
 
-                    // Scan for water blocks at the water surface level
-                    let local_y = (water_y % 16) as usize;
-                    let mut water_columns = [[false; 16]; 16];
-                    let mut has_any_water = false;
+                        // Build detailed column info from ChunkWaterData
+                        let mut water_columns = [[crate::renderer::water::WaterColumnInfo::default(); 16]; 16];
+                        let mut has_any = false;
 
-                    for z in 0..16 {
-                        for x in 0..16 {
-                            let block = chunk.get_block(x, local_y, z);
-                            if matches!(block, crate::world::Block::Water) {
-                                water_columns[z][x] = true;
-                                has_any_water = true;
+                        for z in 0..16 {
+                            for x in 0..16 {
+                                let col = water_data.get_column(x, z);
+                                if col.has_water {
+                                    water_columns[z][x] = crate::renderer::water::WaterColumnInfo {
+                                        has_water: true,
+                                        level: col.level,
+                                        flow_dir_x: col.flow_dir_x,
+                                        flow_dir_z: col.flow_dir_z,
+                                        is_source: col.is_source,
+                                        is_flowing: col.is_flowing,
+                                    };
+                                    has_any = true;
+                                }
                             }
                         }
-                    }
 
-                    if has_any_water {
-                        self.water_system.update_presence_from_chunk(
-                            pos.x * 16,
-                            pos.z * 16,
-                            &water_columns,
-                        );
+                        if has_any {
+                            self.water_system.update_presence_from_chunk_detailed(
+                                pos.x * 16,
+                                pos.z * 16,
+                                &water_columns,
+                            );
+                        }
                     }
                 }
 

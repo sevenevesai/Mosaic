@@ -39,10 +39,10 @@ src/
 │   ├── water.rs     # Ray-marched water (fullscreen post-process)
 │   ├── clouds.rs    # Procedural cloud system
 │   ├── grass/       # Procedural grass rendering (vertex pulling)
-│   ├── character_renderer.rs # Skinned character rendering, bone matrices, voxel GI shadows
+│   ├── character_renderer.rs # Skinned character rendering, bone matrices, voxel GI shadows + torch lighting
 │   ├── inventory_ui.rs # Hotbar/inventory UI rendering (tools: colored rect + letter + durability bar)
 │   ├── gpu_culling.rs # GPU frustum culling + visibility cache
-│   ├── voxel_gi.rs  # Voxel GI: 256^3 volume, Amanatides & Woo DDA shadows, VCT, player shadow injection
+│   ├── voxel_gi.rs  # Voxel GI: 256^3 volume, DDA shadows, torch buffer (256 lights), VCT, player shadow
 │   ├── ssao.rs      # Screen-space ambient occlusion
 │   ├── aa.rs        # Hybrid Morphological-Temporal AA
 │   ├── volumetrics.rs # Volumetric light shafts: DDA raymarch + bilateral blur + composite
@@ -111,9 +111,10 @@ WATER_SEA_LEVEL: 32      // Y level for water generation
 - **Player shadow voxels** - Injected AFTER queue.submit() to avoid GPU fill overwrite. 1-frame latency, block-snapping (known limitation)
 - **Crack overlay** - 4-stage procedural texture (256x64), rendered after block outline pass with depth bias -3
 - **Tool items** - Stack size 1, rendered as colored rect + letter (P/A/S/W) + durability bar in hotbar
-- **Character shadows** - Receive via voxel GI DDA in fragment shader (group 3); cast via inject_player_shadow (2 voxels)
+- **Character lighting** - Receives sun/moon shadows via voxel GI DDA + torch point-lights from torch buffer (group 3 binding 4); casts via inject_player_shadow (2 voxels)
 - **Shadow quality** - 5 presets (OFF/LOW/MEDIUM/HIGH/ULTRA) control DDA max_steps (0/48/96/128/128+2tap). Packed into `volume_origin.w` bits 1-3. ULTRA forces 2-tap multi-sampling regardless of shadow mode
 - **Shadow DDA** - Uses Amanatides & Woo true voxel traversal with `textureLoad` (integer sampling). Skips starting voxel (one DDA step before loop) to prevent self-shadowing without positional offset. Shadow origin uses minimal `normal * 0.02` offset for float precision only. Only traces for sun-facing faces (`ndotl > 0`)
+- **Torch lighting** - GPU storage buffer of up to 256 light positions (group 3 binding 4). Fragment shader loops over buffer, computes point-light falloff + DDA shadow per torch. Mount-block skip: solid blocks within 1 voxel of light source are ignored (prevents torch's own support block from casting shadow). `torch_count` packed into `sun_color.w` of VoxelVolumeUniform. Both chunk and character shaders use the same system
 
 ## Common Tasks
 

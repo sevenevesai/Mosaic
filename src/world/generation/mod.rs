@@ -19,7 +19,7 @@ use noise::{Fbm, MultiFractal, NoiseFn, Perlin, RidgedMulti};
 
 use super::chunk::{Block, Chunk, ChunkPos};
 use crate::constants::{
-    BLOCK_SCALE, CHUNK_SIZE, CHUNK_SIZE_I32, WATER_FLOW_INITIAL_SCALE, WATER_FULL_HEIGHT,
+    BLOCK_SCALE, CHUNK_SIZE, CHUNK_SIZE_I32, WATER_FULL_HEIGHT,
     WATER_SEA_LEVEL,
 };
 
@@ -786,28 +786,17 @@ impl TerrainGenerator {
                     let edge_foam = self.calculate_edge_foam(chunk, x, z);
                     let total_foam = foam.max(edge_foam);
 
-                    // Calculate terrain gradient for flow direction
-                    let h_xp = self.get_terrain_height(wx + 1, wz) as f32;
-                    let h_xm = self.get_terrain_height(wx - 1, wz) as f32;
-                    let h_zp = self.get_terrain_height(wx, wz + 1) as f32;
-                    let h_zm = self.get_terrain_height(wx, wz - 1) as f32;
-
-                    let gradient_x = (h_xp - h_xm) / 2.0;
-                    let gradient_z = (h_zp - h_zm) / 2.0;
-
-                    let flow_velocity_x = -gradient_x * WATER_FLOW_INITIAL_SCALE;
-                    let flow_velocity_z = -gradient_z * WATER_FLOW_INITIAL_SCALE;
-
-                    let is_source = depth >= 3;
-
+                    // Sea-level water is static (CA flow sim is not active),
+                    // so all columns are source with zero flow velocity.
+                    // Flow directions will be set by the CA sim when it's enabled.
                     chunk.set_water_surface_with_flow(
                         x,
                         z,
                         water_surface_y,
                         total_foam,
-                        flow_velocity_x,
-                        flow_velocity_z,
-                        is_source,
+                        0.0, // flow_velocity_x - no flow for static sea level
+                        0.0, // flow_velocity_z - no flow for static sea level
+                        true, // is_source - all sea-level water is source
                     );
                     has_water = true;
                 }
