@@ -140,6 +140,9 @@ impl App {
 
         // Load settings from file (or use defaults)
         let settings = Settings::load();
+
+        // Initialize block registry (must happen before renderer loads textures)
+        crate::world::block_registry::init_registry();
         let initial_size = PhysicalSize::new(settings.windowed_width, settings.windowed_height);
 
         let window = Arc::new(

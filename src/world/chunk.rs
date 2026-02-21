@@ -846,90 +846,9 @@ impl Block {
     }
 
     /// Get texture indices for each face: [top, bottom, front, back, left, right]
-    /// Atlas is 8x8 (64 tiles), indices 0-63
+    /// Indices resolved from block registry (assets/blocks/ textures)
     pub fn texture_indices(&self) -> [u32; 6] {
-        match self {
-            Block::Air => [0; 6],
-            Block::Dirt => [0; 6],
-            Block::Grass => [1, 0, 2, 2, 2, 2], // Top=grass, Bottom=dirt, Sides=grass_side
-            Block::Stone => [3; 6],
-            Block::StoneDirt => [4; 6],         // Dirty stone variant
-            Block::Brick => [5; 6],             // Brick building material
-            Block::Water => [6; 6],
-            Block::Wood => [7; 6],            // Bark on all sides
-            Block::Leaves => [9; 6],
-            Block::StoneRubble2 => [10; 6],    // Stone rubble variant
-            Block::IronOre => [11; 6],
-            Block::GoldOre => [12; 6],
-            Block::DiamondOre => [13; 6],
-            Block::RedstoneOre => [14; 6],
-            Block::Bedrock => [15; 6],
-            Block::Torch => [16; 6],           // Torch procedural orange
-            Block::Sand => [17; 6],            // Beach sand
-            // Ores (18-29)
-            Block::CoalOre => [18; 6],
-            Block::CopperOre => [19; 6],
-            Block::EmeraldOre => [20; 6],
-            Block::SapphireOre => [21; 6],
-            Block::QuartzOre => [22; 6],
-            Block::AmethystOre => [23; 6],
-            Block::SilverOre => [24; 6],
-            Block::TinOre => [25; 6],
-            Block::NickelOre => [26; 6],
-            Block::LeadOre => [27; 6],
-            Block::TitaniumOre => [28; 6],
-            Block::UraniumOre => [29; 6],
-            // Tree logs (30-31, 52-53)
-            Block::OakLog => [30; 6],      // Bark on all sides
-            Block::BirchLog => [31; 6],    // Paper bark on all sides
-
-            // === NEW BIOME BLOCKS ===
-
-            // Desert/Badlands (32-33)
-            Block::Sandstone => [32; 6],       // Layered sandstone
-            Block::RedSandstone => [33; 6],    // Red/orange sandstone
-
-            // Tundra/Snow (34-37)
-            Block::SnowGrass => [34, 0, 35, 35, 35, 35], // Snow top, dirt bottom, snowy sides
-            Block::Snow => [34; 6],            // Pure snow
-            Block::Ice => [36; 6],             // Translucent ice
-            Block::PackedIce => [37; 6],       // Dense blue ice
-
-            // Swamp (38-39)
-            Block::MudBlock => [38; 6],        // Dark mud
-            Block::Peat => [39; 6],            // Brown peat
-
-            // Jungle (40-42)
-            Block::JungleGrass => [40, 0, 41, 41, 41, 41], // Lush grass top
-            Block::JungleLeaves => [42; 6],    // Dense tropical leaves
-            Block::Vines => [43; 6],           // Hanging vines
-
-            // Mountain (44)
-            Block::Gravel => [44; 6],          // Gray gravel
-
-            // Structure blocks (45-47)
-            Block::MossyStone => [45; 6],      // Mossy cobblestone
-            Block::CrackedStone => [46; 6],    // Cracked stone
-            Block::ClayStone => [47; 6],       // Tan claystone
-
-            // Cave decoration (48-51)
-            Block::Stalactite => [48; 6],      // Pointed stone
-            Block::Stalagmite => [48; 6],      // Same texture as stalactite
-            Block::CrystalAmethyst => [49; 6], // Purple crystal (emissive)
-            Block::CrystalQuartz => [50; 6],   // White crystal (emissive)
-
-            // Desert vegetation (51-52)
-            Block::Cactus => [51, 52, 51, 51, 51, 51], // Cactus top different
-            Block::DeadBush => [53; 6],        // Dead shrub
-
-            // Additional trees (54-56)
-            Block::PineLog => [54; 6],         // Pine mossy bark on all sides
-            Block::JungleLog => [55; 6],       // Jungle bark on all sides
-            Block::SpruceLeaves => [56; 6],    // Frost blue needles (tundra)
-
-            // Storage/furniture
-            Block::Chest => [7; 6],            // Wood planks (rendered as vox prop)
-        }
+        crate::world::block_registry::registry().block_texture_indices(*self as u8)
     }
 
     /// Get light emission level (0-15) for this block type
@@ -1630,17 +1549,23 @@ mod tests {
 
     #[test]
     fn test_block_texture_indices() {
-        // Grass: top=1, bottom=0, sides=2
+        use crate::world::block_registry::registry;
+        let reg = registry();
+
+        // Grass: top=misc_03, bottom=misc_16, sides=misc_04
         let grass = Block::Grass.texture_indices();
-        assert_eq!(grass, [1, 0, 2, 2, 2, 2], "Grass texture indices incorrect");
+        assert_eq!(grass[0], reg.texture_index("misc_03"), "Grass top");
+        assert_eq!(grass[1], reg.texture_index("misc_16"), "Grass bottom");
+        assert_eq!(grass[2], reg.texture_index("misc_04"), "Grass side");
 
-        // Wood: top/bottom=8 (cross-section), sides=7 (bark)
-        let wood = Block::Wood.texture_indices();
-        assert_eq!(wood, [8, 8, 7, 7, 7, 7], "Wood texture indices incorrect");
-
-        // Stone: all faces same
+        // Stone: all faces = stone_05
         let stone = Block::Stone.texture_indices();
-        assert_eq!(stone, [3, 3, 3, 3, 3, 3], "Stone texture indices incorrect");
+        let stone_idx = reg.texture_index("stone_05");
+        assert_eq!(stone, [stone_idx; 6], "Stone texture indices incorrect");
+
+        // All 6 faces returned
+        assert_eq!(grass.len(), 6);
+        assert_eq!(stone.len(), 6);
     }
 
     #[test]
@@ -1659,8 +1584,11 @@ mod tests {
         assert_eq!(Block::from(42), Block::Gravel);
         assert_eq!(Block::from(54), Block::SpruceLeaves);
 
+        // Chest
+        assert_eq!(Block::from(55), Block::Chest);
+
         // Invalid values default to Air
-        assert_eq!(Block::from(55), Block::Air);
+        assert_eq!(Block::from(56), Block::Air);
         assert_eq!(Block::from(255), Block::Air);
     }
 

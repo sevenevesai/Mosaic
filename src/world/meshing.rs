@@ -344,7 +344,7 @@ const fn face_index(axis: Axis, positive: bool) -> usize {
 }
 
 /// Maximum number of texture indices (8x8 atlas = 64 textures)
-const MAX_TEXTURES: usize = 64; // Support up to 64 texture types
+const MAX_TEXTURES: usize = 256; // Support up to 256 texture types (16x16 atlas)
 
 /// Sample the combined light level at a block position
 /// Checks neighbor chunks if position is outside current chunk bounds
@@ -492,12 +492,9 @@ fn build_chunk_mesh_simple(
 
 #[allow(dead_code)]
 fn get_tile_uvs(tex_idx: u32) -> ([f32; 2], [f32; 2], [f32; 2], [f32; 2]) {
-    let tiles_per_row = 8u32; // 8x8 grid of 256x256 tiles
+    let tiles_per_row = crate::constants::TILES_PER_ROW;
     let tile_size = 1.0 / tiles_per_row as f32;
-    // Half-texel inset to prevent bilinear filtering from sampling neighboring tiles
-    // Atlas is 2048x2048, so half texel = 0.5/2048 ≈ 0.000244
-    // Use slightly larger inset to also help with mipmapping
-    let inset = 0.001; // ~2 texels of padding
+    let inset = 0.001;
     let u0 = (tex_idx % tiles_per_row) as f32 * tile_size + inset;
     let v0 = (tex_idx / tiles_per_row) as f32 * tile_size + inset;
     let u1 = u0 + tile_size - inset * 2.0;
@@ -821,7 +818,7 @@ fn greedy_mesh_foliage_axis(
         // ═══════════════════════════════════════════════════════════════════
 
         let mut texture_masks = [[0u16; CHUNK_SIZE]; MAX_TEXTURES];
-        let mut textures_present: u64 = 0;
+        let mut textures_present_list: Vec<usize> = Vec::new();
 
         for v in 0..CHUNK_SIZE {
             let mut row_bits = visible_mask[v];
@@ -832,8 +829,10 @@ fn greedy_mesh_foliage_axis(
                 // Get texture index for this foliage block
                 let tex_idx = block_types[v][u].texture_indices()[0] as usize;
 
+                if texture_masks[tex_idx][v] == 0 && !textures_present_list.contains(&tex_idx) {
+                    textures_present_list.push(tex_idx);
+                }
                 texture_masks[tex_idx][v] |= 1 << u;
-                textures_present |= 1 << tex_idx;
             }
         }
 
@@ -841,10 +840,7 @@ fn greedy_mesh_foliage_axis(
         // PHASE 5: Binary Greedy Merge for each texture
         // ═══════════════════════════════════════════════════════════════════
 
-        while textures_present != 0 {
-            let tex_idx = textures_present.trailing_zeros() as usize;
-            textures_present &= textures_present - 1;
-
+        for &tex_idx in &textures_present_list {
             let tex_mask = &mut texture_masks[tex_idx];
 
             for start_v in 0..CHUNK_SIZE {
@@ -942,9 +938,9 @@ fn add_emissive_blocks(
 
                 // Get texture UVs with half-texel inset
                 let tex_idx = block.texture_indices()[0];
-                let tiles_per_row = 8u32;
+                let tiles_per_row = crate::constants::TILES_PER_ROW;
                 let tile_size = 1.0 / tiles_per_row as f32;
-                let inset = 0.001; // ~2 texels of padding to prevent bleeding
+                let inset = 0.001;
                 let u0 = (tex_idx % tiles_per_row) as f32 * tile_size + inset;
                 let v0 = (tex_idx / tiles_per_row) as f32 * tile_size + inset;
                 let u1 = u0 + tile_size - inset * 2.0;
@@ -1366,7 +1362,7 @@ fn binary_greedy_mesh_axis(
 
         // Per-texture visibility masks: texture_masks[tex_idx][row] = bitmask
         let mut texture_masks = [[0u16; CHUNK_SIZE]; MAX_TEXTURES];
-        let mut textures_present: u64 = 0; // Tracks which textures have faces (up to 64)
+        let mut textures_present: Vec<usize> = Vec::new(); // Tracks which texture indices have faces
 
         for v in 0..CHUNK_SIZE {
             let mut row_bits = visible_mask[v];
@@ -1381,8 +1377,13 @@ fn binary_greedy_mesh_axis(
                 let tex_idx = block_types[v][u].face_texture(face_idx) as usize;
 
                 // Set bit in that texture's mask
+                if texture_masks[tex_idx][v] == 0 {
+                    // First bit for this texture in this row — check if texture is new
+                    if !textures_present.contains(&tex_idx) {
+                        textures_present.push(tex_idx);
+                    }
+                }
                 texture_masks[tex_idx][v] |= 1 << u;
-                textures_present |= 1 << tex_idx;
             }
         }
 
@@ -1460,27 +1461,23 @@ fn binary_greedy_mesh_axis(
         // This prevents the greedy merger from merging across AO boundaries,
         // eliminating the gradient smearing that causes dark blobs on terrain.
         let mut texture_masks_occluded = [[0u16; CHUNK_SIZE]; MAX_TEXTURES];
-        let mut textures_present_occluded: u64 = 0;
-        for tex_idx in 0..MAX_TEXTURES {
+        let mut textures_present_occluded: Vec<usize> = Vec::new();
+        for &tex_idx in &textures_present {
             for v in 0..CHUNK_SIZE {
                 let occluded_bits = texture_masks[tex_idx][v] & ao_occluded_mask[v];
                 if occluded_bits != 0 {
                     texture_masks_occluded[tex_idx][v] = occluded_bits;
-                    textures_present_occluded |= 1 << tex_idx;
+                    if !textures_present_occluded.contains(&tex_idx) {
+                        textures_present_occluded.push(tex_idx);
+                    }
                 }
                 texture_masks[tex_idx][v] &= !ao_occluded_mask[v]; // Clean only
             }
         }
         // Recompute textures_present for clean masks (some textures may now be empty)
-        textures_present = 0;
-        for tex_idx in 0..MAX_TEXTURES {
-            for v in 0..CHUNK_SIZE {
-                if texture_masks[tex_idx][v] != 0 {
-                    textures_present |= 1 << tex_idx;
-                    break;
-                }
-            }
-        }
+        textures_present.retain(|&tex_idx| {
+            (0..CHUNK_SIZE).any(|v| texture_masks[tex_idx][v] != 0)
+        });
 
         // ═══════════════════════════════════════════════════════════════════
         // PHASE 4: Binary Greedy Merge for each texture
@@ -1497,10 +1494,7 @@ fn binary_greedy_mesh_axis(
         // ═══════════════════════════════════════════════════════════════════
 
         // --- Pass 1: Clean faces (no AO occluders) ---
-        while textures_present != 0 {
-            let tex_idx = textures_present.trailing_zeros() as usize;
-            textures_present &= textures_present - 1;
-
+        for tex_idx in textures_present {
             let tex_mask = &mut texture_masks[tex_idx];
 
             // Process all faces for this texture using binary operations
@@ -1610,10 +1604,7 @@ fn binary_greedy_mesh_axis(
 
         // --- Pass 2: Occluded faces (have AO occluders) ---
         // Same greedy merge algorithm, applied to the occluded sub-masks
-        while textures_present_occluded != 0 {
-            let tex_idx = textures_present_occluded.trailing_zeros() as usize;
-            textures_present_occluded &= textures_present_occluded - 1;
-
+        for tex_idx in textures_present_occluded {
             let tex_mask = &mut texture_masks_occluded[tex_idx];
 
             for start_v in 0..CHUNK_SIZE {
@@ -2415,9 +2406,9 @@ fn emit_greedy_quad(
     let base_index = vertices.len() as u32;
 
     // Get UVs from texture atlas with half-texel inset to prevent bleeding
-    let tiles_per_row = 8u32; // 8x8 grid of 256x256 tiles
+    let tiles_per_row = crate::constants::TILES_PER_ROW;
     let tile_size = 1.0 / tiles_per_row as f32;
-    let inset = 0.001; // ~2 texels of padding to prevent bleeding
+    let inset = 0.001;
     let uv_u0 = (texture_idx % tiles_per_row) as f32 * tile_size + inset;
     let uv_v0 = (texture_idx / tiles_per_row) as f32 * tile_size + inset;
     let uv_u1 = uv_u0 + tile_size - inset * 2.0;

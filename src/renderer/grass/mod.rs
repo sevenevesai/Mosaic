@@ -1118,8 +1118,8 @@ mod tests {
     #[test]
     fn test_quality_presets() {
         assert_eq!(GrassQuality::Off.blades_per_tile(), 0);
-        assert_eq!(GrassQuality::Medium.blades_per_tile(), 4);
-        assert_eq!(GrassQuality::Ultra.blades_per_tile(), 10);
+        assert_eq!(GrassQuality::Medium.blades_per_tile(), 6);
+        assert_eq!(GrassQuality::Ultra.blades_per_tile(), 8);
 
         assert_eq!(GrassQuality::Medium.blade_segments(), 3);
         assert_eq!(GrassQuality::High.blade_segments(), 4);

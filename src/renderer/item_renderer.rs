@@ -447,11 +447,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         default: { tile_index = in.textures.z; } // Sides (left, right, front, back)
     }
 
-    // Atlas is 8x8 tiles (64 tiles), each tile is 256x256 in a 2048x2048 atlas
-    let tiles_per_row = 8u;
+    // Atlas is 16x16 tiles (256 slots), each tile is 64x64 in a 1024x1024 atlas
+    let tiles_per_row = 16u;
     let tile_size = 1.0 / f32(tiles_per_row);
-    let atlas_size = 2048.0;
-    let tile_pixels = atlas_size / f32(tiles_per_row); // 256 pixels per tile
+    let atlas_size = 1024.0;
+    let tile_pixels = atlas_size / f32(tiles_per_row); // 64 pixels per tile
 
     // Half-texel inset to prevent bleeding at edges
     let half_texel = 0.5 / atlas_size;

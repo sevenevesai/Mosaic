@@ -2,6 +2,7 @@
 //!
 //! Handles chunks, terrain generation, and mesh building.
 
+pub mod block_registry;
 pub mod chest;
 mod chunk;
 pub mod generation;

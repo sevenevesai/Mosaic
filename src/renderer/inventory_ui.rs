@@ -114,15 +114,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         return in.color;
     } else {
         // Texture sampling mode
-        // Atlas is 8x8 tiles
-        let tiles_per_row = 8.0;
+        // Atlas is 16x16 tiles
+        let tiles_per_row = 16.0;
         let tile_size = 1.0 / tiles_per_row;
 
         let tile_x = in.tex_index % tiles_per_row;
         let tile_y = floor(in.tex_index / tiles_per_row);
 
         // Calculate UV within tile, with half-texel inset to prevent bleeding
-        let inset = 0.5 / 256.0; // Assuming 256px tile size
+        let inset = 0.5 / 64.0; // Half-texel inset for 64px tiles
         let tile_uv = vec2<f32>(
             tile_x * tile_size + in.uv.x * (tile_size - 2.0 * inset) + inset,
             tile_y * tile_size + in.uv.y * (tile_size - 2.0 * inset) + inset

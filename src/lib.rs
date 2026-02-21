@@ -38,8 +38,11 @@ pub mod constants {
     pub const LOD_HALF_DETAIL: i32 = 22;     // Half detail (medium range)
     pub const LOD_QUARTER_DETAIL: i32 = 32;  // Quarter detail (far range)
 
-    /// Texture atlas tile size (pixel art)
-    pub const TEXTURE_TILE_SIZE: u32 = 256;
+    /// Texture atlas tile size (64x64 block textures)
+    pub const TEXTURE_TILE_SIZE: u32 = 64;
+
+    /// Atlas grid dimensions (16x16 = 256 slots)
+    pub const TILES_PER_ROW: u32 = 16;
 
     /// Block scale - size of each block in world units
     /// 1.0 = standard Minecraft-like blocks

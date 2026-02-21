@@ -1413,9 +1413,9 @@ fn sample_torch_light(world_pos: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Texture sampling (same as original)
-    let tiles_per_row = 8.0;
+    let tiles_per_row = 16.0;
     let tile_size = 1.0 / tiles_per_row;
-    let tile_pixels = 256.0;
+    let tile_pixels = 64.0;
     let tile_base = floor(in.uv / tile_size) * tile_size;
 
     var world_2d: vec2<f32>;
@@ -1436,8 +1436,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let dy = world_dy;
     let max_deriv = max(max(abs(dx.x), abs(dx.y)), max(abs(dy.x), abs(dy.y)));
     let approx_mip = max(0.0, log2(max_deriv * 1024.0 + 1.0));
-    let mip_scale = pow(2.0, min(approx_mip, 6.0));
-    let margin = (mip_scale * 1.5) / (tile_pixels * tiles_per_row);
+    let mip_scale = pow(2.0, min(approx_mip, 4.0));
+    let margin = min((mip_scale * 0.75) / (tile_pixels * tiles_per_row), tile_size * 0.25);
 
     let clamped_uv = clamp(uv_in_tile, vec2<f32>(margin), vec2<f32>(tile_size - margin));
     let tiled_uv = tile_base + clamped_uv;
