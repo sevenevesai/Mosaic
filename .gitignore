@@ -108,3 +108,29 @@ tarpaulin-report.html
 # Archive folder for reference repos
 archive/
 .loom.json
+
+# Personal planning, research, and strategy docs
+market-research.txt
+feature_ideas-*.txt
+reddit.md
+plan.md
+soundsys.md
+gpuvortexgiplan.md
+csmlod.txt
+GEMINI.md
+HMTAA-feedback.txt
+SHADOW_OPTIMIZATION_PLAN.md
+doc_gameplay*.md
+Procedural Terrain*.md
+
+# Docs folder (internal feature plans, prompts, research)
+/docs/
+
+# Claude skills (internal tooling)
+.claude/skills/
+
+# Game settings (user-specific)
+settings.cfg
+
+# Session logs
+session_stderr.log
