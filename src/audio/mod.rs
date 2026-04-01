@@ -178,6 +178,23 @@ impl SoundMaterial {
 
             // Special cases
             Block::Air | Block::Water | Block::Torch => SoundMaterial::Generic,
+
+            // Texture catalog blocks — map by category prefix
+            b => {
+                let id = b as u8;
+                match id {
+                    56..=64 => SoundMaterial::Wood,     // Bark
+                    65..=91 => SoundMaterial::Foliage,  // Leaf
+                    92 => SoundMaterial::Stone,          // Magma
+                    93..=103 => SoundMaterial::Generic,  // Misc
+                    104 => SoundMaterial::Sand,           // Sand
+                    105..=108 => SoundMaterial::Snow,     // Snow
+                    109..=153 => SoundMaterial::Stone,    // Stone
+                    154..=158 => SoundMaterial::Stone,    // Tile
+                    159..=179 => SoundMaterial::Wood,     // Wood
+                    _ => SoundMaterial::Generic,
+                }
+            }
         }
     }
 

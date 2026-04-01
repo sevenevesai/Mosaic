@@ -317,6 +317,74 @@ impl BlockRegistry {
         // Chest (55) — wood planks (rendered as vox prop)
         table[55] = uniform("wood_13");
 
+        // === Texture catalog blocks (56-179) ===
+        table[56] = uniform("bark_03"); table[57] = uniform("bark_05");
+        table[58] = uniform("bark_06"); table[59] = uniform("bark_08");
+        table[60] = uniform("bark_09"); table[61] = uniform("bark_11");
+        table[62] = uniform("bark_12"); table[63] = uniform("bark_13");
+        table[64] = uniform("bark_14");
+        table[65] = uniform("leaf_01"); table[66] = uniform("leaf_02");
+        table[67] = uniform("leaf_03"); table[68] = uniform("leaf_04");
+        table[69] = uniform("leaf_06"); table[70] = uniform("leaf_07");
+        table[71] = uniform("leaf_08"); table[72] = uniform("leaf_09");
+        table[73] = uniform("leaf_10"); table[74] = uniform("leaf_11");
+        table[75] = uniform("leaf_12"); table[76] = uniform("leaf_13");
+        table[77] = uniform("leaf_14"); table[78] = uniform("leaf_15");
+        table[79] = uniform("leaf_16"); table[80] = uniform("leaf_18");
+        table[81] = uniform("leaf_19"); table[82] = uniform("leaf_20");
+        table[83] = uniform("leaf_21"); table[84] = uniform("leaf_22");
+        table[85] = uniform("leaf_23"); table[86] = uniform("leaf_25");
+        table[87] = uniform("leaf_27"); table[88] = uniform("leaf_28");
+        table[89] = uniform("leaf_29"); table[90] = uniform("leaf_31");
+        table[91] = uniform("leaf_32");
+        table[92] = uniform("magma_01");
+        table[93] = uniform("misc_05"); table[94] = uniform("misc_06");
+        table[95] = uniform("misc_07"); table[96] = uniform("misc_08");
+        table[97] = uniform("misc_09"); table[98] = uniform("misc_10");
+        table[99] = uniform("misc_11"); table[100] = uniform("misc_12");
+        table[101] = uniform("misc_13"); table[102] = uniform("misc_18");
+        table[103] = uniform("misc_19");
+        table[104] = uniform("sand_03");
+        table[105] = uniform("snow_01"); table[106] = uniform("snow_03");
+        table[107] = uniform("snow_05"); table[108] = uniform("snow_08");
+        table[109] = uniform("stone_02"); table[110] = uniform("stone_03");
+        table[111] = uniform("stone_06"); table[112] = uniform("stone_08");
+        table[113] = uniform("stone_10"); table[114] = uniform("stone_11");
+        table[115] = uniform("stone_12"); table[116] = uniform("stone_13");
+        table[117] = uniform("stone_14"); table[118] = uniform("stone_15");
+        table[119] = uniform("stone_16"); table[120] = uniform("stone_17");
+        table[121] = uniform("stone_18"); table[122] = uniform("stone_19");
+        table[123] = uniform("stone_20"); table[124] = uniform("stone_21");
+        table[125] = uniform("stone_22"); table[126] = uniform("stone_23");
+        table[127] = uniform("stone_24"); table[128] = uniform("stone_25");
+        table[129] = uniform("stone_26"); table[130] = uniform("stone_27");
+        table[131] = uniform("stone_28"); table[132] = uniform("stone_29");
+        table[133] = uniform("stone_30"); table[134] = uniform("stone_31");
+        table[135] = uniform("stone_32"); table[136] = uniform("stone_33");
+        table[137] = uniform("stone_34"); table[138] = uniform("stone_35");
+        table[139] = uniform("stone_36"); table[140] = uniform("stone_37");
+        table[141] = uniform("stone_38"); table[142] = uniform("stone_39");
+        table[143] = uniform("stone_40"); table[144] = uniform("stone_41");
+        table[145] = uniform("stone_42"); table[146] = uniform("stone_43");
+        table[147] = uniform("stone_44"); table[148] = uniform("stone_45");
+        table[149] = uniform("stone_46"); table[150] = uniform("stone_47");
+        table[151] = uniform("stone_48"); table[152] = uniform("stone_51");
+        table[153] = uniform("stone_52");
+        table[154] = uniform("tile_01"); table[155] = uniform("tile_02");
+        table[156] = uniform("tile_03"); table[157] = uniform("tile_04");
+        table[158] = uniform("tile_05");
+        table[159] = uniform("wood_01"); table[160] = uniform("wood_02");
+        table[161] = uniform("wood_03"); table[162] = uniform("wood_04");
+        table[163] = uniform("wood_05"); table[164] = uniform("wood_06");
+        table[165] = uniform("wood_07"); table[166] = uniform("wood_08");
+        table[167] = uniform("wood_09"); table[168] = uniform("wood_10");
+        table[169] = uniform("wood_11"); table[170] = uniform("wood_12");
+        table[171] = uniform("wood_14"); table[172] = uniform("wood_15");
+        table[173] = uniform("wood_16"); table[174] = uniform("wood_17");
+        table[175] = uniform("wood_18"); table[176] = uniform("wood_19");
+        table[177] = uniform("wood_20"); table[178] = uniform("wood_21");
+        table[179] = uniform("wood_23");
+
         table
     }
 }

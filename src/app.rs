@@ -592,18 +592,26 @@ impl App {
                         // to avoid race conditions with the render pipeline
                     }
                 } else if self.player.is_inventory_open() {
-                    // Handle inventory clicks
+                    // Handle inventory and catalog clicks
                     let size = self.window.inner_size();
                     let (mx, my) = self.player.inventory.mouse_pos();
+                    let sw = size.width as f32;
+                    let sh = size.height as f32;
                     if state == ElementState::Pressed {
-                        match button {
-                            MouseButton::Left => {
-                                self.player.inventory.handle_click(mx, my, size.width as f32, size.height as f32);
+                        // Check catalog first
+                        if let Some(cat_idx) = self.player.inventory.get_catalog_slot_at(mx, my, sw, sh) {
+                            let right = matches!(button, MouseButton::Right);
+                            self.player.inventory.handle_catalog_click(cat_idx, right);
+                        } else {
+                            match button {
+                                MouseButton::Left => {
+                                    self.player.inventory.handle_click(mx, my, sw, sh);
+                                }
+                                MouseButton::Right => {
+                                    self.player.inventory.handle_right_click(mx, my, sw, sh);
+                                }
+                                _ => {}
                             }
-                            MouseButton::Right => {
-                                self.player.inventory.handle_right_click(mx, my, size.width as f32, size.height as f32);
-                            }
-                            _ => {}
                         }
                     }
                 } else if !self.cursor_grabbed {
@@ -626,6 +634,9 @@ impl App {
                 if self.settings_menu.is_open {
                     // Handle menu scrolling
                     self.settings_menu.scroll(scroll);
+                } else if self.player.is_inventory_open() {
+                    // Scroll the creative catalog sidebar
+                    self.player.inventory.scroll_catalog(-scroll);
                 } else if !self.player.is_inventory_open() {
                     if self.player.is_third_person() && self.player.is_sprinting() {
                         // Ctrl+scroll in third person: adjust camera distance
@@ -647,8 +658,11 @@ impl App {
                 }
                 if self.player.is_inventory_open() {
                     let size = self.window.inner_size();
+                    let sw = size.width as f32;
+                    let sh = size.height as f32;
                     self.player.inventory.update_mouse(x, y);
-                    self.player.inventory.update_hover(x, y, size.width as f32, size.height as f32);
+                    self.player.inventory.update_hover(x, y, sw, sh);
+                    self.player.inventory.update_catalog_hover(x, y, sw, sh);
                 }
             }
 

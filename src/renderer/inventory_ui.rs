@@ -5,7 +5,7 @@
 //! - Item icons from block texture atlas
 //! - Stack count numbers
 
-use crate::inventory::{Inventory, HOTBAR_SIZE, layout};
+use crate::inventory::{Inventory, HOTBAR_SIZE, layout, catalog_layout};
 use crate::inventory::item::Item;
 use wgpu::util::DeviceExt;
 
@@ -149,7 +149,7 @@ pub struct InventoryUI {
 
 impl InventoryUI {
     /// Maximum vertices in vertex buffer (enough for full inventory + held item)
-    const MAX_VERTICES: usize = 4096;
+    const MAX_VERTICES: usize = 8192;
 
     pub fn new(
         device: &wgpu::Device,
@@ -379,6 +379,144 @@ impl InventoryUI {
 
                         if stack.locked {
                             self.add_lock_indicator(&mut vertices, x + 2.0, y + 2.0);
+                        }
+                    }
+                }
+            }
+
+            // ========== CREATIVE CATALOG SIDEBAR ==========
+            {
+                let cat_slot = catalog_layout::SLOT_SIZE;
+                let cat_pad = catalog_layout::SLOT_PADDING;
+                let cat_cols = catalog_layout::COLUMNS;
+                let panel_pad = catalog_layout::PANEL_PADDING;
+                let header_h = catalog_layout::HEADER_HEIGHT;
+
+                let catalog_blocks = inventory.catalog_blocks();
+                let num_rows = (catalog_blocks.len() + cat_cols - 1) / cat_cols;
+
+                // Position catalog to the right of the inventory
+                let inv_right = hotbar_x + hotbar_width;
+                let catalog_panel_x = inv_right + catalog_layout::SIDEBAR_GAP;
+                let catalog_grid_x = catalog_panel_x + panel_pad;
+
+                // Vertical alignment: match main inventory top
+                let catalog_panel_y = main_inv_y - 10.0;
+                let catalog_grid_y = catalog_panel_y + panel_pad + header_h;
+
+                // Panel dimensions
+                let panel_w = panel_pad * 2.0 + cat_cols as f32 * (cat_slot + cat_pad) - cat_pad;
+                let panel_h = panel_pad * 2.0 + header_h + num_rows as f32 * (cat_slot + cat_pad) - cat_pad;
+
+                // Dark background panel
+                self.add_rect(&mut vertices, catalog_panel_x, catalog_panel_y, panel_w, panel_h, [0.05, 0.05, 0.05, 0.9]);
+
+                // "BLOCKS" header — simple rect-letter approach
+                {
+                    let header_x = catalog_panel_x + panel_pad;
+                    let header_y = catalog_panel_y + panel_pad;
+                    let letter_h = 14.0;
+                    let letter_w = 8.0;
+                    let gap = 2.0;
+                    let header_color = [0.7, 0.7, 0.7, 1.0];
+
+                    // B
+                    let bx = header_x;
+                    self.add_rect(&mut vertices, bx, header_y, 2.0, letter_h, header_color);
+                    self.add_rect(&mut vertices, bx, header_y, letter_w - 1.0, 2.0, header_color);
+                    self.add_rect(&mut vertices, bx, header_y + letter_h / 2.0 - 1.0, letter_w - 1.0, 2.0, header_color);
+                    self.add_rect(&mut vertices, bx, header_y + letter_h - 2.0, letter_w - 1.0, 2.0, header_color);
+                    self.add_rect(&mut vertices, bx + letter_w - 2.0, header_y + 1.0, 2.0, letter_h / 2.0 - 2.0, header_color);
+                    self.add_rect(&mut vertices, bx + letter_w - 2.0, header_y + letter_h / 2.0, 2.0, letter_h / 2.0 - 1.0, header_color);
+
+                    // L
+                    let lx = bx + letter_w + gap;
+                    self.add_rect(&mut vertices, lx, header_y, 2.0, letter_h, header_color);
+                    self.add_rect(&mut vertices, lx, header_y + letter_h - 2.0, letter_w, 2.0, header_color);
+
+                    // O
+                    let ox = lx + letter_w + gap;
+                    self.add_rect_outline(&mut vertices, ox, header_y, letter_w, letter_h, 2.0, header_color);
+
+                    // C
+                    let cx = ox + letter_w + gap;
+                    self.add_rect(&mut vertices, cx, header_y, 2.0, letter_h, header_color);
+                    self.add_rect(&mut vertices, cx, header_y, letter_w, 2.0, header_color);
+                    self.add_rect(&mut vertices, cx, header_y + letter_h - 2.0, letter_w, 2.0, header_color);
+
+                    // K
+                    let kx = cx + letter_w + gap;
+                    self.add_rect(&mut vertices, kx, header_y, 2.0, letter_h, header_color);
+                    self.add_rect(&mut vertices, kx + 2.0, header_y + letter_h / 2.0 - 1.0, letter_w - 2.0, 2.0, header_color);
+                    self.add_rect(&mut vertices, kx + letter_w - 2.0, header_y, 2.0, letter_h / 2.0 - 1.0, header_color);
+                    self.add_rect(&mut vertices, kx + letter_w - 2.0, header_y + letter_h / 2.0 + 1.0, 2.0, letter_h / 2.0 - 1.0, header_color);
+
+                    // S
+                    let sx = kx + letter_w + gap;
+                    self.add_rect(&mut vertices, sx, header_y, letter_w, 2.0, header_color);
+                    self.add_rect(&mut vertices, sx, header_y + 1.0, 2.0, letter_h / 2.0 - 2.0, header_color);
+                    self.add_rect(&mut vertices, sx, header_y + letter_h / 2.0 - 1.0, letter_w, 2.0, header_color);
+                    self.add_rect(&mut vertices, sx + letter_w - 2.0, header_y + letter_h / 2.0, 2.0, letter_h / 2.0 - 1.0, header_color);
+                    self.add_rect(&mut vertices, sx, header_y + letter_h - 2.0, letter_w, 2.0, header_color);
+                }
+
+                // Catalog block slots
+                let scroll = inventory.catalog_scroll();
+                let hovered_cat = inventory.hovered_catalog_slot();
+                let cat_slot_bg = [0.15, 0.15, 0.15, 0.85];
+                let cat_hovered_border = [0.9, 0.9, 0.4, 1.0];
+
+                for (i, block) in catalog_blocks.iter().enumerate() {
+                    let col = i % cat_cols;
+                    let row = i / cat_cols;
+                    let sx = catalog_grid_x + col as f32 * (cat_slot + cat_pad);
+                    let sy = catalog_grid_y + row as f32 * (cat_slot + cat_pad) - scroll;
+
+                    // Skip if outside visible panel
+                    if sy + cat_slot < catalog_panel_y || sy > catalog_panel_y + panel_h {
+                        continue;
+                    }
+
+                    // Slot background
+                    self.add_rect(&mut vertices, sx, sy, cat_slot, cat_slot, cat_slot_bg);
+
+                    // Block texture
+                    let tex_index = block.texture_indices()[2] as f32; // Front face
+                    let icon_pad = 3.0;
+                    let icon_size = cat_slot - icon_pad * 2.0;
+                    self.add_textured_rect(&mut vertices, sx + icon_pad, sy + icon_pad, icon_size, icon_size, tex_index, [1.0, 1.0, 1.0, 1.0]);
+
+                    // Hover highlight
+                    if hovered_cat == Some(i) {
+                        self.add_rect_outline(&mut vertices, sx, sy, cat_slot, cat_slot, 2.0, cat_hovered_border);
+                    }
+                }
+
+                // Tooltip for hovered catalog block
+                if let Some(idx) = hovered_cat {
+                    if let Some(block) = catalog_blocks.get(idx) {
+                        let name = block.display_name();
+                        let (mx, my) = inventory.mouse_pos();
+
+                        // Tooltip background
+                        let char_w = 7.0;
+                        let char_h = 12.0;
+                        let tip_pad = 4.0;
+                        let tip_w = name.len() as f32 * char_w + tip_pad * 2.0;
+                        let tip_h = char_h + tip_pad * 2.0;
+                        let tip_x = mx + 12.0;
+                        let tip_y = my - tip_h - 4.0;
+
+                        self.add_rect(&mut vertices, tip_x, tip_y, tip_w, tip_h, [0.0, 0.0, 0.0, 0.9]);
+                        self.add_rect_outline(&mut vertices, tip_x, tip_y, tip_w, tip_h, 1.0, [0.5, 0.5, 0.5, 1.0]);
+
+                        // Render each character using simple rect strokes
+                        let text_color = [1.0, 1.0, 1.0, 1.0];
+                        let mut cx = tip_x + tip_pad;
+                        let cy = tip_y + tip_pad;
+                        for ch in name.chars() {
+                            self.add_simple_char(&mut vertices, ch, cx, cy, char_w, char_h, text_color);
+                            cx += char_w;
                         }
                     }
                 }
@@ -662,6 +800,47 @@ impl InventoryUI {
     fn add_lock_indicator(&self, vertices: &mut Vec<InventoryVertex>, x: f32, y: f32) {
         // Simple lock icon: small yellow/gold square
         self.add_rect(vertices, x, y, 8.0, 8.0, [0.8, 0.7, 0.2, 0.9]);
+    }
+
+    /// Render a simple character using rect strokes for tooltip text
+    fn add_simple_char(&self, vertices: &mut Vec<InventoryVertex>, ch: char, x: f32, y: f32, w: f32, h: f32, color: [f32; 4]) {
+        let t = 1.5; // stroke thickness
+        match ch.to_ascii_uppercase() {
+            'A' => { self.add_rect(vertices, x, y+t, t, h-t, color); self.add_rect(vertices, x+w-t, y+t, t, h-t, color); self.add_rect(vertices, x, y, w, t, color); self.add_rect(vertices, x, y+h/2.0, w, t, color); }
+            'B' => { self.add_rect(vertices, x, y, t, h, color); self.add_rect(vertices, x, y, w-t, t, color); self.add_rect(vertices, x, y+h/2.0, w-t, t, color); self.add_rect(vertices, x, y+h-t, w-t, t, color); self.add_rect(vertices, x+w-t, y+t, t, h/2.0-t, color); self.add_rect(vertices, x+w-t, y+h/2.0+t, t, h/2.0-t*2.0, color); }
+            'C' => { self.add_rect(vertices, x, y, t, h, color); self.add_rect(vertices, x, y, w, t, color); self.add_rect(vertices, x, y+h-t, w, t, color); }
+            'D' => { self.add_rect(vertices, x, y, t, h, color); self.add_rect(vertices, x, y, w-t, t, color); self.add_rect(vertices, x, y+h-t, w-t, t, color); self.add_rect(vertices, x+w-t, y+t, t, h-t*2.0, color); }
+            'E' => { self.add_rect(vertices, x, y, t, h, color); self.add_rect(vertices, x, y, w, t, color); self.add_rect(vertices, x, y+h/2.0, w*0.7, t, color); self.add_rect(vertices, x, y+h-t, w, t, color); }
+            'F' => { self.add_rect(vertices, x, y, t, h, color); self.add_rect(vertices, x, y, w, t, color); self.add_rect(vertices, x, y+h/2.0, w*0.7, t, color); }
+            'G' => { self.add_rect(vertices, x, y, t, h, color); self.add_rect(vertices, x, y, w, t, color); self.add_rect(vertices, x, y+h-t, w, t, color); self.add_rect(vertices, x+w-t, y+h/2.0, t, h/2.0, color); self.add_rect(vertices, x+w/2.0, y+h/2.0, w/2.0, t, color); }
+            'H' => { self.add_rect(vertices, x, y, t, h, color); self.add_rect(vertices, x+w-t, y, t, h, color); self.add_rect(vertices, x, y+h/2.0, w, t, color); }
+            'I' => { self.add_rect(vertices, x+w/2.0-t/2.0, y, t, h, color); self.add_rect(vertices, x, y, w, t, color); self.add_rect(vertices, x, y+h-t, w, t, color); }
+            'J' => { self.add_rect(vertices, x+w-t, y, t, h-t, color); self.add_rect(vertices, x, y+h-t, w, t, color); self.add_rect(vertices, x, y+h/2.0, t, h/2.0-t, color); }
+            'K' => { self.add_rect(vertices, x, y, t, h, color); self.add_rect(vertices, x+w-t, y, t, h/2.0, color); self.add_rect(vertices, x+w-t, y+h/2.0, t, h/2.0, color); self.add_rect(vertices, x+t, y+h/2.0-t/2.0, w-t*2.0, t, color); }
+            'L' => { self.add_rect(vertices, x, y, t, h, color); self.add_rect(vertices, x, y+h-t, w, t, color); }
+            'M' => { self.add_rect(vertices, x, y, t, h, color); self.add_rect(vertices, x+w-t, y, t, h, color); self.add_rect(vertices, x+t, y, t, h/2.0, color); self.add_rect(vertices, x+w-t*2.0, y, t, h/2.0, color); }
+            'N' => { self.add_rect(vertices, x, y, t, h, color); self.add_rect(vertices, x+w-t, y, t, h, color); self.add_rect(vertices, x+t, y+t, t, h/3.0, color); self.add_rect(vertices, x+w/2.0-t/2.0, y+h/3.0, t, h/3.0, color); }
+            'O' => { self.add_rect_outline(vertices, x, y, w, h, t, color); }
+            'P' => { self.add_rect(vertices, x, y, t, h, color); self.add_rect(vertices, x, y, w, t, color); self.add_rect(vertices, x, y+h/2.0, w, t, color); self.add_rect(vertices, x+w-t, y+t, t, h/2.0-t, color); }
+            'Q' => { self.add_rect_outline(vertices, x, y, w, h, t, color); self.add_rect(vertices, x+w/2.0, y+h/2.0, w/2.0, t, color); }
+            'R' => { self.add_rect(vertices, x, y, t, h, color); self.add_rect(vertices, x, y, w, t, color); self.add_rect(vertices, x, y+h/2.0, w, t, color); self.add_rect(vertices, x+w-t, y+t, t, h/2.0-t, color); self.add_rect(vertices, x+w-t, y+h/2.0+t, t, h/2.0-t, color); }
+            'S' => { self.add_rect(vertices, x, y, w, t, color); self.add_rect(vertices, x, y+t, t, h/2.0-t, color); self.add_rect(vertices, x, y+h/2.0, w, t, color); self.add_rect(vertices, x+w-t, y+h/2.0+t, t, h/2.0-t*2.0, color); self.add_rect(vertices, x, y+h-t, w, t, color); }
+            'T' => { self.add_rect(vertices, x, y, w, t, color); self.add_rect(vertices, x+w/2.0-t/2.0, y+t, t, h-t, color); }
+            'U' => { self.add_rect(vertices, x, y, t, h, color); self.add_rect(vertices, x+w-t, y, t, h, color); self.add_rect(vertices, x+t, y+h-t, w-t*2.0, t, color); }
+            'V' => { self.add_rect(vertices, x, y, t, h*0.7, color); self.add_rect(vertices, x+w-t, y, t, h*0.7, color); self.add_rect(vertices, x+w/2.0-t/2.0, y+h*0.7, t, h*0.3, color); }
+            'W' => { self.add_rect(vertices, x, y, t, h, color); self.add_rect(vertices, x+w-t, y, t, h, color); self.add_rect(vertices, x+w/2.0-t/2.0, y+h/2.0, t, h/2.0, color); self.add_rect(vertices, x+t, y+h-t, w-t*2.0, t, color); }
+            'X' => { self.add_rect(vertices, x, y, t, h/2.0, color); self.add_rect(vertices, x+w-t, y, t, h/2.0, color); self.add_rect(vertices, x+w/2.0-t/2.0, y+h/2.0-t/2.0, t, t, color); self.add_rect(vertices, x, y+h/2.0, t, h/2.0, color); self.add_rect(vertices, x+w-t, y+h/2.0, t, h/2.0, color); }
+            'Y' => { self.add_rect(vertices, x, y, t, h/2.0, color); self.add_rect(vertices, x+w-t, y, t, h/2.0, color); self.add_rect(vertices, x+w/2.0-t/2.0, y+h/2.0, t, h/2.0, color); self.add_rect(vertices, x, y+h/2.0, w, t, color); }
+            'Z' => { self.add_rect(vertices, x, y, w, t, color); self.add_rect(vertices, x+w-t, y+t, t, h/2.0-t, color); self.add_rect(vertices, x, y+h/2.0, t, h/2.0-t, color); self.add_rect(vertices, x, y+h-t, w, t, color); }
+            '0'..='9' => {
+                let d = (ch as u8 - b'0') as u8;
+                self.add_digit(vertices, x, y, w - 1.0, h, d);
+            }
+            ' ' => {} // space: no rendering
+            _ => { // Unknown: small dot
+                self.add_rect(vertices, x + w/2.0 - 1.0, y + h/2.0 - 1.0, 2.0, 2.0, color);
+            }
+        }
     }
 
     /// Render the inventory UI

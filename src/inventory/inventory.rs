@@ -32,6 +32,22 @@ pub mod layout {
     pub const SELECTION_WIDTH: f32 = 3.0;
 }
 
+/// Creative catalog layout constants
+pub mod catalog_layout {
+    /// Slot size in pixels (smaller than inventory slots)
+    pub const SLOT_SIZE: f32 = 40.0;
+    /// Padding between catalog slots
+    pub const SLOT_PADDING: f32 = 3.0;
+    /// Number of columns in the catalog grid
+    pub const COLUMNS: usize = 6;
+    /// Gap between inventory panel and catalog sidebar
+    pub const SIDEBAR_GAP: f32 = 16.0;
+    /// Padding inside the catalog panel
+    pub const PANEL_PADDING: f32 = 8.0;
+    /// Height of the "BLOCKS" header area
+    pub const HEADER_HEIGHT: f32 = 24.0;
+}
+
 /// Player inventory with hotbar and main storage
 /// Layout: slots 0-8 = hotbar, slots 9-35 = main inventory
 pub struct Inventory {
@@ -47,6 +63,12 @@ pub struct Inventory {
     mouse_pos: (f32, f32),
     /// Hovered slot index
     hovered_slot: Option<usize>,
+    /// Creative catalog: scroll offset in pixels
+    catalog_scroll: f32,
+    /// Creative catalog: currently hovered block index (into all_placeable list)
+    hovered_catalog_slot: Option<usize>,
+    /// Cached list of all placeable blocks
+    catalog_blocks: Vec<Block>,
 }
 
 impl Inventory {
@@ -59,6 +81,9 @@ impl Inventory {
             held_item: None,
             mouse_pos: (0.0, 0.0),
             hovered_slot: None,
+            catalog_scroll: 0.0,
+            hovered_catalog_slot: None,
+            catalog_blocks: Block::all_placeable(),
         }
     }
 
@@ -84,6 +109,9 @@ impl Inventory {
             held_item: None,
             mouse_pos: (0.0, 0.0),
             hovered_slot: None,
+            catalog_scroll: 0.0,
+            hovered_catalog_slot: None,
+            catalog_blocks: Block::all_placeable(),
         }
     }
 
@@ -346,6 +374,8 @@ impl Inventory {
                 self.add_item(held.item, held.count);
             }
             self.hovered_slot = None;
+            self.hovered_catalog_slot = None;
+            self.catalog_scroll = 0.0;
         }
     }
 
@@ -445,6 +475,77 @@ impl Inventory {
     /// Get slot index at mouse position for hover highlighting
     pub fn hovered_slot(&self) -> Option<usize> {
         self.hovered_slot
+    }
+
+    // ========== CREATIVE CATALOG ==========
+
+    /// Get the list of all placeable blocks for the catalog
+    pub fn catalog_blocks(&self) -> &[Block] {
+        &self.catalog_blocks
+    }
+
+    /// Get the currently hovered catalog slot
+    pub fn hovered_catalog_slot(&self) -> Option<usize> {
+        self.hovered_catalog_slot
+    }
+
+    /// Get the current catalog scroll offset
+    pub fn catalog_scroll(&self) -> f32 {
+        self.catalog_scroll
+    }
+
+    /// Scroll the catalog by a delta (positive = scroll down)
+    pub fn scroll_catalog(&mut self, delta: f32) {
+        use catalog_layout::*;
+        let num_rows = (self.catalog_blocks.len() + COLUMNS - 1) / COLUMNS;
+        let content_height = num_rows as f32 * (SLOT_SIZE + SLOT_PADDING);
+        let max_scroll = (content_height - 200.0).max(0.0); // 200px approximate visible area
+        self.catalog_scroll = (self.catalog_scroll + delta * 30.0).clamp(0.0, max_scroll);
+    }
+
+    /// Get catalog slot at screen position. Returns index into catalog_blocks.
+    pub fn get_catalog_slot_at(&self, mouse_x: f32, mouse_y: f32, screen_width: f32, screen_height: f32) -> Option<usize> {
+        if !self.is_open {
+            return None;
+        }
+
+        // Compute where the catalog panel starts (same logic as renderer)
+        let inv_grid_width = (HOTBAR_SIZE as f32 * layout::SLOT_SIZE) + ((HOTBAR_SIZE - 1) as f32 * layout::SLOT_PADDING);
+        let inv_start_x = (screen_width - inv_grid_width) / 2.0;
+        let inv_right = inv_start_x + inv_grid_width;
+
+        let catalog_x = inv_right + catalog_layout::SIDEBAR_GAP + catalog_layout::PANEL_PADDING;
+        let hotbar_y = screen_height - layout::MARGIN_BOTTOM - layout::SLOT_SIZE;
+        let main_inv_top = hotbar_y - layout::INVENTORY_GAP - (3.0 * (layout::SLOT_SIZE + layout::SLOT_PADDING));
+        let catalog_top = main_inv_top + catalog_layout::HEADER_HEIGHT;
+
+        for (i, _block) in self.catalog_blocks.iter().enumerate() {
+            let col = i % catalog_layout::COLUMNS;
+            let row = i / catalog_layout::COLUMNS;
+            let slot_x = catalog_x + col as f32 * (catalog_layout::SLOT_SIZE + catalog_layout::SLOT_PADDING);
+            let slot_y = catalog_top + row as f32 * (catalog_layout::SLOT_SIZE + catalog_layout::SLOT_PADDING) - self.catalog_scroll;
+
+            if mouse_x >= slot_x && mouse_x < slot_x + catalog_layout::SLOT_SIZE &&
+               mouse_y >= slot_y && mouse_y < slot_y + catalog_layout::SLOT_SIZE {
+                return Some(i);
+            }
+        }
+
+        None
+    }
+
+    /// Update catalog hover based on mouse position
+    pub fn update_catalog_hover(&mut self, mouse_x: f32, mouse_y: f32, screen_width: f32, screen_height: f32) {
+        self.hovered_catalog_slot = self.get_catalog_slot_at(mouse_x, mouse_y, screen_width, screen_height);
+    }
+
+    /// Handle a click on a catalog slot. Adds the block to the first empty inventory slot.
+    /// right_click: if true, add 1 instead of 64.
+    pub fn handle_catalog_click(&mut self, catalog_index: usize, right_click: bool) {
+        if let Some(&block) = self.catalog_blocks.get(catalog_index) {
+            let count = if right_click { 1 } else { 64 };
+            self.add_item(Item::Block(block), count);
+        }
     }
 
     // ========== SORTING ==========

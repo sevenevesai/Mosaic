@@ -706,6 +706,38 @@ pub enum Block {
 
     // Storage/furniture
     Chest = 55,         // Storage container (rendered as vox prop)
+
+    // === TEXTURE CATALOG BLOCKS ===
+    // Additional blocks for every texture in assets/blocks/
+    Bark03 = 56, Bark05 = 57, Bark06 = 58, Bark08 = 59, Bark09 = 60,
+    Bark11 = 61, Bark12 = 62, Bark13 = 63, Bark14 = 64,
+    Leaf01 = 65, Leaf02 = 66, Leaf03 = 67, Leaf04 = 68,
+    Leaf06 = 69, Leaf07 = 70, Leaf08 = 71, Leaf09 = 72, Leaf10 = 73,
+    Leaf11 = 74, Leaf12 = 75, Leaf13 = 76, Leaf14 = 77, Leaf15 = 78, Leaf16 = 79,
+    Leaf18 = 80, Leaf19 = 81, Leaf20 = 82, Leaf21 = 83, Leaf22 = 84, Leaf23 = 85,
+    Leaf25 = 86, Leaf27 = 87, Leaf28 = 88, Leaf29 = 89, Leaf31 = 90, Leaf32 = 91,
+    Magma01 = 92,
+    Misc05 = 93, Misc06 = 94, Misc07 = 95, Misc08 = 96, Misc09 = 97,
+    Misc10 = 98, Misc11 = 99, Misc12 = 100, Misc13 = 101, Misc18 = 102, Misc19 = 103,
+    Sand03 = 104,
+    Snow01 = 105, Snow03 = 106, Snow05 = 107, Snow08 = 108,
+    Stone02 = 109, Stone03 = 110, Stone06 = 111, Stone08 = 112,
+    Stone10 = 113, Stone11 = 114, Stone12 = 115, Stone13 = 116,
+    Stone14 = 117, Stone15 = 118, Stone16 = 119, Stone17 = 120,
+    Stone18 = 121, Stone19 = 122, Stone20 = 123, Stone21 = 124,
+    Stone22 = 125, Stone23 = 126, Stone24 = 127, Stone25 = 128,
+    Stone26 = 129, Stone27 = 130, Stone28 = 131, Stone29 = 132,
+    Stone30 = 133, Stone31 = 134, Stone32 = 135, Stone33 = 136,
+    Stone34 = 137, Stone35 = 138, Stone36 = 139, Stone37 = 140,
+    Stone38 = 141, Stone39 = 142, Stone40 = 143, Stone41 = 144,
+    Stone42 = 145, Stone43 = 146, Stone44 = 147, Stone45 = 148,
+    Stone46 = 149, Stone47 = 150, Stone48 = 151, Stone51 = 152, Stone52 = 153,
+    Tile01 = 154, Tile02 = 155, Tile03 = 156, Tile04 = 157, Tile05 = 158,
+    Wood01 = 159, Wood02 = 160, Wood03 = 161, Wood04 = 162, Wood05 = 163,
+    Wood06 = 164, Wood07 = 165, Wood08 = 166, Wood09 = 167, Wood10 = 168,
+    Wood11 = 169, Wood12 = 170, Wood14 = 171, Wood15 = 172, Wood16 = 173,
+    Wood17 = 174, Wood18 = 175, Wood19 = 176, Wood20 = 177, Wood21 = 178,
+    Wood23 = 179,
 }
 
 impl Block {
@@ -805,6 +837,8 @@ impl Block {
             Block::DiamondOre | Block::TitaniumOre | Block::UraniumOre => 5.0,
             // Crystals
             Block::CrystalAmethyst | Block::CrystalQuartz => 1.5,
+            // Texture catalog blocks — default to stone hardness
+            _ => 1.5,
         }
     }
 
@@ -952,7 +986,159 @@ impl Block {
             Block::JungleLog => [110, 85, 50],      // Tropical wood
             Block::SpruceLeaves => [140, 180, 200],   // Frost blue
             Block::Chest => [140, 100, 55],         // Chest wood color
+            Block::Bark03 | Block::Bark05 | Block::Bark06 | Block::Bark08 | Block::Bark09 |
+            Block::Bark11 | Block::Bark12 | Block::Bark13 | Block::Bark14 => [90, 70, 40],
+            Block::Leaf01 | Block::Leaf02 | Block::Leaf03 | Block::Leaf04 | Block::Leaf06 |
+            Block::Leaf07 | Block::Leaf08 | Block::Leaf09 | Block::Leaf10 | Block::Leaf11 |
+            Block::Leaf12 | Block::Leaf13 | Block::Leaf14 | Block::Leaf15 | Block::Leaf16 |
+            Block::Leaf18 | Block::Leaf19 | Block::Leaf20 | Block::Leaf21 | Block::Leaf22 |
+            Block::Leaf23 | Block::Leaf25 | Block::Leaf27 | Block::Leaf28 | Block::Leaf29 |
+            Block::Leaf31 | Block::Leaf32 => [60, 130, 50],
+            Block::Magma01 => [200, 80, 20],
+            Block::Misc05 | Block::Misc06 | Block::Misc07 | Block::Misc08 | Block::Misc09 |
+            Block::Misc10 | Block::Misc11 | Block::Misc12 | Block::Misc13 |
+            Block::Misc18 | Block::Misc19 => [128, 128, 128],
+            Block::Sand03 => [210, 190, 140],
+            Block::Snow01 | Block::Snow03 | Block::Snow05 | Block::Snow08 => [230, 235, 240],
+            Block::Stone02 | Block::Stone03 | Block::Stone06 | Block::Stone08 |
+            Block::Stone10 | Block::Stone11 | Block::Stone12 | Block::Stone13 |
+            Block::Stone14 | Block::Stone15 | Block::Stone16 | Block::Stone17 |
+            Block::Stone18 | Block::Stone19 | Block::Stone20 | Block::Stone21 |
+            Block::Stone22 | Block::Stone23 | Block::Stone24 | Block::Stone25 |
+            Block::Stone26 | Block::Stone27 | Block::Stone28 | Block::Stone29 |
+            Block::Stone30 | Block::Stone31 | Block::Stone32 | Block::Stone33 |
+            Block::Stone34 | Block::Stone35 | Block::Stone36 | Block::Stone37 |
+            Block::Stone38 | Block::Stone39 | Block::Stone40 | Block::Stone41 |
+            Block::Stone42 | Block::Stone43 | Block::Stone44 | Block::Stone45 |
+            Block::Stone46 | Block::Stone47 | Block::Stone48 | Block::Stone51 | Block::Stone52 => [130, 130, 130],
+            Block::Tile01 | Block::Tile02 | Block::Tile03 | Block::Tile04 | Block::Tile05 => [150, 140, 120],
+            Block::Wood01 | Block::Wood02 | Block::Wood03 | Block::Wood04 | Block::Wood05 |
+            Block::Wood06 | Block::Wood07 | Block::Wood08 | Block::Wood09 | Block::Wood10 |
+            Block::Wood11 | Block::Wood12 | Block::Wood14 | Block::Wood15 | Block::Wood16 |
+            Block::Wood17 | Block::Wood18 | Block::Wood19 | Block::Wood20 | Block::Wood21 |
+            Block::Wood23 => [160, 120, 70],
         }
+    }
+
+    /// Human-readable name for UI display (tooltips, catalog)
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Block::Air => "Air",
+            Block::Dirt => "Dirt",
+            Block::Grass => "Grass",
+            Block::Stone => "Stone",
+            Block::StoneDirt => "Stone Dirt",
+            Block::Brick => "Brick",
+            Block::Water => "Water",
+            Block::Wood => "Wood",
+            Block::Leaves => "Leaves",
+            Block::StoneRubble2 => "Stone Rubble",
+            Block::IronOre => "Iron Ore",
+            Block::GoldOre => "Gold Ore",
+            Block::DiamondOre => "Diamond Ore",
+            Block::RedstoneOre => "Redstone Ore",
+            Block::Bedrock => "Bedrock",
+            Block::Torch => "Torch",
+            Block::Sand => "Sand",
+            Block::CoalOre => "Coal Ore",
+            Block::CopperOre => "Copper Ore",
+            Block::EmeraldOre => "Emerald Ore",
+            Block::SapphireOre => "Sapphire Ore",
+            Block::QuartzOre => "Quartz Ore",
+            Block::AmethystOre => "Amethyst Ore",
+            Block::SilverOre => "Silver Ore",
+            Block::TinOre => "Tin Ore",
+            Block::NickelOre => "Nickel Ore",
+            Block::LeadOre => "Lead Ore",
+            Block::TitaniumOre => "Titanium Ore",
+            Block::UraniumOre => "Uranium Ore",
+            Block::OakLog => "Oak Log",
+            Block::BirchLog => "Birch Log",
+            Block::Sandstone => "Sandstone",
+            Block::RedSandstone => "Red Sandstone",
+            Block::SnowGrass => "Snow Grass",
+            Block::Snow => "Snow",
+            Block::Ice => "Ice",
+            Block::PackedIce => "Packed Ice",
+            Block::MudBlock => "Mud",
+            Block::Peat => "Peat",
+            Block::JungleGrass => "Jungle Grass",
+            Block::JungleLeaves => "Jungle Leaves",
+            Block::Vines => "Vines",
+            Block::Gravel => "Gravel",
+            Block::MossyStone => "Mossy Stone",
+            Block::CrackedStone => "Cracked Stone",
+            Block::ClayStone => "Clay Stone",
+            Block::Stalactite => "Stalactite",
+            Block::Stalagmite => "Stalagmite",
+            Block::CrystalAmethyst => "Amethyst Crystal",
+            Block::CrystalQuartz => "Quartz Crystal",
+            Block::Cactus => "Cactus",
+            Block::DeadBush => "Dead Bush",
+            Block::PineLog => "Pine Log",
+            Block::JungleLog => "Jungle Log",
+            Block::SpruceLeaves => "Spruce Leaves",
+            Block::Chest => "Chest",
+            Block::Bark03 => "Bark 03", Block::Bark05 => "Bark 05", Block::Bark06 => "Bark 06",
+            Block::Bark08 => "Bark 08", Block::Bark09 => "Bark 09", Block::Bark11 => "Bark 11",
+            Block::Bark12 => "Bark 12", Block::Bark13 => "Bark 13", Block::Bark14 => "Bark 14",
+            Block::Leaf01 => "Leaf 01", Block::Leaf02 => "Leaf 02", Block::Leaf03 => "Leaf 03",
+            Block::Leaf04 => "Leaf 04", Block::Leaf06 => "Leaf 06", Block::Leaf07 => "Leaf 07",
+            Block::Leaf08 => "Leaf 08", Block::Leaf09 => "Leaf 09", Block::Leaf10 => "Leaf 10",
+            Block::Leaf11 => "Leaf 11", Block::Leaf12 => "Leaf 12", Block::Leaf13 => "Leaf 13",
+            Block::Leaf14 => "Leaf 14", Block::Leaf15 => "Leaf 15", Block::Leaf16 => "Leaf 16",
+            Block::Leaf18 => "Leaf 18", Block::Leaf19 => "Leaf 19", Block::Leaf20 => "Leaf 20",
+            Block::Leaf21 => "Leaf 21", Block::Leaf22 => "Leaf 22", Block::Leaf23 => "Leaf 23",
+            Block::Leaf25 => "Leaf 25", Block::Leaf27 => "Leaf 27", Block::Leaf28 => "Leaf 28",
+            Block::Leaf29 => "Leaf 29", Block::Leaf31 => "Leaf 31", Block::Leaf32 => "Leaf 32",
+            Block::Magma01 => "Magma",
+            Block::Misc05 => "Misc 05", Block::Misc06 => "Misc 06", Block::Misc07 => "Misc 07",
+            Block::Misc08 => "Misc 08", Block::Misc09 => "Misc 09", Block::Misc10 => "Misc 10",
+            Block::Misc11 => "Misc 11", Block::Misc12 => "Misc 12", Block::Misc13 => "Misc 13",
+            Block::Misc18 => "Misc 18", Block::Misc19 => "Misc 19",
+            Block::Sand03 => "Sand 03",
+            Block::Snow01 => "Snow 01", Block::Snow03 => "Snow 03",
+            Block::Snow05 => "Snow 05", Block::Snow08 => "Snow 08",
+            Block::Stone02 => "Stone 02", Block::Stone03 => "Stone 03",
+            Block::Stone06 => "Stone 06", Block::Stone08 => "Stone 08",
+            Block::Stone10 => "Stone 10", Block::Stone11 => "Stone 11",
+            Block::Stone12 => "Stone 12", Block::Stone13 => "Stone 13",
+            Block::Stone14 => "Stone 14", Block::Stone15 => "Stone 15",
+            Block::Stone16 => "Stone 16", Block::Stone17 => "Stone 17",
+            Block::Stone18 => "Stone 18", Block::Stone19 => "Stone 19",
+            Block::Stone20 => "Stone 20", Block::Stone21 => "Stone 21",
+            Block::Stone22 => "Stone 22", Block::Stone23 => "Stone 23",
+            Block::Stone24 => "Stone 24", Block::Stone25 => "Stone 25",
+            Block::Stone26 => "Stone 26", Block::Stone27 => "Stone 27",
+            Block::Stone28 => "Stone 28", Block::Stone29 => "Stone 29",
+            Block::Stone30 => "Stone 30", Block::Stone31 => "Stone 31",
+            Block::Stone32 => "Stone 32", Block::Stone33 => "Stone 33",
+            Block::Stone34 => "Stone 34", Block::Stone35 => "Stone 35",
+            Block::Stone36 => "Stone 36", Block::Stone37 => "Stone 37",
+            Block::Stone38 => "Stone 38", Block::Stone39 => "Stone 39",
+            Block::Stone40 => "Stone 40", Block::Stone41 => "Stone 41",
+            Block::Stone42 => "Stone 42", Block::Stone43 => "Stone 43",
+            Block::Stone44 => "Stone 44", Block::Stone45 => "Stone 45",
+            Block::Stone46 => "Stone 46", Block::Stone47 => "Stone 47",
+            Block::Stone48 => "Stone 48", Block::Stone51 => "Stone 51", Block::Stone52 => "Stone 52",
+            Block::Tile01 => "Tile 01", Block::Tile02 => "Tile 02", Block::Tile03 => "Tile 03",
+            Block::Tile04 => "Tile 04", Block::Tile05 => "Tile 05",
+            Block::Wood01 => "Wood 01", Block::Wood02 => "Wood 02", Block::Wood03 => "Wood 03",
+            Block::Wood04 => "Wood 04", Block::Wood05 => "Wood 05", Block::Wood06 => "Wood 06",
+            Block::Wood07 => "Wood 07", Block::Wood08 => "Wood 08", Block::Wood09 => "Wood 09",
+            Block::Wood10 => "Wood 10", Block::Wood11 => "Wood 11", Block::Wood12 => "Wood 12",
+            Block::Wood14 => "Wood 14", Block::Wood15 => "Wood 15", Block::Wood16 => "Wood 16",
+            Block::Wood17 => "Wood 17", Block::Wood18 => "Wood 18", Block::Wood19 => "Wood 19",
+            Block::Wood20 => "Wood 20", Block::Wood21 => "Wood 21", Block::Wood23 => "Wood 23",
+        }
+    }
+
+    /// Returns all placeable block types (everything except Air and Water)
+    pub fn all_placeable() -> Vec<Block> {
+        (1..=179u8)
+            .map(Block::from)
+            .filter(|b| !matches!(b, Block::Air | Block::Water))
+            .collect()
     }
 }
 
@@ -1016,6 +1202,49 @@ impl From<u8> for Block {
             53 => Block::JungleLog,
             54 => Block::SpruceLeaves,
             55 => Block::Chest,
+            56 => Block::Bark03, 57 => Block::Bark05, 58 => Block::Bark06,
+            59 => Block::Bark08, 60 => Block::Bark09, 61 => Block::Bark11,
+            62 => Block::Bark12, 63 => Block::Bark13, 64 => Block::Bark14,
+            65 => Block::Leaf01, 66 => Block::Leaf02, 67 => Block::Leaf03,
+            68 => Block::Leaf04, 69 => Block::Leaf06, 70 => Block::Leaf07,
+            71 => Block::Leaf08, 72 => Block::Leaf09, 73 => Block::Leaf10,
+            74 => Block::Leaf11, 75 => Block::Leaf12, 76 => Block::Leaf13,
+            77 => Block::Leaf14, 78 => Block::Leaf15, 79 => Block::Leaf16,
+            80 => Block::Leaf18, 81 => Block::Leaf19, 82 => Block::Leaf20,
+            83 => Block::Leaf21, 84 => Block::Leaf22, 85 => Block::Leaf23,
+            86 => Block::Leaf25, 87 => Block::Leaf27, 88 => Block::Leaf28,
+            89 => Block::Leaf29, 90 => Block::Leaf31, 91 => Block::Leaf32,
+            92 => Block::Magma01,
+            93 => Block::Misc05, 94 => Block::Misc06, 95 => Block::Misc07,
+            96 => Block::Misc08, 97 => Block::Misc09, 98 => Block::Misc10,
+            99 => Block::Misc11, 100 => Block::Misc12, 101 => Block::Misc13,
+            102 => Block::Misc18, 103 => Block::Misc19,
+            104 => Block::Sand03,
+            105 => Block::Snow01, 106 => Block::Snow03, 107 => Block::Snow05, 108 => Block::Snow08,
+            109 => Block::Stone02, 110 => Block::Stone03, 111 => Block::Stone06,
+            112 => Block::Stone08, 113 => Block::Stone10, 114 => Block::Stone11,
+            115 => Block::Stone12, 116 => Block::Stone13, 117 => Block::Stone14,
+            118 => Block::Stone15, 119 => Block::Stone16, 120 => Block::Stone17,
+            121 => Block::Stone18, 122 => Block::Stone19, 123 => Block::Stone20,
+            124 => Block::Stone21, 125 => Block::Stone22, 126 => Block::Stone23,
+            127 => Block::Stone24, 128 => Block::Stone25, 129 => Block::Stone26,
+            130 => Block::Stone27, 131 => Block::Stone28, 132 => Block::Stone29,
+            133 => Block::Stone30, 134 => Block::Stone31, 135 => Block::Stone32,
+            136 => Block::Stone33, 137 => Block::Stone34, 138 => Block::Stone35,
+            139 => Block::Stone36, 140 => Block::Stone37, 141 => Block::Stone38,
+            142 => Block::Stone39, 143 => Block::Stone40, 144 => Block::Stone41,
+            145 => Block::Stone42, 146 => Block::Stone43, 147 => Block::Stone44,
+            148 => Block::Stone45, 149 => Block::Stone46, 150 => Block::Stone47,
+            151 => Block::Stone48, 152 => Block::Stone51, 153 => Block::Stone52,
+            154 => Block::Tile01, 155 => Block::Tile02, 156 => Block::Tile03,
+            157 => Block::Tile04, 158 => Block::Tile05,
+            159 => Block::Wood01, 160 => Block::Wood02, 161 => Block::Wood03,
+            162 => Block::Wood04, 163 => Block::Wood05, 164 => Block::Wood06,
+            165 => Block::Wood07, 166 => Block::Wood08, 167 => Block::Wood09,
+            168 => Block::Wood10, 169 => Block::Wood11, 170 => Block::Wood12,
+            171 => Block::Wood14, 172 => Block::Wood15, 173 => Block::Wood16,
+            174 => Block::Wood17, 175 => Block::Wood18, 176 => Block::Wood19,
+            177 => Block::Wood20, 178 => Block::Wood21, 179 => Block::Wood23,
             _ => Block::Air,
         }
     }
@@ -1587,8 +1816,12 @@ mod tests {
         // Chest
         assert_eq!(Block::from(55), Block::Chest);
 
+        // Texture catalog blocks
+        assert_eq!(Block::from(56), Block::Bark03);
+        assert_eq!(Block::from(179), Block::Wood23);
+
         // Invalid values default to Air
-        assert_eq!(Block::from(56), Block::Air);
+        assert_eq!(Block::from(180), Block::Air);
         assert_eq!(Block::from(255), Block::Air);
     }
 

@@ -626,6 +626,8 @@ impl BlockItemExt for Block {
             Block::JungleLog => "Jungle Log",
             Block::SpruceLeaves => "Spruce Leaves",
             Block::Chest => "Chest",
+            // Texture catalog blocks — delegate to Block::display_name()
+            other => other.display_name(),
         }
     }
 }
