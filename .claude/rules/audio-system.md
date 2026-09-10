@@ -1,42 +1,45 @@
-# Audio System
+---
+paths:
+  - "src/audio/**"
+  - "src/bin/generate_sounds.rs"
+---
 
-3D spatial audio with material-based sounds, ambient soundscapes, and DDA-based occlusion.
+# Audio
 
-## Files
+`AudioManager` in `src/audio/mod.rs`: rodio `SpatialSink` per source, ten `SoundMaterial`
+variants (Grass, Stone, Sand, Wood, Snow, Metal, Gravel, Foliage, Crystal, Generic) mapped by
+`SoundMaterial::from_block()`, assets under `assets/sfx/{footstep,break,place,ambient}/`.
 
-| File | Purpose |
-|------|---------|
-| `src/audio/mod.rs` | AudioManager, SoundMaterial, ambient system (~900 LOC) |
-| `src/bin/generate_sounds.rs` | Procedural WAV generator utility |
+Volumes multiply in three tiers: Master (default 0.8) times SFX (1.0) or Ambient (0.6), all
+in the ESC menu and persisted to `settings.cfg`.
 
-## Sound Materials
+## Occlusion
 
-10 materials (Grass, Stone, Sand, Wood, Snow, Metal, Gravel, Foliage, Crystal, Generic). Mapped via `SoundMaterial::from_block()`. Assets in `assets/sfx/{footstep,break,place,ambient}/`.
+`calculate_occlusion()` DDA-marches from listener to source and accumulates 0.4 per solid
+block and 0.1 per foliage or water block, clamped to 1.0. Playback volume is
+`1.0 - occlusion * 0.7`, so a fully walled-off source is attenuated by at most 70% and never
+goes silent — an inaudible occluded sound means that factor was changed, not that the raycast
+failed.
 
-## Volume System
+## Ambient
 
-Three-tier: Master (80%) x SFX (100%) or Ambient (60%). All in ESC menu, persisted to settings.cfg.
+Crossfades over `AMBIENT_CROSSFADE_SECS` 2.5 between environments. Cave is `sky_light < 4`
+(assembled in `app.rs`), underwater is player Y below sea level and inside water, otherwise a
+biome surface bed.
 
-## Spatial Audio & Occlusion
+## Adding sounds
 
-Uses rodio `SpatialSink`. DDA raycast accumulates occlusion: +0.4 per solid block, +0.1 per foliage/water, max 70% reduction.
+1. Map the block in `SoundMaterial::from_block()`.
+2. Add `assets/sfx/{footstep,break,place}/material-N.wav`.
+3. `cargo run --bin generate_sounds` writes placeholders if real assets are not ready.
 
-## Ambient System
+Missing files are handled without a crash, so a silent material means a missing or misnamed
+file rather than an error.
 
-Environment-aware crossfading (2.5s transitions):
-- Cave detection: `sky_light < 4`
-- Underwater: player Y below sea level AND inside water
-- Biome-specific surface ambients (birds, wind, insects, etc.)
+## Unfinished
 
-## Adding New Sounds
-
-1. Add mapping in `SoundMaterial::from_block()`
-2. Add WAV files: `assets/sfx/{footstep,break,place}/material-N.wav`
-3. Optional: `cargo run --bin generate_sounds` for placeholders
-
-## Gotchas
-
-- **Reverb not connected**: Cave impulse response generated but not applied to audio sources yet
-- **Biome ID hardcoded**: Currently always 0 (grasslands) - needs world gen integration
-- **Legacy fallback**: Old `footstep-grass-*.wav` files still loaded as fallback
-- **Missing files**: System handles gracefully, no crash
+- Reverb is generated but not applied. The cave impulse response exists and `reverb_mix`
+  interpolates toward 0.4 in caves, but nothing reads it into the signal path.
+- `biome_id` is hardcoded to 0 in `app.rs`, so every surface ambient is the grasslands bed
+  regardless of biome. Wiring it up needs the biome from world generation.
+- Legacy `footstep-grass-*.wav` files are still loaded as a fallback.

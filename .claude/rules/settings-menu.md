@@ -1,32 +1,36 @@
-# Settings Menu System
+---
+paths:
+  - "src/settings_menu.rs"
+  - "src/settings.rs"
+---
 
-Two-stage menu: main menu (buttons) + tabbed settings (~950 LOC in `settings_menu.rs`).
+# Settings menu
 
-## Menu Flow
+Two stages in `settings_menu.rs`: main menu buttons, then tabbed settings (Display, Graphics,
+Audio, Debug). ESC backs up one level; "Save & Quit" writes `settings.cfg` and exits.
 
-ESC (game) -> Main menu -> "Settings" -> Tabbed settings. ESC backs up one level. "Save & Quit" saves and exits.
+| Control | Rendered as | Interaction |
+|---|---|---|
+| Toggle | `[ ON  ]` | click to flip |
+| EnumCycle | `[<  VALUE   >]` | click an arrow to cycle |
+| PercentSlider | `[============]` | click the bar, continuous 0.0-1.0 |
 
-## Tabs & Control Types
+## Adding a setting
 
-Tabs: Display, Graphics, Audio, Debug.
-
-| Type | Format | Interaction |
-|------|--------|-------------|
-| Toggle | `[ ON  ]` | Click to flip |
-| EnumCycle | `[<  VALUE   >]` | Click arrows to cycle |
-| PercentSlider | `[============]` | Click bar for continuous 0.0-1.0 |
-
-## Adding a New Setting
-
-1. Add `MenuItem` to `create_menu_items()` with: `label`, `tab`, `control_type`, get/set callbacks
-2. Add renderer helper methods if needed: `cycle_*_prev()`, `set_*_index()`
+1. Add a field to `Settings` in `settings.rs` so it persists.
+2. Add a `MenuItem` in `create_menu_items()` with label, tab, control type and get/set
+   callbacks.
+3. Add the renderer helpers the callbacks need (`cycle_*_prev()`, `set_*_index()`).
 
 ## Gotchas
 
-- **Tab line width is 43 chars** (4 tabs x 10 + 3 gaps), NOT 36 - rendered at fixed Y=0.85 NDC
-- **Hit detection must match render** - both use same coordinate calculations
-- **Scroll resets on tab change**: `scroll_offset = 0`
-- **`click()` returns bool** - true when Save & Quit pressed
-- **MenuRenderData**: Renderer receives struct, not just lines
-- **Blur needs COPY_DST**: scene_texture must have COPY_DST usage flag
-- **Menu blur**: 9-tap Gaussian, 50% darkening, uses intermediate `menu_blur_texture`
+- Layout and hit detection are computed twice — once in `recalculate_settings_layout()`, once
+  where the menu is drawn — from the same numbers: tabs at NDC Y 0.85, content from 0.70, each
+  tab 10 characters wide with a 1-character gap, the strip centred and sized from
+  `MenuTab::all()`. Change one side only and clicks land on the wrong tab.
+- `scroll_offset` resets to 0 on a tab change; without that a short tab scrolls past its end.
+- `click()` returns a `MenuAction` — the Save & Quit case is what shuts the game down, so a
+  caller that ignores the return value makes the button dead.
+- The renderer is handed a `MenuRenderData` struct, not a list of lines.
+- The blur pass reads `scene_texture`, so that texture needs the `COPY_DST` usage flag, and
+  draws through the intermediate `menu_blur_texture`: a 9-tap Gaussian with 50% darkening.

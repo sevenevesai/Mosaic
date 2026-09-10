@@ -1,24 +1,32 @@
-# Day/Night Cycle System
+---
+paths:
+  - "src/renderer/mod.rs"
+  - "src/renderer/pipeline.rs"
+---
 
-Full sun/moon system with warm color palette. Located in `renderer/mod.rs` (`DayNightCycle`) and `renderer/pipeline.rs` (sky/chunk shaders).
+# Day/night cycle
 
-## Time System
+`DayNightCycle` in `renderer/mod.rs` drives time and colour; the sky and chunk shaders in
+`renderer/pipeline.rs` consume them.
 
-- `time_of_day: f32` - 0.0=midnight, 0.25=dawn, 0.5=noon, 0.75=dusk
-- Base cycle: 600 seconds (10 minutes). T key cycles speed: 1x/5x/20x/50x/100x/paused.
+`time_of_day` runs 0.0 midnight, 0.25 dawn, 0.5 noon, 0.75 dusk over a
+`base_cycle_duration` of 600 seconds. The T key steps `cycle_speed` 1x, 5x, 20x, 50x, 100x,
+paused. `day_count` increments on wrap and feeds the moon phase.
 
-## Color Palette
+Colours come from `DayNightCycle::calculate_colors()` and are deliberately warm throughout —
+coral at dawn, golden blue at noon, amber and purple at dusk, warm indigo at night. Anything
+tending to harsh blue or white is off-palette; tune inside that function rather than in the
+shaders.
 
-All warm undertones - no harsh blues or whites. Dawn=coral/pink, Noon=golden blue, Dusk=amber/purple, Night=warm indigo. Edit `DayNightCycle::calculate_colors()`.
+The sun uses multi-layer bloom and warms toward the horizon at 50-100% intensity. The moon has
+a crisp edge, warm amber, and at most 0.25 intensity.
 
-## Celestial Bodies
+## Shadow transitions
 
-- **Sun**: Multi-layer bloom, warmer at horizon. Intensity 50-100%.
-- **Moon**: Crisp edge, warm amber, dim (max 0.25 intensity). **No shadows** - ambient only.
+Shadows have to fade rather than pop, and three things together achieve that. Breaking any one
+of them brings back a hard flip at sunrise or sunset.
 
-## Shadow Transitions (Critical Gotcha)
-
-Shadows must fade smoothly - no jarring pops:
-1. Sun direction smoothly interpolates through horizon (no direction flip)
-2. Shadows fade to zero via `smoothstep(0.0, 0.3, sun_intensity)` before sun sets
-3. Moon never casts shadows
+- The sun direction interpolates smoothly through the horizon and never flips sign.
+- `shadow_fade = smoothstep(0.0, 0.3, sun_intensity)` takes shadows to zero before the sun is
+  down.
+- The moon casts no shadows at all; it contributes ambient only.

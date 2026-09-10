@@ -1,31 +1,41 @@
-# Procedural Grass System
+---
+paths:
+  - "src/renderer/grass/**"
+  - "src/world/generation/vegetation.rs"
+---
 
-GPU-driven grass using "grass bomb" density, per-block placement, and vertex-pulling blade generation.
+# Procedural grass
 
-## Files
+GPU-driven: one draw call, blades built by vertex pulling in `grass_shader.wgsl` from a tile
+buffer; no vertex buffer exists. Placement comes from chunk generation in `vegetation.rs` and
+is stored in `ChunkGrassData`.
 
-| File | Purpose |
-|------|---------|
-| `renderer/grass/mod.rs` | GrassSystem, tile buffer, settings (~1050 LOC) |
-| `renderer/grass/grass_shader.wgsl` | Vertex-pulling, wind, LOD, lighting (~320 LOC) |
-| `world/generation/vegetation.rs` | Grass bomb generation per chunk |
+## Grass bombs
 
-## Grass Bomb Concept
+Density is the sum of overlapping "bombs" on a grid, which is what makes clumps look natural
+rather than uniform: `bomb_spacing` 6 blocks, `bomb_probability` 0.7 per cell,
+`bomb_radius` 5.0 blocks with a smoothstep falloff, and the centre jittered up to 0.8 of a
+cell. Two overlapping bombs give an extra-dense patch. All of it is hashed from position, so
+regeneration is deterministic.
 
-Natural clustering via overlapping density "bombs": 6-block grid spacing, 70% probability, 5-block radius with smoothstep falloff. Overlapping bombs = extra-dense patches.
+## Settings
 
-## Settings (3 independent ESC menu controls)
+Three independent controls in the ESC menu.
 
 | Setting | Controls | Values |
-|---------|----------|--------|
-| GRASS | Density threshold | OFF, LOW (5+), MEDIUM (3+), HIGH (2+), ULTRA (1+) |
-| GRASS DISTANCE | Render range | NEAR (6), MEDIUM (12), FAR (18), ULTRA (26 chunks) |
-| GRASS SHADOW | Shadow mode | OFF, SIMPLE |
+|---|---|---|
+| GRASS | blade-count threshold | OFF, LOW, MEDIUM, HIGH, ULTRA |
+| GRASS DISTANCE | render range | NEAR, MEDIUM, FAR, ULTRA |
+| GRASS SHADOW | shadow mode | OFF, SIMPLE |
+
+`GrassDistance` has three tiers per preset — full detail / low LOD / cull, in chunks:
+NEAR 3/5/6, MEDIUM 6/10/12, FAR 10/16/18, ULTRA 14/22/26.
 
 ## Gotchas
 
-- **Quality toggle clears tile buffer** - forces full re-upload with new threshold
-- **Distance toggle is instant** - shader reads from uniforms, no re-upload
-- **Terrain sync** - Grass tiles generated during chunk generation, stored in `ChunkGrassData`
-- **Lighting** - Uses same `DayNightCycle` uniforms as terrain for consistency
-- **Single draw call** - All grass rendered via vertex pulling, no vertex buffer
+- Changing quality clears the tile buffer and forces a full re-upload, because the threshold
+  is baked in at upload time. Changing distance is instant: the shader reads it from uniforms.
+- Grass tiles are produced during chunk generation. A change to placement rules only shows on
+  chunks generated afterwards; delete the save to see it everywhere.
+- Grass reads the same `DayNightCycle` uniforms as terrain. Lighting that diverges between
+  the two means one of them was updated alone.
