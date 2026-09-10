@@ -36,5 +36,7 @@ existing sectors reuses them rather than reallocating.
   up as terrain silently reverting, not as a crash.
 - On a full disk the error propagates and unsaved chunks stay in memory — they are lost on
   exit, so treat a write failure as data loss, not a warning.
-- Chunk payload layout is positional. Adding a field means bumping the header `version` in
-  `chunk_io.rs`; without it, old saves deserialize into garbage blocks.
+- Chunk payload layout is positional, and `deserialize_chunk()` never reads the header
+  `version` it writes — unlike the region and world headers, which reject a version above
+  their own. A layout change therefore misreads every existing save as garbage blocks; bump
+  `version` and add the check that rejects it in the same edit.

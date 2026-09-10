@@ -6,7 +6,7 @@ a multi-pass renderer. Key bindings: README.md.
 ## Commands
 
 - `cargo check` — compiles clean; the gate for any edit.
-- `cargo test` — 209 `#[test]` functions over world, inventory, player, meshing, lighting.
+- `cargo test` — 209 tests; a green run says nothing about shaders or the renderer.
 - `cargo build --release && ./target/release/mosaic.exe` — smoke test; F3 shows FPS, chunk,
   triangle and light counts. `rm -rf saves/world1` first when generation or saves changed.
 - Background runs: redirect stderr (`2>session_stderr.log`) and read `performance_log.txt`;

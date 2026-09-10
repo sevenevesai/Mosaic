@@ -14,7 +14,7 @@ modes; `entity/` loads FBX skeletons and drives the skinned character.
 
 Third person is the default. The camera sits `THIRD_PERSON_DISTANCE_DEFAULT` 10.0 blocks
 behind the aim point, scroll-zoomable between 2.0 and 20.0, with an over-the-shoulder offset
-of 1.5 blocks right and 0.5 up that scales to zero as the camera closes in so it does not
+of 1.5 blocks right and 0.3 up that scales to zero as the camera closes in so it does not
 clip the player. F5 switches modes over `CAMERA_TRANSITION_DURATION` 0.3 s and the FOV changes
 with it: 75 degrees first person, 70 third.
 
@@ -26,12 +26,18 @@ per frame, so the character rotates toward its movement instead of snapping.
 
 ## Animation
 
-`Player::movement_state()` classifies from physics: airborne with `velocity.y > 0.5` is
-Jumping and anything slower Falling, horizontal speed over 0.5 is Walking or Sprinting, in
-water is Swimming. `app.rs` maps each state to (clip index, speed, blend, looping). Jumping
+`Player::movement_state()` classifies from physics: in water is Swimming and wins over
+everything else; airborne outside fly mode is Jumping above `velocity.y` 0.5 and Falling
+below; horizontal speed over 0.5 is Walking or Sprinting. `app.rs` maps each state to (clip index, speed, blend, looping). Jumping
 and Falling are the only non-looping pair, and Falling plays at 0.3x so the pose holds in the
 air rather than looping. The root motion `AnimationComponent::update` returns is discarded for
 the player: physics owns position, and applying both makes the character drift.
+
+## Ground contact
+
+A downward move that collides is undone and then re-applied by binary search, eight halvings
+against `check_collision()`, before `velocity.y` is zeroed. Without it a fast fall leaves the
+player standing above the ground it landed on.
 
 ## Mining
 

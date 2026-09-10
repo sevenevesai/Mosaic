@@ -14,7 +14,7 @@ is stored in `ChunkGrassData`.
 
 Density is the sum of overlapping "bombs" on a grid, which is what makes clumps look natural
 rather than uniform: `bomb_spacing` 6 blocks, `bomb_probability` 0.7 per cell,
-`bomb_radius` 5.0 blocks with a smoothstep falloff, and the centre jittered up to 0.8 of a
+`bomb_radius` 5.0 blocks with a smoothstep falloff, and the centre jittered ±0.4 of a
 cell. Two overlapping bombs give an extra-dense patch. All of it is hashed from position, so
 regeneration is deterministic.
 
@@ -24,7 +24,7 @@ Three independent controls in the ESC menu.
 
 | Setting | Controls | Values |
 |---|---|---|
-| GRASS | blade-count threshold | OFF, LOW, MEDIUM, HIGH, ULTRA |
+| GRASS | minimum blades for a tile to draw | OFF, LOW 5, MEDIUM 3, HIGH 2, ULTRA 1 |
 | GRASS DISTANCE | render range | NEAR, MEDIUM, FAR, ULTRA |
 | GRASS SHADOW | shadow mode | OFF, SIMPLE |
 

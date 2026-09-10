@@ -30,7 +30,8 @@ turned. The cause is structural: half-resolution rendering plus a linear upscale
 discontinuities, and block edges put a discontinuity everywhere. Five sessions of SSAO and
 GTAO variants did not fix it, so voxel AO replaced it. `ssao.rs` stays for reference with
 quality defaulting to Off and its uniform update and render calls guarded by `is_enabled()`.
-Turning it back on programmatically brings the grid lines back.
+Turning it back on programmatically brings the grid lines back, and the ESC menu's
+AMBIENT OCCLUSION item now sets voxel AO quality rather than SSAO.
 
 ## Gotchas
 
