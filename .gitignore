@@ -123,8 +123,10 @@ SHADOW_OPTIMIZATION_PLAN.md
 doc_gameplay*.md
 Procedural Terrain*.md
 
-# Docs folder (internal feature plans, prompts, research)
-/docs/
+# Docs folder (internal feature plans, prompts, research).
+# Subsystem design docs are the exception: CLAUDE.md and the rules link to them.
+/docs/*
+!/docs/*-design.md
 
 # Claude skills (internal tooling)
 .claude/skills/
