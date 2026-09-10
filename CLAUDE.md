@@ -1,11 +1,11 @@
 # Mosaic — voxel engine (Rust + wgpu)
 
-Real-time voxel world: threaded chunk generation, greedy meshing, a 256^3 voxel GI volume,
-a multi-pass renderer. Key bindings: README.md.
+Real-time voxel world: threaded chunk generation, greedy meshing, a 256^3 GI volume,
+multi-pass rendering. Key bindings: README.md.
 
 ## Commands
 
-- `cargo check` — compiles clean; the gate for any edit.
+- `cargo check` — clean compile; the gate for any edit.
 - `cargo test` — 209 tests; a green run says nothing about shaders or the renderer.
 - `cargo build --release && ./target/release/mosaic.exe` — smoke test; F3 shows FPS, chunk,
   triangle and light counts. `rm -rf saves/world1` first when generation or saves changed.
@@ -16,7 +16,7 @@ a multi-pass renderer. Key bindings: README.md.
 
 - Every trace through the voxel volume — sun and torch shadows, AO, volumetrics — uses
   Amanatides & Woo DDA with `textureLoad` and skips the starting voxel.
-  `textureSampleLevel` interpolates across voxel boundaries and draws lines at every block
+  `textureSampleLevel` blends across voxel boundaries and draws lines at every block
   edge; not skipping the first voxel self-shadows the surface.
 - Quality flags share `volume_origin.w`: bit 0 torch shadows, bits 1-3 shadow, bits 4-6 AO;
   volumetrics keeps its own in `screen_params.z`. A new field must claim unused bits or it
@@ -33,12 +33,12 @@ a multi-pass renderer. Key bindings: README.md.
 
 ## Conventions
 
-- Textures resolve by name, not by index: a new block texture is a PNG dropped into
-  `assets/blocks/` and named in `build_block_textures()`, not an edit to a file list.
+- Textures resolve by name: a new block texture is a PNG in `assets/blocks/` named in
+  `build_block_textures()`, not an edit to a file list.
 - World tuning constants (`CHUNK_SIZE` 16, `RENDER_DISTANCE` 32, `LOD_FULL_DETAIL` 12,
   `WATER_SEA_LEVEL` 32) live in `src/lib.rs`.
 
-## Subsystem docs — path-scoped, load with their source
+## Subsystem docs, path-scoped to their source
 
 | Area | Rule (`.claude/rules/`) | Mechanism (docs/) |
 |---|---|---|
