@@ -1,93 +1,42 @@
-# Volumetric Light Shafts (God Rays)
+---
+paths:
+  - "src/renderer/volumetrics.rs"
+  - "src/renderer/mod.rs"
+---
 
-DDA-based world-space raymarching through the 256^3 voxel volume. 3-pass pipeline at half resolution.
+# Volumetric light shafts
 
-## Architecture
+Three half-resolution passes in `renderer/volumetrics.rs`: a DDA raymarch through the 256^3
+voxel volume into `volumetric_texture`, a bilateral blur into `blur_texture`, then a
+full-resolution additive composite onto `scene_texture`. Runs after SSAO and before DoF,
+bloom and AA. Mechanism: `docs/volumetrics-design.md`.
 
-```
-Pass 1: DDA Raymarch (half-res) -> volumetric_texture [Rgba16Float]
-Pass 2: Bilateral Blur (half-res) -> blur_texture [Rgba16Float]
-Pass 3: Composite (full-res, additive blend) -> scene_texture
-```
+| Preset | March steps | Shadow DDA steps | Blur | Max distance |
+|---|---|---|---|---|
+| OFF | 0 | 0 | none | zero cost |
+| LOW | 24 | 16 | H only | 48 |
+| MEDIUM (default) | 40 | 32 | H+V | 80 |
+| HIGH | 56 | 48 | 2x H+V | 112 |
+| ULTRA | 72 | 64 | 2x H+V | 128 |
 
-Runs after SSAO, before DoF/Bloom/AA in the render pipeline.
-
-## Files
-
-| File | Role |
-|------|------|
-| `src/renderer/volumetrics.rs` | VolumetricLighting struct, 3 pipelines, 3 WGSL shaders (~1160 LOC) |
-| `src/renderer/mod.rs:~790` | Constructor, uniform writes (`screen_params.z=quality, w=frame`) |
-| `src/renderer/mod.rs:~2970` | VolumetricUniform update each frame |
-| `src/renderer/mod.rs:~3772` | Render call in pass sequence |
-| `src/renderer/mod.rs:~1324` | Quality cycling methods |
-| `src/settings.rs:~19` | `volumetrics_quality: String` (OFF/LOW/MEDIUM/HIGH/ULTRA) |
-| `src/settings_menu.rs:~316` | VOLUMETRICS EnumCycle menu item |
-| `src/app.rs:~423` | V key cycles quality presets |
-
-## DDA Shadow Test (in raymarch shader)
-
-Adapted from `pipeline.rs:684-769` — same Amanatides & Woo pattern:
-- `textureLoad` with integer coords (no interpolation, no artifacts)
-- Branchless DDA stepping with `select()`
-- Skip starting voxel to prevent self-shadowing
-- Binary result: 0.0 (shadow) or 1.0 (lit), early exit on first solid hit
-- Volume edge termination at 120 blocks from center
-
-## Phase Function
-
-Dual-lobe Henyey-Greenstein:
-- 85% forward scattering (g=0.76) — bright shafts when looking toward sun
-- 15% backward fill (g=-0.25) — subtle fill when looking away
-- Combined via `mix(forward, back, 0.15)`
-
-## Temporal Dithering
-
-Interleaved Gradient Noise (Jorge Jimenez, SIGGRAPH 2014):
-- Per-pixel jitter rotated each frame by golden angle (~5.588 rad)
-- `screen_params.w` = frame_counter (wrapping u32)
-- Breaks banding from discrete march steps
-
-## Bilateral Blur
-
-Depth-aware 9-tap Gaussian (unrolled — WGSL requires constant array indexing):
-- Weights: 0.227, 0.195, 0.122, 0.054, 0.016
-- Bilateral factor: `step(abs(sample_depth - center_depth), threshold)` rejects samples across depth edges
-- Depth threshold: 2.0 blocks (prevents bleeding at block boundaries)
-- Separable H+V passes; ping-pong between volumetric_texture and blur_texture
-
-## Quality Presets
-
-| Preset | March Steps | Shadow DDA Steps | Blur Passes | Max Distance | Control |
-|--------|------------|-----------------|-------------|-------------|---------|
-| OFF | 0 | 0 | 0 | 0 | Zero cost |
-| LOW | 24 | 16 | H only | 48 | `quality=1` |
-| MEDIUM | 40 | 32 | H+V | 80 | `quality=2` (default) |
-| HIGH | 56 | 48 | 2x H+V | 112 | `quality=3` |
-| ULTRA | 72 | 64 | 2x H+V | 128 | `quality=4` |
-
-Quality packed into `VolumetricUniform.screen_params.z` (NOT in `volume_origin.w` — separate from shadow/AO bits).
-
-## Composite Texture Routing
-
-- **LOW** (H blur only): composite reads `blur_texture`
-- **MEDIUM+** (H+V): composite reads `volumetric_texture` (V pass writes back to it)
-- `rebuild_composite_bind_group()` swaps the source when crossing the LOW/MEDIUM boundary
-
-## Settings Integration
-
-- `settings.rs`: `volumetrics_quality: String` (default "MEDIUM")
-- Backward compat: old `volumetrics_enabled=true` parsed as "MEDIUM", `false` as "OFF"
-- V key: cycles OFF -> LOW -> MEDIUM -> HIGH -> ULTRA -> OFF
-- ESC menu: Graphics tab, EnumCycle control
+Quality lives in `VolumetricUniform.screen_params.z`, deliberately separate from the shadow
+and AO bits in `volume_origin.w`. The V key and the Graphics tab both cycle it, and
+`settings.rs` stores `volumetrics_quality` as a string; the older boolean
+`volumetrics_enabled` still parses, true as MEDIUM and false as OFF.
 
 ## Gotchas
 
-- **WGSL array indexing** — Cannot use runtime variable to index `array<>`. Blur taps are unrolled, not looped.
-- **Composite bind group** must be rebuilt when quality crosses LOW/MEDIUM boundary (texture source changes)
-- **Blur uniforms** need updating on resize (`update_blur_uniforms()` writes new texel sizes)
-- **Frame counter** uses `wrapping_add(1)` — IGN uses `fract()` so overflow is harmless
-- **Sky pixels** are marched (not skipped) — god rays visible against sky background, capped at max_distance
-- **Sun fade** — `smoothstep(0.05, 0.3, sun_intensity)` prevents abrupt pop at sunset/sunrise
-- **Density** is `sun_color.a` (currently 0.006) — very sensitive, small changes have large visual impact
-- **Open-air wash** — Forward scatter peak (~2.4 at g=0.76) causes uniform bright wash when staring at sun in open areas. Known issue. Phase capping at ~0.35 helps but reduces shaft brightness. Needs further tuning.
+- Crossing the LOW/MEDIUM boundary changes which texture the composite reads (LOW ends on
+  `blur_texture`, MEDIUM and above end back on `volumetric_texture`), so
+  `rebuild_composite_bind_group()` must run on that transition or the screen keeps the old
+  source.
+- Blur taps are unrolled because WGSL cannot index an `array<>` with a runtime value. Do not
+  refactor them into a loop.
+- `update_blur_uniforms()` has to run on resize; stale texel sizes blur by the wrong radius.
+- Density is `sun_color.a`, currently 0.006, and is very sensitive — small changes swing the
+  image hard.
+- Sky pixels are marched rather than skipped, so shafts stay visible against the sky, capped
+  at `max_distance`.
+- Open-air wash is a known unsolved issue: the forward-scatter peak (about 2.4 at g = 0.76)
+  washes the screen out when staring at the sun in the open. Capping the phase near 0.35 helps
+  but dims the shafts; neither has been settled on.
