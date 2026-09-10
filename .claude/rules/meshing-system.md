@@ -38,6 +38,10 @@ everything meshes at full detail. Sampling is every block, every second block, e
   unused is wrong; the shader reads it as `block_light`.
 - Merged quads tile with `fract(uv * tile_size)` and inset by half a texel, which is what
   keeps neighbouring atlas tiles from bleeding into a merged face.
+- Foliage, cross billboards and props are excluded from the greedy pass and emitted
+  separately by `add_foliage_blocks()`, which draws all six faces of each block. The
+  neighbour tests exclude the same three, so a stone face touching leaves survives culling;
+  drop that check and terrain behind foliage turns transparent.
 - Mesh statistics go through the atomic `MESH_STATS` static, since meshing runs on the worker
   pool.
 - To see backfaces while debugging, set `cull_mode: None` in `pipeline.rs`.

@@ -42,4 +42,5 @@ file rather than an error.
   interpolates toward 0.4 in caves, but nothing reads it into the signal path.
 - `biome_id` is hardcoded to 0 in `app.rs`, so every surface ambient is the grasslands bed
   regardless of biome. Wiring it up needs the biome from world generation.
-- Legacy `footstep-grass-*.wav` files are still loaded as a fallback.
+- The loader still tries `assets/sfx/footstep-grass-{1,2}.wav` under a `footstep-legacy` key.
+  Those files no longer ship; per-material files under `assets/sfx/footstep/` replaced them.

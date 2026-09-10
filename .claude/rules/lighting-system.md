@@ -8,11 +8,11 @@ paths:
 
 # Lighting
 
-Two independent layers. `world/lighting.rs` runs a BFS flood fill that fills each chunk's
-`light: Box<[u8; 4096]>` — sky level in the upper nibble, block level in the lower, both
-0-15 — and meshing bakes it into the vertex. Visible torch lighting does not come from that
-array: it comes from a GPU storage buffer of point lights that the fragment shaders sample
-directly. Mechanism: `docs/lighting-design.md`.
+Two layers. `world/lighting.rs` BFS-floods sky and block light into each chunk's
+`light: Box<[u8; 4096]>` — sky in the upper nibble, block in the lower, both 0-15 — and
+meshing bakes it into the vertex. Visible torch light does not come from that array but from a
+GPU storage buffer of point lights the fragment shaders sample directly. Mechanism and the
+torch buffer layout: `docs/lighting-design.md`.
 
 ## Adding a light source
 
@@ -22,11 +22,15 @@ directly. Mechanism: `docs/lighting-design.md`.
 3. Add it to `Block::is_light_transparent()` so light passes through it rather than stopping
    at it.
 
-## Torch buffer
+## Sun shadows
 
-`@group(3) @binding(4) var<storage, read> torch_lights: array<vec4<f32>>`, each entry
-`[world_x, world_y, world_z, emission]` with emission normalized to 0-1. Both the chunk and
-character shaders read the same binding.
+`shadow_quality` (bits 1-3 of `volume_origin.w`) sets the DDA step budget: OFF traces nothing,
+LOW 48, MEDIUM 96, HIGH and ULTRA 128, and ULTRA adds a 2-tap PCF that offsets the ray origin
+perpendicular to the sun so the taps straddle voxel boundaries. Rays run only where
+`sun_intensity > 0.02` and `ndotl > 0`. The player's own shadow is the analytic
+`player_shadow_box` uniform (feet position, half width 0.3) that the chunk, character, grass
+and volumetric shaders read; the older voxel-injection path is gone, so do not cast a shadow
+by writing into the volume.
 
 ## Gotchas
 
@@ -41,6 +45,6 @@ character shaders read the same binding.
   voxels, against 0.02 along the normal for terrain. The character copies of the functions are
   prefixed `char_` and drift from the terrain versions if only one is edited.
 - `torch_shadows` (bit 0 of `volume_origin.w`, `settings.rs` default false) decides whether
-  shadow rays are traced at all. Off means unshadowed point lights, which is the cheap path.
+  torch shadow rays are traced at all. Off means unshadowed point lights, the cheap path.
 - The BFS array is still the source for vertex light data and for gameplay light queries.
   Deleting it because torches no longer read it breaks both.
