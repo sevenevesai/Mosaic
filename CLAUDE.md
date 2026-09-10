@@ -1,153 +1,58 @@
-# Mosaic Engine
+# Mosaic — voxel engine (Rust + wgpu)
 
-High-performance voxel engine in Rust + wgpu. ~13K LOC, 8 worker threads, 5 render passes.
-
-## Quick Start
-
-```bash
-cargo build --release
-./target/release/mosaic.exe
-```
-
-**Controls:** WASD move, Space jump/fly-up, Shift fly-down, Ctrl sprint, F fly mode, E inventory, 1-9 hotbar slots, Scroll wheel cycle slots, LMB break, RMB place, F3 debug, F4 body part editor, T day/night speed, Y shadow mode, U shadow debug, V volumetrics quality cycle, P perf log, Esc menu.
+Real-time voxel world: threaded chunk generation and greedy meshing, a 256^3 voxel GI volume,
+a multi-pass renderer. Key bindings: README.md.
 
 ## Commands
 
-| Action | Command |
-|--------|---------|
-| Build | `cargo build --release` |
-| Check | `cargo check 2>&1 \| head -40` |
-| Run | `./target/release/mosaic.exe` |
-| Quick iteration | `taskkill //F //IM mosaic.exe 2>&1; cargo build --release && ./target/release/mosaic.exe` |
-| New world | `rm -rf saves/world1` before running |
+- `cargo check` — compiles clean; the gate for any edit.
+- `cargo test` — 209 `#[test]` functions over world, inventory, player, meshing, lighting.
+- `cargo build --release && ./target/release/mosaic.exe` — smoke test; F3 shows FPS, chunk,
+  triangle and light counts. `rm -rf saves/world1` first when generation or saves changed.
+- Background runs: redirect stderr (`2>session_stderr.log`), read `performance_log.txt`; raw tracing
+  output is thousands of lines.
 
-## Architecture
+## Invariants
 
-```
-src/
-├── app.rs           # Main loop, input handling
-├── lib.rs           # Constants: RENDER_DISTANCE, LOD thresholds, physics
-├── settings_menu.rs # Main menu + tabbed settings UI (~950 LOC)
-├── audio/
-│   └── mod.rs       # 3D spatial audio, material sounds, ambient system
-├── inventory/
-│   ├── item.rs      # Item types (Block + Tool), tags, rarity, stacking, durability
-│   └── inventory.rs # Slots, hotbar, sorting, Quick Stack
-├── renderer/
-│   ├── mod.rs       # GPU state, render passes, day/night cycle
-│   ├── pipeline.rs  # WGSL shaders (chunk, sky, UI, crack overlay)
-│   ├── water.rs     # Ray-marched water (fullscreen post-process)
-│   ├── clouds.rs    # Procedural cloud system
-│   ├── grass/       # Procedural grass rendering (vertex pulling)
-│   ├── character_renderer.rs # Skinned character rendering, bone matrices, voxel GI shadows + torch lighting
-│   ├── inventory_ui.rs # Hotbar/inventory UI rendering (tools: colored rect + letter + durability bar)
-│   ├── gpu_culling.rs # GPU frustum culling + visibility cache
-│   ├── voxel_gi.rs  # Voxel GI: 256^3 volume, DDA shadows, torch buffer (256 lights), VCT, player shadow
-│   ├── ssao.rs      # Screen-space ambient occlusion
-│   ├── aa.rs        # Hybrid Morphological-Temporal AA
-│   ├── volumetrics.rs # Volumetric light shafts: DDA raymarch + bilateral blur + composite
-│   └── chunk_pool.rs # MDI mega-buffers
-├── entity/
-│   ├── mod.rs       # EntityManager, Skeleton, AnimationComponent (looping/clamp), player_entity tracking
-│   └── loader.rs    # FBX loading, body part merging, skeleton binding
-├── world/
-│   ├── mod.rs       # WorldManager, 8 worker threads, chunk lifecycle
-│   ├── meshing.rs   # Binary greedy meshing (~1,800 LOC)
-│   ├── water_flow.rs # Pipe-model water flow simulation (parked)
-│   ├── generation/  # Biomes, caves, terrain, trees, ores
-│   ├── lighting.rs  # BFS flood fill propagation
-│   └── storage/     # Region files, zstd compression
-├── character_styler.rs # Character appearance: outfit, hair, head selection (default: outfit 010)
-└── player/mod.rs    # AABB collision, raycast, 3rd person camera, mining (tools+hardness), inventory
-```
+- Every trace through the voxel volume — sun and torch shadows, AO, volumetrics — uses
+  Amanatides & Woo DDA with `textureLoad` and skips the starting voxel.
+  `textureSampleLevel` interpolates across voxel boundaries and draws lines at every block
+  edge; not skipping the first voxel self-shadows the surface.
+- Quality flags share `volume_origin.w`: bit 0 torch shadows, bits 1-3 shadow, bits 4-6 AO;
+  volumetrics keeps its own in `screen_params.z`. A new field must claim unused bits or it
+  corrupts its neighbours.
+- Front faces are CCW; quads emit triangles 0-2-1 and 0-3-2, and left/right faces reorder
+  UVs to `[uv0, uv3, uv2, uv1]`. Wrong winding makes the face vanish under culling.
+- The atlas is 16 tiles per row: `TILES_PER_ROW` in `src/lib.rs` and
+  `src/world/block_registry.rs` and the literal `16` in the chunk, item and inventory
+  shaders describe one grid; change together.
+- Player block edits go through `priority_task_sender`, which workers check ahead of the
+  generation queue, and remesh synchronously; a generation counter discards mesh
+  results arriving after the chunk changed.
 
-## Key Constants (src/lib.rs)
+## Conventions
 
-```rust
-CHUNK_SIZE: 16           // Blocks per chunk dimension
-RENDER_DISTANCE: 32      // Chunks around player
-LOD_FULL_DETAIL: 12      // Default full mesh distance (configurable via settings)
-WATER_SEA_LEVEL: 32      // Y level for water generation
-```
+- `Block` in `src/world/chunk.rs` owns block IDs; `From<u8>` must round-trip them, since
+  saves store the raw discriminant and reusing an ID rewrites existing worlds.
+- Textures resolve by name: `BlockRegistry` scans `assets/blocks/*.png` sorted into atlas
+  slots (`_torch`, `_water` procedural) and `build_block_textures` maps a block ID to six
+  names. Adding a texture means adding the PNG, not editing a list.
+- World tuning constants (`CHUNK_SIZE` 16, `RENDER_DISTANCE` 32, `LOD_FULL_DETAIL` 12,
+  `WATER_SEA_LEVEL` 32) live in `src/lib.rs`.
 
-## Code Patterns
+## Subsystem docs — path-scoped, load with their source
 
-**Block Placement Priority System**:
-- Player block changes use priority channel (skip generation queue)
-- Modified chunk meshes synchronously for instant feedback
-- Neighbor chunks queued with urgent upload flag
-- `urgent_mesh_uploads` bypasses 16/frame throttle
-
-**Thread Communication**:
-- `crossbeam_channel` for chunk tasks/results
-- `priority_task_sender` for player actions (checked first by workers)
-- Generation counter discards stale mesh results
-
-**Winding Order**: CCW front faces. Triangles: 0-2-1 and 0-3-2. Left/right faces have reordered UVs.
-
-**Render Pipeline Order**: Sky pass -> Opaque geometry (MDI) -> Character entities (w/ voxel GI shadows) -> Block outline -> Crack overlay -> Water pass -> SSAO -> Volumetrics (raymarch + blur + composite) -> Post-process (DoF, AA, Bloom) -> UI
-
-**3rd Person Camera**:
-- Camera orbits behind player: `position = player_center - forward * 10.0`
-- Camera-terrain collision: 10-step ray sampling, min distance 1.0 block
-- `facing_yaw` computed from WASD input relative to camera yaw
-- Animation selected by `MovementState`: Idle(0), Walk(1), Jumping(3), Falling(3 slow+clamp)
-- Jumping/Falling split: Jumping = rising (velocity.y > 0.5), Falling = descending/apex
-- Jump animation clamps at last frame (no loop), falling slows to 0.3x and holds pose
-- Binary search ground contact on landing for pixel-accurate placement
-- Root motion disabled for player (physics drives position)
-
-## Gotchas & Warnings
-
-- **Texture atlas** is 6x6 grid (36 tiles), `tiles_per_row` must match in texture.rs, pipeline.rs, meshing.rs
-- **Foliage blocks** (leaves) render all 6 faces via `add_foliage_blocks()`, excluded from greedy meshing
-- **Foliage neighbors** - Solid blocks render faces toward foliage (check `!nb.is_foliage()`)
-- **Greedy meshing winding** - Left/right faces need UV reorder `[uv0, uv3, uv2, uv1]`
-- **Cross-chunk lighting** - Light propagation requires neighbor chunk access, triggers remesh
-- **Tree placement** - Must check `is_ground_stable_for_tree()` to prevent floating trees
-- **Ore generation** - Noise clustering + hash slot system in `get_ore_or_stone_fast()`
-- **water_flow.rs** exists but is parked - visual flow not currently used
-- **Biomes**: Grasslands (~75%) caves underground only; Cavernous Highlands (~25%) have surface caverns
-- **Player shadow voxels** - Injected AFTER queue.submit() to avoid GPU fill overwrite. 1-frame latency, block-snapping (known limitation)
-- **Crack overlay** - 4-stage procedural texture (256x64), rendered after block outline pass with depth bias -3
-- **Tool items** - Stack size 1, rendered as colored rect + letter (P/A/S/W) + durability bar in hotbar
-- **Character lighting** - Receives sun/moon shadows via voxel GI DDA + torch point-lights from torch buffer (group 3 binding 4); casts via inject_player_shadow (2 voxels)
-- **Shadow quality** - 5 presets (OFF/LOW/MEDIUM/HIGH/ULTRA) control DDA max_steps (0/48/96/128/128+2tap). Packed into `volume_origin.w` bits 1-3. ULTRA forces 2-tap multi-sampling regardless of shadow mode
-- **Shadow DDA** - Uses Amanatides & Woo true voxel traversal with `textureLoad` (integer sampling). Skips starting voxel (one DDA step before loop) to prevent self-shadowing without positional offset. Shadow origin uses minimal `normal * 0.02` offset for float precision only. Only traces for sun-facing faces (`ndotl > 0`)
-- **Torch lighting** - GPU storage buffer of up to 256 light positions (group 3 binding 4). Fragment shader loops over buffer, computes point-light falloff + DDA shadow per torch. Mount-block skip: solid blocks within 1 voxel of light source are ignored (prevents torch's own support block from casting shadow). `torch_count` packed into `sun_color.w` of VoxelVolumeUniform. Both chunk and character shaders use the same system
-
-## Common Tasks
-
-**Add Block Type:**
-1. Add variant to `Block` enum in `world/chunk.rs` (with ID)
-2. Add texture indices in `Block::texture_indices()`
-3. Add to `From<u8>` impl in `world/chunk.rs`
-4. Add texture file to `TEXTURE_FILES` in `renderer/texture.rs`
-5. Update `tiles_per_row` if atlas needs expansion (texture.rs, pipeline.rs, meshing.rs)
-6. For foliage: add to `is_foliage()`, for light emitters: add to `light_emission()`
-
-**Add Setting:** See `.claude/rules/settings-menu.md` for the pattern.
-
-**Modify Terrain:** Edit `world/generation/` - `TerrainGenerator` handles height, caves, ores, biomes.
-
-## Verification
-
-```bash
-cargo check                    # Compilation errors
-cargo test                     # Run 192 unit tests
-cargo build --release          # Full build
-./target/release/mosaic.exe    # Manual smoke test
-```
-
-Check F3 overlay for: FPS, chunk count, triangle count, light levels.
-
-## Dependencies
-
-Core: wgpu 0.19, winit 0.29, glam 0.25, noise 0.9, rayon 1.8, crossbeam-channel 0.5, zstd 0.13, rodio 0.19
-
-## Session Checklist
-
-1. Read this file
-2. Run `cargo check` to verify build state
-3. Test current build before changes
-4. Check `.claude/rules/` for detailed system docs if needed
+| Area | Rule (`.claude/rules/`) | Mechanism (docs/) |
+|---|---|---|
+| Meshing, LOD | meshing-system.md | |
+| Light, torches | lighting-system.md | lighting-design.md |
+| Ambient occlusion | ao-system.md | ambient-occlusion-design.md |
+| Volumetrics | volumetrics-system.md | volumetrics-design.md |
+| Day/night | day-night-cycle.md | |
+| Water | water-rendering.md | |
+| Grass | grass-system.md | |
+| Audio | audio-system.md | |
+| Settings menu | settings-menu.md | |
+| Save format | world-persistence.md | |
+| Tests, benches | testing.md | |
+| Perf logging | performance-logging.md | |
