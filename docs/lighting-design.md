@@ -27,6 +27,10 @@ GPU (chunk and character fragment shaders):
   -> distance cull -> falloff -> normal weighting -> DDA shadow -> flicker -> accumulate
 ```
 
+The buffer is declared `@group(3) @binding(4) var<storage, read> torch_lights: array<vec4<f32>>`
+and each entry is `[world_x, world_y, world_z, emission]` with emission normalized to 0-1. The
+chunk and character shaders read the same binding.
+
 Two collection paths exist: the CPU fill (`fill_voxel_cache`) returns a `light_sources` vector
 that the caller uploads, while the GPU fill (`gpu_fill_volume`) has no CPU-side voxel data, so
 `collect_torch_positions_from_chunks()` scans chunks separately. A change to emissive
