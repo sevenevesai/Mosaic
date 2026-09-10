@@ -1,44 +1,47 @@
-# Testing & Benchmarking
+---
+paths:
+  - "tests/**"
+  - "benches/**"
+---
 
-192 unit/integration tests across core systems.
+# Tests and benchmarks
+
+209 `#[test]` functions: 116 under `src/world` (19 meshing, 11 lighting, 8 storage), 44
+inventory, 24 player, 8 renderer, 17 in `tests/world_integration.rs`.
 
 ## Commands
 
 ```bash
-cargo test                     # All 192 tests
-cargo test world::             # World module (113 tests incl. hardness, preferred_tool)
-cargo test inventory::         # Inventory module (44 tests incl. tools, durability, persistence)
-cargo test player::            # Player module (18 tests)
-cargo test meshing             # Meshing tests (22 tests)
-cargo test lighting            # Lighting tests (12 tests)
-cargo test test_tool           # Tool-specific tests (12 tests)
-cargo test test_block_hardness # Block hardness tests (4 tests)
-cargo bench                    # All benchmarks
-cargo bench shadow             # Shadow DDA benchmarks (algorithm comparison, quality presets)
+cargo test                     # everything
+cargo test world::             # world module
+cargo test meshing             # meshing only
+cargo bench                    # all benchmarks
+cargo bench shadow             # shadow DDA: algorithm comparison and quality presets
 ```
 
-## Coverage
+## Coverage boundary
 
-Well tested: meshing, lighting, serialization, inventory (incl. tools), physics, generation, block hardness.
-Not unit-testable: GPU shaders, renderer (need visual regression tests).
+Meshing, lighting, serialization, inventory (tools, durability, persistence), physics,
+generation and block hardness are covered. GPU shaders and the renderer are not unit-testable
+here; changes there need a visual check in the running game, so do not read a green
+`cargo test` as evidence that a shader change is correct.
 
-## Test Fixtures
+## Fixtures
 
-- `Chunk::new_solid(block)` - All same type
-- `Chunk::new_sparse(seed, occupancy)` - Random fill
-- `Chunk::new_checkerboard()` - Worst case for meshing
+`Chunk::new_solid(block)` for a uniform chunk, `Chunk::new_sparse(seed, occupancy)` for random
+fill, `Chunk::new_checkerboard()` for the meshing worst case — no run is longer than one
+block, so greedy merging degenerates.
 
-## Benchmark Reference (RTX 2080 Ti)
+## Recorded benchmark times (RTX 2080 Ti)
+
+Reference points for spotting a regression, not thresholds; they were measured on a past run
+and are not re-verified here.
 
 | Benchmark | Time |
-|-----------|------|
-| meshing/solid_chunk | ~31us |
-| meshing/sparse_20pct | ~170us |
-| meshing/checkerboard | ~775us |
-| meshing/lod_sparse/Full | ~157us |
-| meshing/lod_sparse/Half | ~58us |
-| meshing/lod_sparse/Quarter | ~6.5us |
-| shadow/algorithm/naive_112steps (500 rays) | ~940us |
-| shadow/algorithm/dda_128steps (500 rays) | ~325us |
-| shadow/algorithm/dda_96steps (500 rays) | ~248us |
-| shadow/algorithm/dda_48steps (500 rays) | ~131us |
+|---|---|
+| meshing/solid_chunk | ~31 us |
+| meshing/sparse_20pct | ~170 us |
+| meshing/checkerboard | ~775 us |
+| meshing/lod_sparse Full / Half / Quarter | ~157 / ~58 / ~6.5 us |
+| shadow/algorithm naive_112steps (500 rays) | ~940 us |
+| shadow/algorithm dda_128 / dda_96 / dda_48 | ~325 / ~248 / ~131 us |

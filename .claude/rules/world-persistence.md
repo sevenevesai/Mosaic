@@ -1,33 +1,40 @@
-# World Persistence System
+---
+paths:
+  - "src/world/storage/**"
+  - "src/world/item_persistence.rs"
+  - "src/player/persistence.rs"
+---
 
-Region-based chunk storage with zstd compression. 8 tests.
+# World persistence
 
-## Structure
+Region-based chunk storage with zstd compression. 8 tests under `src/world/storage`.
 
 ```
 saves/world1/
-├── world.dat              # Metadata: magic "WDAT", seed, spawn, timestamps
-└── region/
-    └── r.{x}.{y}.{z}.region  # 32^3 chunks per file, 4KB sectors, zstd compressed
+  world.dat                  # magic "WDAT", seed, spawn, timestamps
+  region/r.{x}.{y}.{z}.region  # 32^3 chunks per file, 4 KB sectors, zstd
 ```
 
-## Key Files
+| File | Role |
+|---|---|
+| `storage/mod.rs` | `WorldStorage`: the API, plus an LRU of open region files |
+| `storage/region.rs` | `RegionFile`: sector allocation, read and write |
+| `storage/chunk_io.rs` | serialization: 4096 blocks + 4096 light + optional water |
+| `storage/dirty_tracker.rs` | `DirtyChunkTracker` |
 
-- `storage/mod.rs` - `WorldStorage`: main API, LRU cache (16 regions max)
-- `storage/region.rs` - `RegionFile`: read/write region files
-- `storage/chunk_io.rs` - Serialization: [4096 blocks + 4096 light + optional water], zstd level 3
-- `storage/dirty_tracker.rs` - `DirtyChunkTracker`: modified chunk tracking
-
-## How It Works
-
-- `set_block()` automatically marks chunk dirty
-- Workers check disk before generating (load if exists, generate if not)
-- `save_all()` called in `WorldManager::drop()` - only dirty chunks written
-- Sector reuse: if chunk fits in same space, reuses allocation
+`set_block()` marks the chunk dirty; workers check disk before generating and only dirty
+chunks are written, from `WorldManager::drop()` via `save_all()`. A chunk that still fits its
+existing sectors reuses them rather than reallocating.
 
 ## Gotchas
 
-- **Region corruption**: Logged, chunk regenerated from seed
-- **Disk full**: Error propagated, unsaved chunks remain in memory
-- **LRU cache**: 16 regions max prevents file handle exhaustion
-- **zstd level 3**: ~3:1 ratio, <1ms per chunk
+- The region-file LRU is capped at 16 entries. Raising it risks exhausting file handles; the
+  cap is why long sessions across a wide world stay stable.
+- `ZSTD_LEVEL` is 3 (`chunk_io.rs`): about 3:1 and under a millisecond per chunk. Higher
+  levels cost frame time on the save path for little size gain.
+- A corrupt region is logged and the chunk is regenerated from the seed, so corruption shows
+  up as terrain silently reverting, not as a crash.
+- On a full disk the error propagates and unsaved chunks stay in memory — they are lost on
+  exit, so treat a write failure as data loss, not a warning.
+- Chunk payload layout is positional. Adding a field means bumping the header `version` in
+  `chunk_io.rs`; without it, old saves deserialize into garbage blocks.
