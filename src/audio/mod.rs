@@ -6,7 +6,7 @@
 //! ## Sound Assets
 //!
 //! Place WAV files in `assets/sfx/`:
-//! ```
+//! ```text
 //! assets/sfx/
 //! ├── footstep/
 //! │   ├── grass-1.wav, grass-2.wav
