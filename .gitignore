@@ -125,8 +125,11 @@ Procedural Terrain*.md
 
 # Docs folder (internal feature plans, prompts, research).
 # Subsystem design docs are the exception: CLAUDE.md and the rules link to them.
+# README images are the other; *.png above would hide them too.
 /docs/*
 !/docs/*-design.md
+!/docs/media/
+!/docs/media/*.png
 
 # Claude skills (internal tooling)
 .claude/skills/
